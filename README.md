@@ -142,7 +142,7 @@ To run batch analysis:
 
 ```bash
 cd review_iclr_bench
-python iclr_analysis.py --num_reviews 500  --batch_size 100 --num_fs_examples 0 --num_reflections 5 --temperature 0.1 --num_reviews_ensemble 5
+python iclr_analysis.py --num_reviews 500  --batch_size 100 --num_fs_examples 1 --num_reflections 5 --temperature 0.1 --num_reviews_ensemble 5
 ```
 
 ## Making your own Template
