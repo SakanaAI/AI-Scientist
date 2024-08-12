@@ -45,7 +45,7 @@ We use the following environment variables for the different API providers for d
 
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`
 
-Our code can also optionally use the Semantic Scholar API Key (`S2_API_KEY`), though in principle it should work without it.
+Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher throughput [if you have one](https://www.semanticscholar.org/product/api), though in principle it should work without it.
 
 Be sure to provide the key for the model used for your runs, e.g.
 
