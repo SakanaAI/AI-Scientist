@@ -1,7 +1,7 @@
 <h1 align="center">
   <a href="https://github.com/luchris429/ai_scientist/blob/main/docs/logo_2.png">
     <img src="docs/logo_2.png" width="215" /></a><br>
-  <b>The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery</b><br>
+  <b>The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery 🧑‍🔬</b><br>
 </h1>
 
 <p align="center">
