@@ -63,7 +63,7 @@ python data/shakespeare_char/prepare.py
 python data/text8/prepare.py
 ```
 
-### Create baseline runs (machine dependent)
+#### Create baseline runs (machine dependent)
 
 ```
 # Set up NanoGPT baseline run
@@ -71,6 +71,11 @@ python templates/nanoGPT/experiment.py --out_dir run_0
 
 # Make sure plotting works
 python templates/nanoGPT/plot.py
+```
+
+#### Create NanoGPT_lite baseline run. We use this for sanity-checking
+```
+python templates/nanoGPT_lite/experiment.py --out_dir run_0
 ```
 
 ### Setup 2D Diffusion
@@ -93,10 +98,6 @@ python templates/2d_diffusion/plot.py
 # Set up Grokking baseline run
 python templates/grokking/experiment.py --out_dir run_0
 python templates/grokking/plot.py
-
-# Set up NanoGPT_lite baseline run. We use this for sanity-checking
-python templates/nanoGPT_lite/experiment.py --out_dir run_0
-
 ```
 
 
