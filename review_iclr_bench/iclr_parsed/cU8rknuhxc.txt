@@ -1,0 +1,4260 @@
+# LEARNING MORE SKILLS THROUGH
+## OPTIMISTIC EXPLORATION
+
+**DJ Strouse[∗], Kate Baumli, David Warde-Farley, Vlad Mnih, Steven Hansen[∗]**
+DeepMind
+{strouse, baumli, dwf, vmnih, stevenhansen}@google.com
+
+ABSTRACT
+
+Unsupervised skill learning objectives (Eysenbach et al., 2019; Gregor et al.,
+2016) allow agents to learn rich repertoires of behavior in the absence of extrinsic
+rewards. They work by simultaneously training a policy to produce distinguishable
+latent-conditioned trajectories, and a discriminator to evaluate distinguishability
+by trying to infer latents from trajectories. The hope is for the agent to explore
+and master the environment by encouraging each skill (latent) to reliably reach
+different states. However, an inherent exploration problem lingers: when a novel
+state is actually encountered, the discriminator will necessarily not have seen
+enough training data to produce accurate and confident skill classifications, leading
+to low intrinsic reward for the agent and effective penalization of the sort of
+exploration needed to actually maximize the objective. To combat this inherent
+pessimism towards exploration, we derive an information gain auxiliary objective
+that involves training an ensemble of discriminators and rewarding the policy for
+their disagreement. Our objective directly estimates the epistemic uncertainty
+that comes from the discriminator not having seen enough training examples,
+thus providing an intrinsic reward more tailored to the true objective compared
+to pseudocount-based methods (Burda et al., 2019). We call this exploration
+bonus discriminator disagreement intrinsic reward, or DISDAIN. We demonstrate
+empirically that DISDAIN improves skill learning both in a tabular grid world (Four
+Rooms) and the 57 games of the Atari Suite (from pixels). Thus, we encourage
+researchers to treat pessimism with DISDAIN.
+
+1 INTRODUCTION
+
+Reinforcement learning (RL) has proven itself capable of learning useful skills when clear taskspecific rewards are available (OpenAI et al., 2019a;b; Vinyals et al., 2019). However, truly intelligent
+agents should, like humans, be able to learn even in the absence of supervision in order to acquire
+repurposable task-agnostic knowledge. Such unsupervised pre-training has seen recent success in
+language (Radford et al., 2019; Brown et al., 2020) and vision (Chen et al., 2020a;b), but its potential
+has yet to be fully realized in the learning of behavior.
+
+The most promising class of algorithms for unsupervised skill discovery is based upon maximizing the
+_discriminability of skills represented by latent variables on which a policy is conditioned. Objectives_
+are typically derived from variational approximations to the mutual information between latent
+variables and states visited (Gregor et al., 2016; Eysenbach et al., 2019; Warde-Farley et al., 2019;
+Hansen et al., 2020; Baumli et al., 2021), employing a learned parametric skill discriminator. Both
+the policy and discriminator have the objective of strong predictive performance by the discriminator,
+though the discriminator is trained with supervised learning rather than RL. The end result is a policy
+capable of producing consistently distinguishable behavioral motifs, or “skills.” These skills can be
+evaluated zero-shot, fine-tuned, or composed in a hierarchical RL setup to maximize task reward
+when one is introduced (Eysenbach et al., 2019; Hansen et al., 2020). Unsupervised skill learning
+objectives can also be maximized in conjunction with task reward, in order to promote robustness of
+learned behavior to environment perturbations (Mahajan et al., 2019; Kumar et al., 2020).
+
+_∗equal contribution_
+
+
+-----
+
+The degree to which unsupervised skill discovery methods are useful in such downstream applications
+depends on how many skills they are able to learn. Indeed, Eysenbach et al. (2019) showed that
+as more skills are learned, the performance obtained using the learned skills in a hierarchical
+reinforcement learning setup improves. In follow up work, Achiam et al. (2018) showed that methods
+like DIAYN can struggle to learn large numbers of skills and proposed gradually increasing the
+number of skills according to a curriculum to make skill discovery easier.
+
+The aim of this work is to improve the ability of skill discovery methods to learn more skills. We
+highlight an exploration problem intrinsic to the entire class of variational skill discovery algorithms
+which can inhibit discovery of new skills. During skill learning, the policy will necessarily need to
+explore new states of the environment. The discriminator must then make latent predictions for states
+it has never seen before, resulting in incorrect and/or low-confidence predictions. The policy will in
+turn be penalized for this poor discriminator performance, and discouraged from seeking out new
+states. We refer to this problem as “pessimistic exploration” and describe it further in section 2.
+
+To motivate our solution, we argue that it is important for the policy to distinguish between two
+kinds of uncertainty in the discriminator - aleatoric uncertainty that comes from the policy producing
+similar trajectories for different skills, and epistemic uncertainty that comes from a lack of training
+data. The former indicates poor policy performance, but the latter is in fact desirable, and serves as a
+signal for potential discriminator learning. Unfortunately, skill discovery algorithms treat both types
+of uncertainty the same and thus ignore this important signal. We propose to capture it.
+
+Our primary contribution, which we present in section 3, is an exploration bonus tailored to skill
+discovery algorithms, designed to overcome pessimistic exploration. We identify states of high
+epistemic uncertainty in the discriminator by training an ensemble of discriminators and measuring
+their disagreement. We call this exploration bonus discriminator disagreement intrinsic reward, or
+**DISDAIN. Intuitively, the ensemble members may disagree in novel states, but must come to agree**
+in frequently visited ones. More formally, we derive DISDAIN from a Bayesian perspective that 1)
+represents the posterior over discriminator parameters using an ensemble, and 2) encourages the policy
+to maximize information gain (i.e. reduce uncertainty) about the parameters of the discriminator.
+In section 4, we demonstrate empirically that DISDAIN improves skill learning over unbonused
+skill discovery algorithms in both an illustrative grid world (Four Rooms, Sutton et al. (1999)) and
+the Atari 2600 learning environment (ALE, Bellemare et al. (2013)) more so than augmenting with
+popular exploration bonuses not tailored to skill discovery.
+
+2 UNSUPERVISED SKILL LEARNING THROUGH VARIATIONAL INFOMAX
+
+2.1 INTRODUCTION
+
+We now formalize our setting of interest: unsupervised skill learning through variational information
+maximization (Gregor et al., 2016; Eysenbach et al., 2019; Warde-Farley et al., 2019; Hansen et al.,
+2020; Baumli et al., 2021). We consider a Markov decision process (MDP), defined by the tuple
+_M = (S, A, pE, ρ, r, γ), where S and A are state and action spaces, respectively, the environment_
+dynamics pE(s[′] _| s, a) specifies the probability of transitioning to state s[′]_ _∈S when taking action_
+_a ∈A in state s ∈S, ρ(s) denotes the probability of starting an episode in state s, and γ ∈_ [0, 1) is a
+discount factor. Since we focus on unsupervised training, we ignore the environmental reward r.
+
+Our agents seek to learn a repertoire of skills, indexed by the latent variable Z and represented
+by the policy πθ(a _s, z), which is parameterized by θ and maps from states and latent variables_
+_|_
+to distributions over actions. The latent variables are sampled z ∼ _p(Z) at the beginning of each_
+trajectory and then fixed, so each z represents a temporally extended behavior. The skill trajectory
+length T may differ from the episode length, thus a new skill might be resampled within an episode.
+
+For conciseness, we will denote trajectories sampled from the policy by τ ∼ _π(z) when conditioning_
+on a particular skill z, and τ ∼ _π when collecting trajectories across skills. To simplify our_
+discussion, and because it is the most common case in practice, we will assume that Z is categorical
+with cardinality NZ, although much of the discussion carries over to continuous Z.
+
+A large and growing class of objectives for unsupervised skill discovery are derived from maximizing
+the mutual information between the latent skill Z and some feature of the resulting trajectories O(τ ):
+
+(θ) _I(Z, O) = H(Z)_ _H(Z_ _O) = Ez_ _p(z),τ_ _π(z)[log p(z_ _o(τ_ )) log p(z)] . (1)
+_F_ _≡_ _−_ _|_ _∼_ _∼_ _|_ _−_
+
+
+-----
+
+For example, variational intrinsic control (VIC, Gregor et al. (2016)) maximizes I(Z; S0, ST ) - the
+mutual information between the skill and initial and final states (oT = (s0, sT )).[1] Diversity is all
+you need (DIAYN, Eysenbach et al. (2019)), on the other hand, maximizes I(Z, S) - the mutual
+information between the skill and each state along the trajectory (ot = st for t ∈ 1 : T ). Intuitively,
+VIC produces skills that vary in the destination reached (without regard for the path taken), while
+DIAYN produces skills that vary in the path taken (with less emphasis on the destination reached).
+
+In practice, maximizing equation 1 is not straightforward, because it requires calculating the conditional distribution p(Z | O). In general, it is necessary to estimate it with a learned parametric model
+_qφ(Z_ _O). We refer to this model as the discriminator, since it is trained to discriminate between_
+_|_
+skills. Fortunately, replacing p with q still yields a lower bound on F(θ) (Barber and Agakov, 2004),
+and we may instead maximize the proxy objective _F[˜](θ):_
+
+(θ) (θ) = Ez _p(z),τ_ _π(z)[log qφ(z_ _o(τ_ )) log p(z)] . (2)
+_F_ _≥_ _F[˜]_ _∼_ _∼_ _|_ _−_
+
+Optimizing _F[˜](θ) with respect to the policy parameters θ corresponds to RL on the reward:_
+
+_rskill = log qφ(z | o) −_ log p(z) . (3)
+
+Since the intent is for the agent to learn a full repertoire of skills, the skill prior p(z) is typically
+fixed to be uniform (Eysenbach et al., 2019; Achiam et al., 2018; Baumli et al., 2021), in which
+case log p(z) = log NZ. If the discriminator simply ignores the trajectory and guesses skills
+_−_
+uniformly as well, then log qφ(z | o) = − log NZ and the reward will be zero. If the discriminator
+instead guesses perfectly, then log qφ(z _o) = 0, and the reward will be log NZ_ . More generally, the
+_|_
+expected reward is an estimate of the logarithm of the effective number of skills. Thus, measuring the
+reward in bits (i.e. using log2 in equation 3), we can estimate the number of skills learnt as:
+
+_nskills = 2[E][[][r][skill][]]._ (4)
+
+We adopt this quantity as our primary performance metric for our experiments.
+
+To make sure the bound in equation 2 is as tight as possible, the discriminator qφ(Z _O) must also_
+_|_
+be fit to its target p(Z | O) through supervised learning (SL) on the negative log likelihood loss:
+
+_L(φ)_ Ez _p(z),τ_ _π(z)[log qφ(z_ _o(τ_ ))] . (5)
+_≡−_ _∼_ _∼_ _|_
+
+The loss is minimized, and the bound in equation 2 tight, when qφ(Z _O) = p(Z_ _O)._
+_|_ _|_
+
+The joint optimization of _F[˜](θ) by RL and L(φ) by SL forms a cooperative communication game_
+between policy and discriminator. The agent samples a skill z ∼ _p(Z) and generates the “message”_
+_τ ∼_ _π(z). The discriminator receives the message τ and attempts to decode the original skill z._
+When the policy produces trajectories for different skills that do not overlap in the features O(τ ),
+the discriminator will easily learn to label trajectories, and when the discriminator makes accurate
+and confident predictions, the reward in equation 3 will be high. Ideally, the end result is a policy
+exhibiting a maximally diverse set of skills. This joint-training system is depicted in Figure 2a.
+
+2.2 PESSIMISTIC EXPLORATION IN UNSUPERVISED SKILL DISCOVERY
+
+A conflict arises between the exploration necessary for skill diversification and rewards supplied
+by an imperfect discriminator, trained only on past policy-generated experience. Without data (and
+in the absence of perfect generalization), the discriminator is likely to make poor predictions when
+presented with trajectories containing previously unseen states, resulting in low reward for the policy.
+Importantly, this penalization occurs regardless of whether the policy produces distinguishable
+skill-conditioned trajectories if the current discriminator is a locally poor approximation to p(Z | O)
+for a region of state space represented in O. We note that this is distinct from issues of pessimism
+in exploration that arise more generally, including with stationary reward functions (Osband et al.,
+2019), wherein naive exploration strategies fail to adequately position an agent for further acquisition
+of information. In the scenario we examine here, the agent’s sole source of supervision directly
+sabotages the learning process when the discriminator extrapolates poorly.
+
+_H(Z1More accurately, Gregor et al. (2016) | S0, ST ). However, it has subsequently become common not to condition the skill sampling distribution conditioned on initial state and used I(Z, ST | S0) = H(Z | S0) −_
+on s0 (Eysenbach et al., 2019), in which case H(Z | S0) = H(Z) and I(Z, ST | S0) = I(Z; S0, ST ).
+
+
+-----
+
+_τ_ _π (z1)_ _τ_ _π (z2)_
+
+_τ_ _π (z1)_
+_∼_
+
+_τ_ _π (z2)_
+_∼_
+
+
+(b) Aleatoric uncertainty arises when
+
+_q(Z | τ_ ) = z1 vs z2?
+
+different skills visit similar states.
+
+
+_τ_ _π (z1)_
+_∼_
+
+(c) Epistemic uncertainty arises
+
+_q(Z | τ_ ) = z1 vs z2?
+
+from exploring novel states.
+
+
+(a) Past trajectories.
+
+
+Figure 1:Buffer of previously The pessimistic exploration problemAleatoric uncertainty is created by . Because skill discovery objectives do not distin-Epistemic uncertainty is created by
+
+seen states. indistinguishable states for different skills. exploring novel states.
+
+guish between aleatoric and epistemic uncertainty, they penalize exploration.
+
+We argue that in order to overcome this inherent pessimism, we must distinguish between two kinds
+of uncertainty in the discriminator: aleatoric uncertainty (figure 1b) that is due to the policy producing
+overlapping skills (i.e. high H(Z | O)), and epistemic uncertainty (figure 1c) that is due to a lack of
+training data (i.e. poor match between qφ(Z _O) and p(Z_ _O)). Naively, both kinds of uncertainty_
+_|_ _|_
+contribute to low reward for the policy (equation 3), but while reduction of aleatoric uncertainty
+requires changes by the policy, epistemic uncertainty can be reduced (and thus reward increased)
+simply by creating more data (i.e. visiting the same states again). Thus, we argue that we should
+“reimburse” the policy for epistemic uncertainty in the discriminator, and in fact encourage the policy
+to visits states of high epistemic uncertainty.
+
+Put another way, when the policy only maximizes the reward of equation 3, it maximizes the lower
+bound _F[˜](θ) ≤F(θ) without regard for its tightness, despite that a looser bound means a more_
+pessimistic reward. The job of keeping the bound tight is left entirely to the discriminator (equation 5).
+By incentivizing the policy to visit states of high epistemic uncertainty, valuable training data is
+provided to the discriminator that allows it to better approximate its target and close the gap between
+_F˜(θ) and F(θ). In this way, we encourage the policy to help keep the bound_ _F[˜](θ) ≤F(θ) tight._
+
+In the next section, we formalize the intuitions outlined in the last two paragraphs. The result is an
+exploration bonus measured as the disagreement among an ensemble of discriminators.
+
+3 DISDAIN: DISCRIMINATOR DISAGREEMENT INTRINSIC REWARD
+
+To formalize the notion of discriminator uncertainty, we take a Bayesian approach and replace the
+point estimate of discriminator parameters φ with a posterior p(φ). Maintaining a posterior allows us
+to quantify the information gained about those parameters. Specifically, we will incentivize the policy
+to produce trajectories in which observing the paired skill label z provides maximal information
+about the discriminator parameters φ:
+
+_I(Z; Φ | O) = H(Z | O) −_ _H(Z | O, Φ) ._ (6)
+
+Rewriting the entropies as expectations over trajectories, we have:
+
+_I(Z; Φ_ _O) = Eτ_ _π_ _H_ _p(φ) qφ(Z_ _o(τ_ )) dφ _p(φ) H[qφ(Z_ _o(τ_ ))] dφ (7)
+_|_ _∼_ _|_ _−_ _|_
+
+ Z  Z 
+
+where we have used that p(φ) does not depend on the present trajectory and so p(φ | o(τ )) = p(φ).
+Note that unlike in equations 2 and 5, the expectation over trajectories is not skill-conditioned. The
+marginalization over Z happens in the entropy and is over the discriminator’s posterior qφ(z _s)_
+_|_
+rather than the agent’s prior p(z). This is because the discriminator parameters Φ are now part of the
+probabilistic model and do not just enter through a variational approximation.
+
+How should we represent the posterior over discriminator parameters p(φ)? There is considerable work in Bayesian deep learning that offers possible answers, but here we take an ensemble
+approach (Seung et al., 1992; Lakshminarayanan et al., 2017). We train N discriminators with
+parameters φi for the i[th] discriminator. The discriminators are independently initialized and in theory
+could also be trained on different mini-batches, though in practice, we found it both sufficient and
+
+
+-----
+
+|𝜏 = s ...s 0 T|r= log q(z|o(𝜏)) - log p(z)|
+|---|---|
+
+|Skill Discriminator Skill Prior q(Z|o(𝜏)) z ~ p(Z) Repeat every T steps 𝜏 = s ...s r= log q(z|o(𝜏)) - log p(z) z 0 T|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+|||||Skill Prior z ~ p(Z)|||
+||||||||
+||||||z||
+||||||||
+|s Environment t Skill-Conditioned Policy p(s| s,a) a ~ π(s, z) E t t-1 t a t t t|||||||
+|Environment p(s| s,a) E t t-1 t|s t||Skill-Conditioned Policy a ~ π(s, z) t t||||
+||a t||||||
+||||||||
+
+
+(a) Skill discovery algorithms. (b) DISDAIN.
+
+Figure 2: Methods. (a) The skill discovery process, where joint optimization of a skill-conditioned
+policy and skill discriminator ensure reliable and distinct behavior for each skill. (b) DISDAIN:
+disagreement between an ensemble of skill discriminators informs exploration.
+
+simpler to train them on the same mini-batches, as others have also found (Osband et al., 2016). The
+posterior p(φ) is then represented as a mixture of point masses at the φi:
+
+
+_p(φ) = [1]_
+
+
+_δ(φ_ _φi) ._ (8)
+_−_
+_i=1_
+
+X
+
+
+Substituting the posterior in equation 8 into equation 7, we have:
+
+
+_−_ _N[1]_
+
+
+_I(Z; Φ_ _O) = Eτ_ _π_
+_|_ _∼_
+
+
+(9)
+
+
+_qφi_ (Z _o(τ_ ))
+_|_
+_i=1_
+
+X
+
+
+_H[qφi_ (Z _o(τ_ ))]
+_|_
+_i=1_
+
+X
+
+
+Maximizing equation 9 with RL corresponds to adding the following auxiliary reward to the policy:
+
+
+_−_ _N[1]_
+
+
+_H[qφi_ (Z _ot)] ._ (10)
+_|_
+_i=1_
+
+X
+
+
+_rDISDAIN(t) ≡_ _H_
+
+
+_qφi_ (Z _ot)_
+_|_
+_i=1_
+
+X
+
+
+In words, this is the entropy of the mean discriminator minus the mean of the entropies of the
+discriminators. By Jensen’s inequality, entropy increases under averaging, and thus rDISDAIN ≥ 0.
+
+For trajectories on which there has been ample training data for the discriminators, the ensemble
+members should agree and qφi (z _o)_ _qφj_ (z _o) for all i, j. Thus the two terms in equation 10 will_
+_|_ _≈_ _|_
+be equal and this reward will vanish. For states of high discriminator disagreement, however, this
+reward will be positive, encouraging exploration. Therefore, we call equation 10 the Discriminator
+Disagreement Intrinsic reward, or DISDAIN (figure 2b).
+
+DISDAIN is simple to calculate for discrete Z, as is common in the relevant literature (Gregor et al.,
+2016; Eysenbach et al., 2019; Achiam et al., 2018; Baumli et al., 2021). DISDAIN augments any
+discriminator-based unsupervised skill learning algorithm with two changes. First, an ensemble
+of discriminators is trained instead of just one, and rskill should be calculated using the ensembleaveraged prediction qφ(Z | O) = _N[1]_ _Ni=1_ _[q][φ][i]_ [(][Z][ |][ O][)][. Second, the DISDAIN reward is combined]
+
+with rskill, which we do through simple addition with a tunable multiplier λ. Pseudocode for DISDAIN
+is provided in Algorithm 1. With N = 1P and λ = 0, this is standard unbonused skill discovery.
+
+4 EXPERIMENTS
+
+We validate DISDAIN by testing its ability to increase skill learning in an illustrative grid world
+(Four Rooms) as well as a more challenging pixel-based setting requiring function approximation
+(the 57 Atari games of the Arcade Learning Environment (Bellemare et al., 2013)). In addition to
+comparing performance to unbonused skill learning, we also compare to using popular off-the-shelf
+exploration bonuses that are not tailored to skill discovery. In Four Rooms, we compare to using
+count-based bonuses, which are known to perform well in these settings (Brafman and Tennenholtz,
+2002). In Atari, where count-based bonuses become untenable due to the enormous state space, we
+compare to random network distillation (RND; Burda et al. (2019)), one of the most commonly used
+
+
+-----
+
+**Algorithm 1: Skill discovery with DISDAIN**
+
+**Input: policy πθ, discriminator ensemble {qφi** _}i[N]=1[, skill features][ O][(][τ]_ [)][, skill distribution][ p][(][Z][)][,]
+skill trajectory length T, DISDAIN reward weight λ
+**while not converged do**
+
+|Col1|Reset environment, sampling initial state s 0 while episode not ended do Sample skill, z p(Z) ∼ Sample trajectory of length T from s, τ π(z) 0 ∼ Form average discriminator from ensemble, q = N1 PN q φ i=1 φi r = log q φ(z O(τ)) −log p(z) skill | r = H[q φ( O(τ))] N1 PN H[q φi( O(τ))] DISDAIN · | − i=1 · | r = r + λr skill DISDAIN Update θ with RL to maximize r Update q N with SL to maximize log q (z O(τ)) { φi}i=1 φi | s = s 0 T|
+|---|---|
+
+
+
+pseudo-count based methods (Bellemare et al., 2016). In addition, we validate that any advantages of
+DISDAIN are not purely due to using an ensemble of discriminators by evaluating an ablation that
+includes the same ensemble but removes the DISDAIN reward (i.e. Algorithm 1 with λ = 0). In all
+cases, our primary metric for comparison is the effective number of skills learnt, nskills (equation 4).
+
+The effective number of skills is just an interpretable transformation of the mutual information
+objective shared by a large number of unsupervised skill learning algorithms (e.g. Gregor et al.
+(2016); Achiam et al. (2018); Eysenbach et al. (2019); Hansen et al. (2020)). As such, the fact that
+DISDAIN helps better maximize this objective should be worthwhile in its own right, considering the
+various use cases that motivated this objective in the existing literature. That said, we recognize that
+it is not obvious what utility comes with increasing the number of effective skills. To address this, we
+also measure three surrogates of skill utility: downstream goal achievement, unsupervised reward
+attainment, and unsupervised state coverage.
+
+**Distributed training** We use a distributed actor-learner setup similar to R2D2 (Kapturowski et al.,
+2019), except we do not use replay prioritization or burn-in, and Q-value targets are computed with
+Peng’s Q(λ) (Peng and Williams, 1994) rather than n-step double Q-learning. In all cases, we found
+it important to train separate Q-functions for the skill learning rewards and exploration bonuses
+(DISDAIN, RND, or count-based). This follows from Burda et al. (2019), who also found that
+this setup helped stabilize learning. Unlike that work, we need to specify a value target for each
+Q-function, which we take to be the value of the action that maximizes the composite value function,
+where the two values are added with a tunable weight λ. The discriminator is trained on the same
+mini-batches sampled from replay to train the Q-functions. For Atari experiments, the Q-networks
+process batches of state, skill, and action tuples to produce scalar Q-values for each, and the ResNet
+state embedding network used in Espeholt et al. (2018) is shared by both of the Q-networks and
+discriminator. For the Four Rooms grid world, we use tabular Q-functions and discriminators. Further
+implementation details can be found in appendix A.
+
+**Skill discovery** Our skill discovery baseline deviates slightly from prior work in order to make
+it representative of the skill discovery literature as a whole. We utilize a simple discriminator that
+receives only the final state of a trajectory (so O(τ ) = sT ), omitting the state-conditional prior and
+action entropy bonuses used in specific algorithms (Gregor et al., 2016; Eysenbach et al., 2019).
+
+**Hyperparameters** Most of the RL hyperparameters were not tuned, but rather taken from standard
+values known to be reasonable for Peng’s Q(λ). The skill discovery specific hyperparameters were
+tuned for the basic algorithm without exploration bonuses, and then reused in all conditions. Our
+RND implementation was first tuned without skill learning to achieve Atari performance competitive
+with the original paper. For all exploration bonuses (DISDAIN, RND, count), we tuned their reward
+weighting (e.g. λ in algorithm 1), while for DISDAIN we additionally swept the ensemble size (N ).
+
+**Baselines** As with the skill discovery reward, we apply exploration bonuses only to the terminal
+states of each skill trajectory. For the count-based bonus, we track the number of times an agent ends
+
+
+-----
+
+a skill trajectory in each state n(s) and apply the exploration bonus rT = 1/ _n(sT ). For RND, we_
+
+follow the details of Burda et al. (2019) as closely as possible. For our target and predictor networks,
+
+p
+
+we use the same ResNet architecture as the policy observation embedding described above, and then
+project to a latent dimension of 128. Rather than normalizing observations based on running statistics,
+we found it more reliable to use the standard 2551 [normalization of Atari observations.]
+
+**DISDAIN** Our ensemble-based uncertainty estimator required many design choices, including the
+size of ensembles, and to what extent the ensemble members shared training data and parameters.
+In all of the domains we tested, we found training ensemble members on different batches to be
+unnecessary, similar to Osband et al. (2016). In the tabular case (Four Rooms), parameter-sharing is
+not a concern, and we found an ensemble size of N = 2 to be sufficient. For Atari, the ensemble of
+discriminators reuse the single ResNet state embedding network which is shared by the value function.
+The input to the ensemble will inevitably drift, even if the data distribution remains constant, since
+the ResNet representations evolve according to a combination of the value function and discriminator
+updates. Expressive ensembles (e.g. with hidden layers) never converged in practice. By contrast,
+large linear ensembles (N = 40) were reliably convergent, with convergence time increasing with
+ensemble size. We follow Osband et al. (2016) in scaling the gradients passed backward through the
+embedding network by 401 [to account for the increase in effective learning rate.]
+
+4.1 FOUR ROOMS
+
+First, we evaluate skill learning in the illustrative grid world seen in figure 3. There are 4 rooms and
+104 states. The agent begins each episode in the top left corner and at each step chooses an action
+from the set: left, right, up, down, or no-op. Episodes are 20 steps and we sample one skill
+per episode (i.e. T = 20). The episodes are long enough to reach all but one state, allowing for a
+maximum of 103 skills. For each method, we set NZ = 128 to make this theoretically possible.[2]
+
+**Results** As seen in figure 3, even in this simple task, unbonused agents are unable to exceed 30
+skills and barely leave the first room (see figures 18 and 19 for example skill rollouts). With both
+DISDAIN and a count bonus, agents explore all four rooms and learn approximately triple the number
+of skills, with the best seeds learning approximately 90 skills. Both bonuses do slow learning and
+add variance due to the addition of a separate learned Q-function (see figure 20 for individual seeds).
+The ensemble-only ablation provides a small benefit to skill learning, but far less than DISDAIN,
+demonstrating that the DISDAIN exploration bonus (rDISDAIN), rather than the ensembling, drives
+the increased performance. As a simple demonstration of the usefulness of our learnt skills for
+downstream tasks, we also evaluate each methods’ skills on the original Four Rooms reward (i.e.
+reaching specified goal states) without additional finetuning. Specifically, for each method, we sample
+each accessible state of the environment as a goal, pass it through the trained discriminator qφ, choose
+the highest probability skill z, rollout the policy for one episode conditioned on z, and track the
+fraction of goal states successfully reached (similar to the imitation learning evaluation of Eysenbach
+et al. (2019)). As seen in Figure 3b, more learnt skills leads to better downstream task performance.
+
+4.2 ATARI
+
+Next we consider skill learning on a standard suite of 57 Atari games, where prior work has shown
+that learning discrete skills is quite difficult (Hansen et al., 2020). In addition, it is a non-trivial test
+for our ensemble uncertainty based method to work in the function approximation setting, since this
+depends on how each ensemble member generalizes to unseen data. Here we use NZ = 64 and
+_T = 20. Since Atari episodes vary in length, skills may be resampled within an episode._
+
+The count-based baseline used in the Four Rooms experiments cannot be directly applied to a nontabular environment like Atari. While pseudo-count methods have been used here (Bellemare et al.,
+2016), Random Network Distillation (RND) similarly induces long term exploration (Burda et al.,
+2019) and has been used for this purpose in a state-of-the-art Atari agent (Badia et al., 2020). While
+newer approaches surpass RND in some domains (Raileanu and Rocktäschel, 2020; Seo et al., 2021),
+it is unclear if this is the case across the full Atari suite. So, at present, we believe RND is the most
+compelling baseline to compare against DISDAIN.
+
+2An open source reimplementation of DISDAIN on a smaller version of Four Rooms is available at
+[http://github.com/deepmind/disdain.](http://github.com/deepmind/disdain)
+
+
+-----
+
+DISDAIN. Plots depict counts of final states reached after one rollout per skill. Columns correspond
+
+(c) States reached without DISDAIN.
+
+(a) Learning curves. At initialization (~0 steps) Mid-training (~3M steps) At convergence (~40M steps)
+
+100
+
+75
+
+50
+
+skills learnt
+
+25
+
+(d) States reached with DISDAIN.
+
+At initialization (~0 steps) Mid-training (~200M steps) At convergence (~600M steps)
+
+0
+
+0.0e+00 2.5e+08 5.0e+08 7.5e+08 1.0e+09
+
+environment steps
+
+Unbonused Count
+Ensemble DISDAIN
+
+(b) Downstream task: goal reaching.
+
+(e) DISDAIN bonuses.
+
+At initialization (~0 steps) Mid-training (~200M steps) At convergence (~600M steps)
+
+training time
+
+Figure 3: Four Rooms results. (a) Skills learnt for top 10 of 20 seeds for each method. Mean ±
+std over seeds. (b) Performance on the downstream task of reaching a target state, averaged across
+all possible target states. Mean ± std over seeds. (c-d) Example states reached with and without
+
+to different points during training. With DISDAIN, agents learn to reach all states, while without,
+they barely make it out of the first room. (e) Per-state DISDAIN bonuses for the policy depicted in
+(d). In the beginning, all exploration is encouraged. In the middle, the checkerboard pattern emerges
+because agents try to space out their skills. By the end of training, DISDAIN gracefully fades away.
+
+
+Unbonused RND Ensemble DISDAIN
+
+
+Learning curves
+
+|Col1|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+
+200 400 600 800 1000
+
+Number of frames (in millions)
+
+
+Skills learnt
+
+10 20 30 40
+
+Skills learnt ( )
+
+
+Skill boosts over Unbonused
+
+-15 -10 -5 0 +5 +10 +15
+
+Skill boost ( )
+
+
+1.00
+
+0.75
+
+0.50
+
+0.25
+
+0.00
+
+
+1.00
+
+0.75
+
+0.50
+
+0.25
+
+0.00
+
+
+15.0
+
+12.5
+
+10.0
+
+7.5
+
+5.0
+
+2.5
+
+
+Figure 4: Number of skills learnt on Atari. Left: Effective skills (see equation 4) over training,
+measured by interquartile mean (IQM). Center: Distribution of skills learnt across seeds and games.
+_Right: Distribution of skill boosts over Unbonused skill learning across tasks and games. Shaded_
+regions show pointwise 95% confidence bands based on percentile bootstrap with stratified sampling.
+
+**Results** As pointed out in Agarwal et al. (2021), making statistically sound conclusions can be
+challenging in the few-seed, many-task setting of Atari. Thus, we follow their recommendations
+and focus our results primarily on statistically robust distributional claims here. Individual learning
+curves and game-by-game results are available in the appendix.
+
+As shown in figure 4, DISDAIN increases the effective number of skills learnt across the Atari suite,
+with only modest damage to sample effiency. Additionally, we found that DISDAIN’s performance
+
+
+-----
+
+boosts are robust to its key hyperparameters, namely the bonus weight λ and ensemble size N (see
+figure 8), with significant gains over unbonused skill learning maintained over more than an order of
+magnitude of variation in both.
+
+Notably, our results show that RND fails to significantly aid in skill learning. A sweep over the RND
+bonus weight is shown in figure 11, but the summary is that as the RND bonus becomes similar in
+magnitude to the skill learning reward, it damages skill learning rather than helping, and so the “best"
+RND bonus weight for skill learning is approximately zero. This is perhaps unsurprising: RND was
+designed in the context of stationary task rewards (as are most other exploration methods, such as
+pseudo-counts), whereas skill learning objectives produce a highly non-stationary reward function.
+This highlights the importance of using an exploration bonus tailored to the skill discovery setting.
+Additionally, the failure of the “ensemble-only" baseline to significantly increase skill learning
+demonstrates that is the rDISDAIN exploration bonus that is crucial to DISDAIN’s success, and not just
+the ensembling of the discriminator.
+
+|Col1|RND|Col3|Ensemble|DIS|
+|---|---|---|---|---|
+
+
+To further probe the utility of our learnt skills,
+we measure the unsupervised reward attainment
+of a policy that randomly switches between
+them. First reported in Hansen et al. (2020),
+the idea is that while this policy is certainly far
+from optimal, this metric indicates whether or
+not the skill space is sufficient to perform the
+various reward collecting behaviors involved in
+each game. Additionally, we measure lifetime
+state coverage as an indication of exploration
+throughout learning (on a subset of games supporting this metric; see Appendix B for details).
+Figure 5 confirms that DISDAIN leads to both
+increased reward attainment and lifetime coverage (see figures 14, 15, and 16 for additional
+lifetime and episodic state coverage results).
+
+5 DISCUSSION & LIMITATIONS
+
+
+Zero-shot reward improvement
+
+0.50 0.55 0.60 0.65
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+
+
+P(higher reward)
+
+
+Lifetime coverage improvement
+
+1.00
+
+0.75
+
+0.50
+
+0.25
+
+0.00
+
+-50% 0% +50% +100% +150%
+
+|Col1|Col2|Col3|Col4|Col5|Col6|Col7|Col8|
+|---|---|---|---|---|---|---|---|
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+
+
+Lifetime coverage boost ( )
+
+
+Figure 5: Qualitative analysis of skills learnt on
+**Atari. Both plots depict improvement over Un-**
+bonused skill learning aggregated across seeds and
+games. Left: Probability of improvement on zeroshot reward evaluation. Right: Distribution of percentile improvements on lifetime coverage. Error
+bars depict 95% stratified boostrap CIs.
+
+
+We introduced DISDAIN, an enhancement for unsupervised skill discovery algorithms which increases the effective number of skills learnt across a diverse range of tasks, by using ensemble-based
+uncertainty estimation to counteract a bias towards pessimistic exploration.
+
+The connection between ensemble estimates of uncertainty and infomax exploration dates back to
+at least Seung et al. (1992), who use it to select examples in an active supervised learning setting.
+These ideas have more recently found use in the RL literature, with recent work using disagreement
+among ensembles of value functions (Chen et al., 2017; Flennerhag et al., 2020; Zhang et al., 2020)
+and forward models of the environment (Pathak et al., 2019; Shyam et al., 2019; Sekar et al., 2020) to
+drive exploration. In a closely related line of work, ensembles of Q-functions have been used to drive
+exploration without an explicit bonus based on disagreement (Osband et al., 2016; 2018). To our
+knowledge, DISDAIN represents the first application of these ideas to unsupervised skill discovery.
+
+We focused on discrete skill learning methods due to their relative prevalence (Gregor et al., 2016;
+Eysenbach et al., 2019; Achiam et al., 2018; Baumli et al., 2021). In some cases, continuous or
+structured skill spaces might make more sense (Hansen et al., 2020; Warde-Farley et al., 2019). While
+the principles behind DISDAIN should still apply, further approximations may be necessary, e.g. for
+the entropy of the ensemble-averaged discriminator, which may be unavailable in closed form.
+
+Designing agents that explore and master their environment in the absence of task reward remains
+an open problem, for which there exist many different families of approaches (e.g. reward-free
+exploration (Jin et al., 2020; Zhang et al., 2021)). In this paper, we focus on improving one such
+family - unsupervised skill learning through variational infomax (Section 2). By treating agents with
+DISDAIN, we empower them to better maximize their objective and learn more skills. Leveraging
+these skills for rapid task reward maximization remains an important direction for future research.
+
+
+-----
+
+ACKNOWLEDGEMENTS
+
+The authors would like to thank Stephen Spencer for engineering and technical support, Ian Osband
+for feedback on an early draft, Rishabh Agarwal for suggestions on statistical analysis and plotting,
+Phil Bachman for correcting the error discussed in Appendix C, and David Schwab for pointing us to
+the original Query by Committee work (Seung et al., 1992).
+
+REFERENCES
+
+Joshua Achiam, Harrison Edwards, Dario Amodei, and Pieter Abbeel. Variational option discovery
+algorithms. arXiv preprint arXiv:1807.10299, 2018.
+
+Rishabh Agarwal, Max Schwarzer, Pablo Samuel Castro, Aaron Courville, and Marc G Bellemare.
+Deep reinforcement learning at the edge of the statistical precipice. In Neural Information
+_Processing Systems (NeurIPS), 2021._
+
+Ankesh Anand, Evan Racah, Sherjil Ozair, Yoshua Bengio, Marc-Alexandre Côté, and R Devon
+Hjelm. Unsupervised state representation learning in Atari. In Neural Information Processing
+_Systems (NeurIPS), 2019._
+
+Adrià Puigdomènech Badia, Bilal Piot, Steven Kapturowski, Pablo Sprechmann, Alex Vitvitskyi,
+Zhaohan Daniel Guo, and Charles Blundell. Agent57: Outperforming the Atari human benchmark.
+In International Conference on Machine Learning (ICML), 2020.
+
+David Barber and Felix Agakov. Information maximization in noisy channels: A variational approach.
+In Neural Information Processing Systems (NIPS), 2004.
+
+Kate Baumli, David Warde-Farley, Steven Hansen, and Volodymyr Mnih. Relative variational
+intrinsic control. In AAAI Conference on Artificial Intelligence, 2021.
+
+M. G. Bellemare, Y. Naddaf, J. Veness, and M. Bowling. The Arcade Learning Environment: An
+evaluation platform for general agents. Journal of Artificial Intelligence Research, 47:253–279, 06
+2013.
+
+Marc Bellemare, Sriram Srinivasan, Georg Ostrovski, Tom Schaul, David Saxton, and Remi Munos.
+Unifying count-based exploration and intrinsic motivation. In Neural Information Processing
+_Systems (NIPS), 2016._
+
+Ronen I Brafman and Moshe Tennenholtz. R-max - a general polynomial time algorithm for nearoptimal reinforcement learning. Journal of Machine Learning Research (JMLR), 3(Oct):213–231,
+2002.
+
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel
+Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel Ziegler,
+Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray,
+Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever,
+and Dario Amodei. Language models are few-shot learners. In Neural Information Processing
+_Systems (NeurIPS), 2020._
+
+Yuri Burda, Harrison Edwards, Amos Storkey, and Oleg Klimov. Exploration by random network
+distillation. In International Conference on Learning Representations (ICLR), 2019.
+
+Richard Y Chen, Szymon Sidor, Pieter Abbeel, and John Schulman. UCB exploration via Qensembles. arXiv preprint arXiv:1706.01502, 2017.
+
+Ting Chen, Simon Kornblith, Mohammad Norouzi, and Geoffrey Hinton. A simple framework for
+contrastive learning of visual representations. In International Conference on Machine Learning
+_(ICML), 2020a._
+
+Ting Chen, Simon Kornblith, Kevin Swersky, Mohammad Norouzi, and Geoffrey E Hinton. Big
+self-supervised models are strong semi-supervised learners. In Neural Information Processing
+_Systems (NeurIPS), 2020b._
+
+
+-----
+
+Lasse Espeholt, Hubert Soyer, Remi Munos, Karen Simonyan, Vlad Mnih, Tom Ward, Yotam
+Doron, Vlad Firoiu, Tim Harley, Iain Dunning, Shane Legg, and Koray Kavukcuoglu. IMPALA:
+Scalable distributed deep-RL with importance weighted actor-learner architectures. In International
+_Conference on Machine Learning (ICML), 2018._
+
+Benjamin Eysenbach, Abhishek Gupta, Julian Ibarz, and Sergey Levine. Diversity is all you need:
+Learning skills without a reward function. In International Conference on Learning Representations
+_(ICLR), 2019._
+
+Sebastian Flennerhag, Jane X Wang, Pablo Sprechmann, Francesco Visin, Alexandre Galashov, Steven
+Kapturowski, Diana L Borsa, Nicolas Heess, Andre Barreto, and Razvan Pascanu. Temporal
+difference uncertainties as a signal for exploration. arXiv preprint arXiv:2010.02255, 2020.
+
+Karol Gregor, Danilo Jimenez Rezende, and Daan Wierstra. Variational intrinsic control. arXiv
+_preprint arXiv:1611.07507, 2016._
+
+Steven Hansen, Will Dabney, Andre Barreto, David Warde-Farley, Tom Van de Wiele, and Volodymyr
+Mnih. Fast task inference with variational intrinsic successor features. In International Conference
+_on Learning Representations (ICLR), 2020._
+
+Chi Jin, Akshay Krishnamurthy, Max Simchowitz, and Tiancheng Yu. Reward-free exploration for
+reinforcement learning. In International Conference on Machine Learning (ICML), 2020.
+
+Steven Kapturowski, Georg Ostrovski, Will Dabney, John Quan, and Remi Munos. Recurrent
+experience replay in distributed reinforcement learning. In International Conference on Learning
+_Representations (ICLR), 2019._
+
+Saurabh Kumar, Aviral Kumar, Sergey Levine, and Chelsea Finn. One solution is not all you need:
+Few-shot extrapolation via structured maxent RL. In Neural Information Processing Systems
+_(NeurIPS), 2020._
+
+Balaji Lakshminarayanan, Alexander Pritzel, and Charles Blundell. Simple and scalable predictive
+uncertainty estimation using deep ensembles. In Neural Information Processing Systems (NeurIPS),
+2017.
+
+Anuj Mahajan, Tabish Rashid, Mikayel Samvelyan, and Shimon Whiteson. MAVEN: Multi-agent
+variational exploration. In Neural Information Processing Systems (NeurIPS), 2019.
+
+OpenAI, Ilge Akkaya, Marcin Andrychowicz, Maciek Chociej, Mateusz Litwin, Bob McGrew, Arthur
+Petron, Alex Paino, Matthias Plappert, Glenn Powell, Raphael Ribas, Jonas Schneider, Nikolas
+Tezak, Jerry Tworek, Peter Welinder, Lilian Weng, Qiming Yuan, Wojciech Zaremba, and Lei
+Zhang. Solving Rubik’s Cube with a robot hand. arXiv preprint arXiv:1910.07113, 2019a.
+
+OpenAI, Christopher Berner, Greg Brockman, Brooke Chan, Vicki Cheung, Przemysław D˛ebiak,
+Christy Dennison, David Farhi, Quirin Fischer, Shariq Hashme, Chris Hesse, Rafal Józefowicz,
+Scott Gray, Catherine Olsson, Jakub Pachocki, Michael Petrov, Henrique P. d. O. Pinto, Jonathan
+Raiman, Tim Salimans, Jeremy Schlatter, Jonas Schneider, Szymon Sidor, Ilya Sutskever, Jie
+Tang, Filip Wolski, and Susan Zhang. Dota 2 with large scale deep reinforcement learning. arXiv
+_preprint arXiv:1912.06680, 2019b._
+
+Ian Osband, Charles Blundell, Alexander Pritzel, and Benjamin Van Roy. Deep exploration via
+bootstrapped DQN. In Neural Information Processing Systems (NIPS), 2016.
+
+Ian Osband, John Aslanides, and Albin Cassirer. Randomized prior functions for deep reinforcement
+learning. In Neural Information Processing Systems (NeurIPS), 2018.
+
+Ian Osband, Benjamin Van Roy, Daniel J. Russo, and Zheng Wen. Deep exploration via randomized
+value functions. Journal of Machine Learning Research (JMLR), 20(124):1–62, 2019.
+
+Deepak Pathak, Dhiraj Gandhi, and Abhinav Gupta. Self-supervised exploration via disagreement.
+In International Conference on Machine Learning (ICML), 2019.
+
+Jing Peng and Ronald J Williams. Incremental multi-step Q-learning. In International Conference on
+_Machine Learning (ICML), 1994._
+
+
+-----
+
+Alec Radford, Jeff Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. Language
+models are unsupervised multitask learners. Technical report, OpenAI, 2019.
+
+Roberta Raileanu and Tim Rocktäschel. RIDE: Rewarding impact-driven exploration for procedurallygenerated environments. In International Conference on Learning Representations (ICLR), 2020.
+
+Ramanan Sekar, Oleh Rybkin, Kostas Daniilidis, Pieter Abbeel, Danijar Hafner, and Deepak Pathak.
+Planning to explore via self-supervised world models. In International Conference on Machine
+_Learning (ICML), 2020._
+
+Younggyo Seo, Lili Chen, Jinwoo Shin, Honglak Lee, Pieter Abbeel, and Kimin Lee. State entropy
+maximization with random encoders for efficient exploration. arXiv preprint arXiv:2102.09430,
+2021.
+
+H. Sebastian Seung, Manfred Opper, and Haim Sompolinsky. Query by committee. In Conference
+_on Learning Theory (COLT), 1992._
+
+Pranav Shyam, Wojciech Ja´skowski, and Faustino Gomez. Model-based active exploration. In
+_International Conference on Machine Learning (ICML), 2019._
+
+Richard S. Sutton, Doina Precup, and Satinder Singh. Between MDPs and semi-MDPs: A framework
+for temporal abstraction in reinforcement learning. Artificial Intelligence, 112(1–2):181–211,
+1999.
+
+Oriol Vinyals, Igor Babuschkin, Wojciech M. Czarnecki, Michaël Mathieu, Andrew Dudzik, Junyoung
+Chung, David H. Choi, Richard Powell, Timo Ewalds, Petko Georgiev, Junhyuk Oh, Dan Horgan,
+Manuel Kroiss, Ivo Danihelka, Aja Huang, Laurent Sifre, Trevor Cai, John P. Agapiou, Max
+Jaderberg, Alexander S. Vezhnevets, Rémi Leblond, Tobias Pohlen, Valentin Dalibard, David
+Budden, Yury Sulsky, James Molloy, Tom L. Paine, Caglar Gulcehre, Ziyu Wang, Tobias Pfaff,
+Yuhuai Wu, Roman Ring, Dani Yogatama, Dario Wünsch, Katrina McKinney, Oliver Smith, Tom
+Schaul, Timothy Lillicrap, Koray Kavukcuoglu, Demis Hassabis, Chris Apps, and David Silver.
+Grandmaster level in StarCraft II using multi-agent reinforcement learning. Nature, 575(7782):
+350–354, 2019.
+
+David Warde-Farley, Tom Van de Wiele, Tejas Kulkarni, Catalin Ionescu, Steven Hansen, and
+Volodymyr Mnih. Unsupervised control through non-parametric discriminative rewards. In
+_International Conference on Learning Representations (ICLR), 2019._
+
+Chuheng Zhang, Yuanying Cai, and Longbo Huang Jian Li. Exploration by maximizing Rényi
+entropy for reward-free RL framework. In AAAI Conference on Artificial Intelligence, 2021.
+
+Yunzhi Zhang, Pieter Abbeel, and Lerrel Pinto. Automatic curriculum learning through value
+disagreement. In Neural Information Processing Systems (NeurIPS), 2020.
+
+
+-----
+
+A COMPUTE REQUIREMENTS AND HYPERPARAMETERS
+
+The compute cluster we performed experiments on is rather heterogeneous, and has features such
+as host-sharing, adaptive load-balancing, etc. It is therefore hard to give precise details regarding
+compute resources – however, the following is a best-guess estimate.
+
+A full experimental training run for Atari lasted 4 days on average. Our distributed reinforcement
+learning setup (Espeholt et al., 2018) used 100 CPU actors and a single V100 GPU learner. Thus,
+we required approximately 9600 CPU hours and 96 V100 GPU hours per seed, with 3 seeds and 3
+conditions per game.
+
+Tuning required approximately 10 different hyper-parameters combinations on 6 games, amounting
+to 864,000 CPU hours and 8,640 V100 GPU hours. The results on the full suite of 57 Atari games
+required 4,924,800 CPU hours and 49,248 V100 GPU hours. Combining these, we get a total compute
+budget of 5,788,800 CPU hours and 57,888 V100 GPU hours.
+
+It is worth remembering that the above is likely quite a loose upper-bound, as this estimate assumes
+100 percent up time, which is far from the truth given the host-sharing and load-balancing involved in
+our setup. Additionally, V100 GPUs were chosen based on what was on hand; our models are small
+enough to fit on much cheaper cards without much slowdown.
+
+B COVERAGE METRICS
+
+We calculate two related notions of coverage: lifetime and episodic. Lifetime coverage corresponds
+to the number of unique states encountered during an agent’s lifetime, whereas episodic coverage
+corresponds to the number of unique states encountered during each episode. Both rely on the notion
+of a unique state. The subset of games chosen for these metrics were those where a good notion of
+a unique state is simple: they all involve a controllable avatar that moves in a coordinate system,
+so unique avatar coordinates are used. This information is exposed in the RAM state of the Atari
+emulator, as shown in Anand et al. (2019).
+
+C ADDITIONAL IMPLEMENTATION DETAILS
+
+For our skill learning reward, one generally helpful change that we had not previously encountered
+was to clip negative skill rewards to 0 (rskill = max(rskill, 0)). A previous version of this manuscript
+stated that: “This yields a strictly tighter lower bound on the mutual information (equation 2),
+since negative rewards imply the discriminator’s performance is worse than chance.” However, that
+argument isn’t quite correct. Clipping the expected reward (i.e. clipping outside the expectation)
+would produce a tighter bound, but this argument does not hold on a sample-by-sample basis (i.e.
+clipping inside the expectation, as we did). Thus, this should only be viewed as a heuristic.
+
+REFERENCES
+
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International
+_Conference on Learning Representations (ICLR), 2015._
+
+
+-----
+
+|Hyperparameter|Atari|Four Rooms|
+|---|---|---|
+|Torso Head hidden size Number of actors Batch size Skill trajectory length (T) Unroll length Actor update period Number of skill latents (N ) Z Replay buffer size|IMPALA Torso (Espeholt et al., 2018) 256 100 128 20 20 100 64 106 unrolls|tabular - 64 16 same same same 128 same|
+|Optimizer learning rate Adam ϵ Adam β 1 Adam β 2|Adam (Kingma and Ba, 2015) 2 ∗10−4 10−3 0.0 0.95|SGD 2 ∗10−3 - - -|
+|RL algorithm λ discount γ Target update period|Q(λ) (Peng and Williams, 1994) 0.7 0.99 100|same same same -|
+|DISDAIN ensemble size (N) DISDAIN reward weight (λ)|40 180.0|2 10.0|
+|RND reward weight Count bonus weight|0.3 -|- 10.0|
+
+
+**Hyperparameter** **Atari** **Four Rooms**
+
+Torso IMPALA Torso (Espeholt et al., 2018) tabular
+
+Head hidden size 256 
+Number of actors 100 64
+
+Batch size 128 16
+
+Skill trajectory length (T ) 20 same
+
+Unroll length 20 same
+
+Actor update period 100 same
+
+Number of skill latents (NZ) 64 128
+
+Replay buffer size 10[6] unrolls same
+
+Optimizer Adam (Kingma and Ba, 2015) SGD
+
+learning rate 2 ∗ 10[−][4] 2 ∗ 10[−][3]
+
+Adam ϵ 10[−][3] 
+Adam β1 0.0 
+Adam β2 0.95 
+RL algorithm _Q(λ) (Peng and Williams, 1994)_ same
+
+_λ_ 0.7 same
+
+discount γ 0.99 same
+
+Target update period 100 
+DISDAIN ensemble size (N ) 40 2
+
+DISDAIN reward weight (λ) 180.0 10.0
+
+RND reward weight 0.3 
+Count bonus weight - 10.0
+
+Table 1: **Hyperparameters.** Atari hyperparameters were tuned on a subset of 6 games
+(beam_rider, breakout, pong, qbert, seaquest, and space_invaders). In both environments, all RL and skill discovery hyperparameters were tuned for unbonused skill learning and
+then held fixed when adding exploration bonuses.
+
+
+-----
+
+alien amidar assault asterix asteroids atlantis
+
+6 25 6
+
+7.5 25 20 3
+
+5 4 20 15 4
+
+15 10 2
+
+2.5 2 10 5 2 1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+bank_heist battle_zone beam_rider berzerk bowling boxing
+
+7.5 20 10 30 2.5 30
+
+5 15 8 20 2 20
+
+10
+
+2.5 5 6 10 1.5 10
+
+0 4 0 1 0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+breakout centipede chopper_command crazy_climber defender demon_attack
+
+17.5 30 15 16 25
+
+12.515 20 20 10 12 20
+
+10 10 5 8 15
+
+7.5 10 4 10
+
+0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+15 double_dunk enduro fishing_derby 12.5 freeway frostbite gopher
+
+15 30 10 9 12.5
+
+10 10 20 7.5 6 10
+
+5 5 10 2.55 3 7.5
+
+0 5
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+gravitar hero ice_hockey jamesbond kangaroo krull
+
+20 20 15
+
+10 15 15 2015 10 15
+
+5 105 105 105 5 105
+
+0 Unbonused
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+RND
+
+kung_fu_master montezuma_revenge ms_pacman name_this_game phoenix pitfall Ensemble
+
+15
+
+skills learnt 15 20 5 20 DISDAIN
+
+15 4 15 10 10
+
+10
+
+10 3 10
+
+5 5 2 5 5 5
+
+0 1 0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+pong private_eye qbert riverraid road_runner robotank
+
+10 20 4 2015 20 12.510
+
+86 1510 32 10 1510 7.55
+
+4 50 1 5 50 2.5
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+seaquest skiing solaris space_invaders star_gunner surround
+
+12.5 40 5
+
+20 4 9 10 30 4
+
+15105 32 63 7.52.55 2010 32
+
+0 1 0 1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+tennis time_pilot tutankham up_n_down venture video_pinball
+
+10 9 15 2.5 20 7.5
+
+7.55 6 10 2 1510 5
+
+2.5 3 5 1.5 5 2.5
+
+1 0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+wizard_of_wor yars_revenge zaxxon
+
+20
+
+15 30 20
+
+10 20
+
+5 10 10
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+environment steps
+
+
+Figure 6: Skills learnt per-seed and per-game on all 57 Atari games.
+
+
+-----
+
+Unbonused RND Ensemble DISDAIN
+
+
+|(a) Skills learnt on|Col2|
+|---|---|
+|Unbonused RND Ensemble DISDAIN 30 learnt 20 skills 10 0 c wvr i d i r z aj o dt o b mu z aba t us ea ue r p i y ak t _ as d b o_ a d r d_ m f l i na a pp __ g mu _ v e b r n cae e vkf l a r ge r r mn na h pt s_ et oeo i es _ r _ il s _ e f e oa un k g _ c ooe dq ne r m r b o dk w a l _ ha nv ni p mi n t d a h pi l l r eo n b i i oi i i u m u a e n w r bdd hbt d n uu l a i a ne n rt n wn n e i a r n i r na o ai ii ee eaa er e s o lrr r kt r t x d mn r l r s n g g t ss r ey do n o d (b) DISDAIN skill boo||
+||+25 +20 boost +15 +10 +5 skill 0 -5 -10 kuc wvr i d i r z aj o dt o b mu z aba t us ea ue r p i y ak t _ as d b o_ a d r d_ m f l i na s a pp __ g mu _ v e b r n ca t e e vkf l a r ge r r mn na h pt s_ et oeo i es _ r _ i el s _ e f e oa un k g _ c ooe dq n r e r m r b o dk w a l _ ha nv ni p mi n t d a h pi l l r eo n b i i oi i i u m u a e n w r bdd hbt d n uu l wa i a ne n rt n wn n e i a r n i r na o ai ii ee eaa er e s o olrr r kt r t x d mn r l r s n g g t ss r ey do r n o d (c) RND skill boost|
+
+
++25
+
++20
+
++15
+
++10
+
++5
+
+0
+
+skill boost -5
+
+-10
+
+-15
+
+name_this_gameberzerkkung_fu_masterasterixkangaroopitfallrobotankseaquestdouble_dunkskiingstar_gunnerboxingtenniskrullgopherqbertcrazy_climberasteroids alienphoenixgravitarwizard_of_worventurefishing_derbyriverraidendurobeam_rideramidarbowlingup_n_downpongtutankhamdemon_attackdefendersolaristime_pilotfreewayroad_runnerzaxxonatlantisbattle_zoneheroyars_revengesurroundvideo_pinballjamesbondms_pacmanbank_heistmontezuma_revengeassaultspace_invaderscentipedeprivate_eyebreakoutchopper_commandfrostbiteice_hockey
+
+(d) Ensemble skill boosts on each game.
+
+Figure 7: Per-game boosts for each method. (b-d) Boosts in skills learnt on each game over
+
++20
+
++15
+
++10
+
++5
+
+0
+
+-5
+
+skill boost -10
+
+-15
+
+-20
+
+venturebattle_zonegravitartime_pilotrobotankdefenderms_pacmankung_fu_masterskiing asteroidskangarooname_this_gameatlantissurrounddouble_dunktenniscrazy_climberalienjamesbondbowlingamidarbeam_riderup_n_downqbertsolarispongwizard_of_worfreewayvideo_pinballphoenixgopherberzerkendurobank_heistriverraidtutankhammontezuma_revengespace_invaderspitfallbreakoutfishing_derbyfrostbitekrullprivate_eyeheroseaqueststar_gunneryars_revengeboxingasterixcentipederoad_runnerassaultchopper_commanddemon_attackzaxxonice_hockey
+
+Unbonused skill learning. Mean ± standard deviation over 3 seeds. All 3 plots use the same y-axis
+range magnitude so that bar heights are comparable. DISDAIN improves skill learning on 52/57
+(91%) of games, with boosts of >5 skills on 18/57 (32%) and >10 on 6/57 (11%) of games. RND and
+the Ensemble-only ablation perform closer to chance with improvements on 28/57 (49%) and 35/57
+(61%), with boosts of >5 skills on 2/57 (4%) and 9/57 (16%) and >10 skills on 1/57 (2%) and 0/57
+(0%) of games, respectively. a) Skills learnt on each game for each method for reference. Sorted by
+magnitude of DISDAIN boost, as in (b).
+
+
+-----
+
+(a) Robustness to bonus weight (λ).
+
+
+(b) Robustness to ensemble size (N ).
+
+16
+
+12
+
+
+Unbonused
+DISDAIN (ensemble size = 20)
+DISDAIN (ensemble size = 40)
+DISDAIN (ensemble size = 80)
+DISDAIN (ensemble size = 160)
+DISDAIN (ensemble size = 320)
+
+
+15
+
+10 Unbonused
+
+Ensemble
+DISDAIN (weight = 45)
+
+skills learnt 5 DISDAIN (weight = 180)
+
+DISDAIN (weight = 720)
+
+0.0e+00 2.5e+08 5.0e+08 7.5e+08 1.0e+09
+
+environment steps
+
+Figure 8: DISDAIN robustness to key hyperparameters. (a) Sweeping bonus weight (λ) with
+fixed ensemble size N = 160 (see Algorithm 1). (b) Sweeping ensemble size (N ) with fixed bonus
+weight λ = 180. Curves averaged over 57 games and 3 seeds (for results broken out by game and
+seed, see figures 9 and 10). For both hyperparameters, DISDAIN’s improvements over baselines are
+robust over more than an order of magnitude of variation. All other experiments use λ = 180 and
+_N = 40 unless otherwise stated._
+
+
+-----
+
+6
+
+5
+
+4
+
+3
+
+2
+
+1
+
+0e+00 5e+08 1e+09
+
+
+
+
+
+3
+
+2
+
+1
+
+0e+00 5e+08 1e+09
+
+
+30
+
+20
+
+10
+
+
+25
+
+20
+
+15
+
+10
+
+
+7.5
+
+5
+
+2.5
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+alien
+
+
+amidar
+
+
+assault
+
+
+asterix
+
+
+asteroids
+
+
+atlantis
+
+
+
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+20
+
+15
+
+10
+
+
+30
+
+20
+
+10
+
+
+2.5
+
+2
+
+1.5
+
+
+30
+
+20
+
+10
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+bank_heist
+
+
+battle_zone
+
+
+beam_rider
+
+
+berzerk
+
+
+bowling
+
+
+boxing
+
+
+
+30
+
+20
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+20
+
+10
+
+0
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+20
+
+10
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+breakout
+
+
+centipede
+
+
+chopper_command
+
+
+crazy_climber
+
+
+defender
+
+
+demon_attack
+
+
+
+
+
+12.5
+
+10
+
+
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+15
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+30
+
+20
+
+10
+
+
+12
+
+8
+
+4
+
+0e+00 5e+08 1e+09
+
+
+7.5
+
+5
+
+2.5
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+double_dunk
+
+
+enduro
+
+
+fishing_derby
+
+
+freeway
+
+
+frostbite
+
+
+gopher
+
+
+
+
+20
+
+15
+
+10
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+12
+
+8
+
+4
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+Unbonused
+Ensemble
+DISDAIN (weight = 45)
+DISDAIN (weight = 180)
+DISDAIN (weight = 720)
+
+
+0e+00 5e+08 1e+09
+
+
+gravitar
+
+
+hero
+
+
+ice_hockey
+
+
+jamesbond
+
+
+kangaroo
+
+
+krull
+
+
+
+
+
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+20
+
+15
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+kung_fu_master
+
+
+montezuma_revenge
+
+
+ms_pacman
+
+
+name_this_game
+
+
+phoenix
+
+
+pitfall
+
+
+
+
+
+
+25
+
+20
+
+15
+
+10
+
+
+20
+
+15
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+pong
+
+
+private_eye
+
+
+qbert
+
+
+riverraid
+
+
+road_runner
+
+
+robotank
+
+
+
+
+
+
+5
+
+4
+
+3
+
+2
+
+1
+
+0e+00 5e+08 1e+09
+
+
+25
+
+20
+
+15
+
+10
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+40
+
+30
+
+20
+
+10
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+seaquest
+
+
+skiing
+
+
+solaris
+
+
+space_invaders
+
+
+star_gunner
+
+
+surround
+
+
+
+
+8
+
+6
+
+4
+
+2
+
+0e+00 5e+08 1e+09
+
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+
+2.5
+
+2
+
+1.5
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+tennis
+
+
+time_pilot
+
+
+tutankham
+
+
+up_n_down
+
+
+venture
+
+
+video_pinball
+
+
+
+20
+
+15
+
+10
+
+
+30
+
+20
+
+10
+
+0
+
+0e+00 5e+08 1e+09
+
+
+20
+
+10
+
+0e+00 5e+08 1e+09
+
+zaxxon
+
+environment steps
+
+
+0e+00 5e+08 1e+09
+
+
+wizard_of_wor
+
+
+yars_revenge
+
+
+Figure 9: Per-game bonus weight sweep for DISDAIN across all 57 Atari games.
+
+
+-----
+
+6
+
+4
+
+2
+
+0e+00 5e+08 1e+09
+
+
+
+
+
+3
+
+2
+
+1
+
+0e+00 5e+08 1e+09
+
+
+10
+
+
+30
+
+20
+
+10
+
+
+7.5
+
+5
+
+2.5
+
+0e+00 5e+08 1e+09
+
+
+20
+
+10
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+alien
+
+
+amidar
+
+
+assault
+
+
+asterix
+
+
+asteroids
+
+
+atlantis
+
+
+
+
+
+10
+
+
+30
+
+20
+
+10
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+10
+
+
+2.5
+
+2
+
+1.5
+
+
+30
+
+20
+
+10
+
+
+7.5
+
+5
+
+2.5
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+bank_heist
+
+
+battle_zone
+
+
+beam_rider
+
+
+berzerk
+
+
+bowling
+
+
+boxing
+
+
+
+
+
+
+30
+
+20
+
+10
+
+
+15
+
+10
+
+
+30
+
+20
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+20
+
+10
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+breakout
+
+
+centipede
+
+
+chopper_command
+
+
+crazy_climber
+
+
+defender
+
+
+demon_attack
+
+
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+16
+
+12
+
+
+30
+
+20
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+frostbite
+
+
+15
+
+
+double_dunk
+
+
+enduro
+
+
+fishing_derby
+
+
+freeway
+
+
+gopher
+
+
+
+20
+
+15
+
+10
+
+
+
+20
+
+15
+
+10
+
+
+20
+
+15
+
+10
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+Unbonused
+DISDAIN (ensemble size = 20)
+DISDAIN (ensemble size = 40)
+DISDAIN (ensemble size = 80)
+DISDAIN (ensemble size = 160)
+DISDAIN (ensemble size = 320)
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+gravitar
+
+
+hero
+
+
+ice_hockey
+
+
+jamesbond
+
+
+kangaroo
+
+
+krull
+
+
+
+
+
+20
+
+15
+
+10
+
+
+15
+
+10
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+15
+
+10
+
+5
+
+0e+00 5e+08 1e+09
+
+
+20
+
+15
+
+10
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+kung_fu_master
+
+
+montezuma_revenge
+
+
+ms_pacman
+
+
+name_this_game
+
+
+phoenix
+
+
+pitfall
+
+
+
+
+
+
+
+25
+
+20
+
+15
+
+10
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+20
+
+15
+
+10
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+0e+00 5e+08 1e+09
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+pong
+
+
+private_eye
+
+
+qbert
+
+
+riverraid
+
+
+road_runner
+
+
+robotank
+
+
+
+4
+
+3
+
+2
+
+1
+
+0e+00 5e+08 1e+09
+
+
+
+
+
+12.5
+
+10
+
+7.5
+
+5
+
+2.5
+
+
+40
+
+30
+
+20
+
+10
+
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+seaquest
+
+
+skiing
+
+
+solaris
+
+
+space_invaders
+
+
+star_gunner
+
+
+surround
+
+
+9
+
+6
+
+3
+
+0e+00 5e+08 1e+09
+
+
+9
+
+6
+
+3
+
+0e+00 5e+08 1e+09
+
+
+20
+
+15
+
+10
+
+
+15
+
+10
+
+
+2.5
+
+2
+
+1.5
+
+
+7.5
+
+5
+
+2.5
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+tennis
+
+
+time_pilot
+
+
+tutankham
+
+
+up_n_down
+
+
+venture
+
+
+video_pinball
+
+
+
+
+20
+
+15
+
+10
+
+
+40
+
+30
+
+20
+
+10
+
+
+20
+
+10
+
+0
+
+0e+00 5e+08 1e+09
+
+zaxxon
+
+environment steps
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+wizard_of_wor
+
+
+yars_revenge
+
+
+Figure 10: Per-game ensemble size sweep for DISDAIN across all 57 Atari games.
+
+
+-----
+
+12.5
+
+10
+
+Unbonused
+
+7.5 RND (weight = 0.1)
+
+RND (weight = 0.3)
+
+skills learnt 5 RND (weight = 1)
+
+RND (weight = 3)
+
+2.5
+
+0.0e+00 2.5e+08 5.0e+08 7.5e+08 1.0e+09
+
+environment steps
+
+Figure 11: RND bonus weight sweep. RND fails to significantly improve skill learning as the
+weighting on its contribution to the reward is increased. As soon as the RND bonus becomes of
+a similar order of magnitude as the skill learning reward (bonus weight λ ≈ 1), skill learning
+performance begins to decay, suggesting that the kind of exploration encouraged by RND is not
+conducive to skill learning. Results averaged over 57 games and 3 seeds (see figure 12 for results
+broken out by game and seed).
+
+
+-----
+
+alien amidar 25 assault asterix 4 asteroids atlantis
+
+7.5 54 2015 20 3 3
+
+5 3 10 10 2 2
+
+2.5 2 5
+
+1 0 1 1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+bank_heist battle_zone beam_rider berzerk bowling boxing
+
+864 128 7.5105 3020 2.52 201510
+
+2 4 2.5 10 1.5 5
+
+0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+breakout centipede chopper_command crazy_climber defender demon_attack
+
+20 2520 9 15 15
+
+10 15
+
+5 105 15105 63 105 105
+
+0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+double_dunk enduro fishing_derby freeway frostbite gopher
+
+16 10
+
+10 12 20 7.5 7.5 10
+
+8 5 5
+
+5 10 5
+
+4 2.5 2.5
+
+0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+gravitar hero ice_hockey jamesbond kangaroo krull
+12.5 16 16 15 12.5
+
+7.52.5105 1284 1284 2015105 105 7.52.5105 Unbonused
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 RND (weight = 0.1)
+
+RND (weight = 0.3)
+
+skills learnt 16128 kung_fu_master 16128 montezuma_revenge 543 ms_pacman 1510 name_this_game 7.510 phoenix 10 pitfall RND (weight = 1)RND (weight = 3)
+
+4 4 2 5 2.55 5
+
+1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+10 pong 20 private_eye 4 qbert 15 riverraid 20 road_runner 10 robotank
+
+7.5 15 3 15 7.5
+
+5 10 2 10 10 5
+
+2.5 5 5 5 2.5
+
+1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+seaquest skiing solaris space_invaders star_gunner surround
+
+20 10 10
+
+15 4 7.5 7.5 30 4
+
+10 3 5 5 20 3
+
+5 2 2.5 2.5 10 2
+
+1 0 1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+10 tennis 10 time_pilot 15 tutankham 2.5 up_n_down 20 venture 6 video_pinball
+
+7.5 7.5 10 2 15 5
+
+5 5 10 4
+
+2.5 2.5 5 1.5 5 3
+
+1 0 2
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+wizard_of_wor yars_revenge zaxxon
+
+15 30 15
+
+10 20 10
+
+5 10 5
+
+0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+environment steps
+
+
+Figure 12: Per-game bonus weight sweep for RND across all 57 Atari games.
+
+
+-----
+
+alien amidar assault asterix asteroids atlantis
+
+450 50 600
+400 40 500 800 20000
+350300 30 400 400 600 15000
+250200 2010 200 300 400 100005000
+150 0 200 200
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+bank_heist battle_zone beam_rider berzerk bowling boxing
+
+50 5000 1000 500 30 10
+
+4030 4000 900800 400 20 20
+
+20 3000 700 300 10 30
+
+10 2000 600 200 40
+
+0 500 100 0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+breakout centipede chopper_command crazy_climber defender demon_attack
+
+1.6 2400 7000
+
+2500
+
+1.4 2000 800 6000 300
+
+1.2 1600 600 5000 2000 200
+
+0.81 1200 400 40003000 15001000 100
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+double_dunk enduro fishing_derby freeway frostbite gopher
+
+88 125
+
+23 2 90 3 100 600
+
+23.5 1 92 2 75 400
+
+94 1 50 200
+
+24 0 0 25
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+gravitar hero ice_hockey jamesbond kangaroo krull
+
+150 800 13 60 60
+
+125100 600400 1415 5040 40 15001000
+
+7550 2000 1617 3020 200 500 Unbonused
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+score RND
+
+15001000 kung_fu_master 0.0750.0500.025 [montezuma_revenge] 500400 ms_pacman 20001500 name_this_game 15001000 phoenix 1002000 pitfall EnsembleDISDAIN
+
+5000 0.0250 300 1000500 500 300
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+pong private_eye qbert riverraid road_runner robotank
+
+20.5 2000 2000 1500 5
+
+20.6 750 4
+
+20.7 1000 500 1500 1000 3
+
+20.8 0 1000 500 2
+
+20.9 1000 250 500 0 1
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+seaquest skiing solaris space_invaders star_gunner surround
+
+250200150100 15000200002500030000 600500400300200 350300250200 12001000800600 8.59.59
+
+150 10
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+tennis time_pilot tutankham up_n_down venture video_pinball
+
+22.75 15 2500 15 15000
+
+23.2523 30002000 10 20001500 10 10000
+
+23.50 5 5 5000
+
+23.75 1000 0 1000 0 0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+wizard_of_wor yars_revenge zaxxon
+
+800
+
+300
+
+600 4000
+
+200
+
+400 2000 100
+
+200 0 0
+
+0e+00 5e+08 1e+09 0e+00 5e+08 1e+09 0e+00 5e+08 1e+09
+
+environment steps
+
+
+Figure 13: Per-game task reward attainment curves throughout training. We emphasize that
+agents are trained only to maximize the skill learning objective and any associated exploration bonus
+(i.e. DISDAIN or RND), and not the task reward. Thus, these plots depict zero-shot reward attainment
+while uniformly randomly switching between skills.
+
+
+-----
+
+30000
+
+20000
+
+
+20000
+
+15000
+
+10000
+
+5000
+
+
+5000
+
+4000
+
+3000
+
+
+10000
+
+|berzerk|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+|||||
+|||||
+|||||
+|||||
+|||||
+|||||
+
+|hero|Col2|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+|||
+
+|ntezuma_revenge|Col2|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+|||
+|||
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+11000
+
+10750
+
+10500
+
+10250
+
+10000
+
+
+1720
+
+1700
+
+1680
+
+
+80000
+
+70000
+
+60000
+
+50000
+
+40000
+
+|ms_pacman|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+|||||
+|||||
+
+|private_eye|Col2|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+
+|seaquest|Col2|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+
+
+Unbonused
+RND
+Ensemble
+DISDAIN
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+environment steps
+
+
+0e+00 5e+08 1e+09
+
+
+Figure 14: Lifetime coverage for all games, methods, and seeds. All policies quickly achieve the
+same score on ms_pacman and seaquest, so those levels are removed from the analysis in the
+main text.
+
++250%
+
++200%
+
++150%
+
++100%
+
+coverage boost
+
+
++50%
+
+0
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+||||||
+
+
+RND
+Ensemble
+DISDAIN
+
+private_eyems_pacmanseaquestmontezuma_revengeberzerk hero
+
+Figure 15: Episodic coverage boosts over unbonused skill learning. DISDAIN provides significant
+boosts over unbonused skill learning on hero and montezuma_revenge, while all methods
+perform similarly on the other four levels analyzed. Since state coverage metrics are particularly well
+suited to montezuma_revenge, the boost there is especially interesting. Results averaged over 3
+seeds. For results over training for each seed, see figure 16.
+
+
+
+
+
+2000
+
+1500
+
+1000
+
+500
+
+
+500
+
+400
+
+300
+
+200
+
+100
+
+
+900
+
+600
+
+300
+
+|berzerk|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+|||||
+|||||
+|||||
+|||||
+|||||
+|||||
+
+|hero|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+||||
+
+|montezuma_revenge|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+||||
+||||
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+
+
+360
+
+340
+
+320
+
+300
+
+280
+
+
+4800
+
+4400
+
+4000
+
+3600
+
+
+2000
+
+1500
+
+1000
+
+|ms_pacman|Col2|Col3|Col4|Col5|Col6|
+|---|---|---|---|---|---|
+|||||||
+|||||||
+|||||||
+|||||||
+|||||||
+|||||||
+
+|private_eye|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+||||
+
+|seaquest|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||||
+||||||
+||||||
+||||||
+
+
+Unbonused
+RND
+Ensemble
+DISDAIN
+
+
+0e+00 5e+08 1e+09
+
+
+0e+00 5e+08 1e+09
+
+environment steps
+
+
+0e+00 5e+08 1e+09
+
+
+Figure 16: Episodic coverage for all games, methods, and seeds.
+
+
+-----
+
+|alien|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|amidar|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|assault|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|asterix|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|asteroids|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|atlantis|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|boxing|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+|bank_heist|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|battle_zone|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|beam_rider|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|berzerk|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|bowling|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+
+|centipede|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|chopper_command|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2 3
+
+
+|crazy_climber|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|defender|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|frostbite|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|kangaroo|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|phoenix|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|road_runner|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|star_gunner|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+2
+
+1
+
+0
+
+0 1 2 3 0 1 2 3
+
+frostbite gopher
+
+3
+
+2
+
+1
+
+0
+
+0 1 2 3 0 1 2 3
+
+kangaroo krull
+
+32 steps1e9
+
+1
+
+0
+
+0 1 2 3 0 1 2 3
+
+1e8
+
+phoenix pitfall
+
+3
+
+2
+
+1 1e7
+
+0
+
+0 1 2 3 0 1 2 3
+
+road_runner robotank
+
+3
+
+2
+
+1
+
+0
+
+0 1 2 3 0 1 2 3
+
+star_gunner surround
+
+3
+
+2
+
+1
+
+0
+
+1 2
+
+|breakout|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|demon_attack|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|double_dunk|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+|enduro|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|fishing_derby|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|freeway|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|gopher|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|hero|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+0 1 2 3
+
+
+|ice_hockey|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|gravitar|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|jamesbond|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|krull|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|kung_fu_master|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|name_this_game|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+|montezuma_revenge|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|ms_pacman|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|pitfall|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|private_eye|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|qbert|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+2
+
+|pong|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|riverraid|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|robotank|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+
+|space_invaders|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+|seaquest|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|skiing|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|solaris|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|surround|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+|tennis|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|time_pilot|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|tutankham|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+1 2
+
+
+|up_n_down|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|venture|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|video_pinball|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|wizard_of_wor|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|yars_revenge|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+|zaxxon|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+Skill learning reward
+
+Figure 17: rskill vs rDISDAIN during learning for all seeds per-game on all 57 Atari games. Each
+panel includes data from 3 seeds. DISDAIN reward tends to dominate early but fades away as skill
+learning converges.
+
+
+-----
+
+Skill 52 (0.99) Skill 31 (0.99) Skill 117 (0.99) Skill 63 (0.99) Skill 77 (0.99) Skill 94 (0.99) Skill 86 (0.99) Skill 95 (0.99) Skill 58 (0.99) Skill 76 (0.99)
+
+Skill 99 (0.99) Skill 15 (0.99) Skill 108 (0.99) Skill 101 (0.99) Skill 73 (0.99) Skill 8 (0.99) Skill 84 (0.99) Skill 51 (0.99) Skill 109 (0.50) Skill 49 (0.49)
+
+Skill 44 (0.49) Skill 120 (0.50) Skill 57 (0.99) Skill 103 (0.49) Skill 30 (0.50) Skill 20 (0.99) Skill 61 (0.99) Skill 21 (0.99) Skill 114 (0.50) Skill 96 (0.49)
+
+Skill 24 (0.98) Skill 23 (0.49) Skill 85 (0.50) Skill 18 (0.50) Skill 64 (0.50) Skill 41 (0.99) Skill 127 (0.50) Skill 25 (0.49) Skill 26 (0.99) Skill 56 (0.99)
+
+Skill 105 (0.99) Skill 121 (0.99) Skill 102 (0.51) Skill 75 (0.48) Skill 80 (0.99) Skill 104 (0.51) Skill 32 (0.49) Skill 89 (0.99) Skill 116 (1.00) Skill 81 (0.99)
+
+Skill 107 (0.99) Skill 45 (0.99) Skill 50 (0.98) Skill 111 (0.49) Skill 90 (0.50) Skill 59 (0.99) Skill 11 (0.99) Skill 72 (0.99) Skill 22 (0.99) Skill 1 (0.99)
+
+Skill 27 (0.99) Skill 65 (0.49) Skill 82 (0.50) Skill 74 (0.99) Skill 40 (0.99) Skill 36 (0.99) Skill 10 (0.99) Skill 42 (0.99) Skill 118 (0.50) Skill 106 (0.50)
+
+Skill 9 (0.50) Skill 39 (0.50) Skill 110 (0.99) Skill 123 (0.99) Skill 115 (0.99) Skill 68 (0.99) Skill 48 (0.99) Skill 55 (0.49) Skill 34 (0.51) Skill 5 (0.99)
+
+Skill 125 (0.99) Skill 3 (0.99) Skill 4 (0.99) Skill 6 (0.99) Skill 12 (0.49) Skill 19 (0.50) Skill 93 (0.99) Skill 46 (0.50) Skill 112 (0.49) Skill 113 (0.99)
+
+Skill 17 (0.49) Skill 53 (0.50) Skill 98 (0.99) Skill 16 (0.99) Skill 71 (0.50) Skill 70 (0.49) Skill 2 (0.99) Skill 91 (0.99) Skill 47 (0.99) Skill 0 (0.33)
+
+Skill 88 (0.34) Skill 54 (0.32) Skill 83 (0.99) Skill 13 (0.99) Skill 60 (0.99) Skill 92 (0.99) Skill 119 (0.99) Skill 7 (0.48) Skill 69 (0.51) Skill 122 (0.99)
+
+Skill 100 (0.99) Skill 67 (0.99) Skill 78 (0.50) Skill 97 (0.49) Skill 126 (0.99) Skill 33 (0.99) Skill 37 (0.99) Skill 66 (0.99) Skill 14 (0.99) Skill 79 (0.50)
+
+Skill 35 (0.49) Skill 29 (0.50) Skill 43 (0.50) Skill 62 (0.99) Skill 87 (0.51) Skill 38 (0.49) Skill 124 (0.99) Skill 28 (0.99)
+
+Figure 18: Example DISDAIN skill rollouts on Four Rooms. Each panel shows rollout for one
+skill. Panels are labeled with skill index and the probability the discriminator assigns to the correct
+skill label. Color indicates time within episode, moving from green (beginning) to yellow (end).
+Skills are sorted by final state. DISDAIN learns to visit nearly every accessible state.
+
+
+-----
+
+Skill 125 (0.11) Skill 2 (0.11) Skill 89 (0.11) Skill 91 (0.11) Skill 55 (0.12) Skill 25 (0.10) Skill 22 (0.10) Skill 77 (0.12) Skill 105 (0.11) Skill 127 (0.09)
+
+Skill 96 (0.08) Skill 20 (0.09) Skill 17 (0.08) Skill 113 (0.08) Skill 74 (0.07) Skill 13 (0.08) Skill 124 (0.09) Skill 123 (0.08) Skill 8 (0.08) Skill 36 (0.08)
+
+Skill 60 (0.08) Skill 48 (0.26) Skill 38 (0.25) Skill 70 (0.24) Skill 59 (0.25) Skill 101 (0.17) Skill 86 (0.17) Skill 72 (0.16) Skill 84 (0.17) Skill 3 (0.16)
+
+Skill 24 (0.16) Skill 41 (0.35) Skill 12 (0.35) Skill 33 (0.30) Skill 79 (1.00) Skill 83 (0.07) Skill 49 (0.08) Skill 53 (0.08) Skill 90 (0.08) Skill 92 (0.07)
+
+Skill 102 (0.08) Skill 18 (0.08) Skill 110 (0.08) Skill 14 (0.08) Skill 114 (0.08) Skill 10 (0.08) Skill 117 (0.07) Skill 32 (0.08) Skill 26 (0.97) Skill 95 (0.11)
+
+Skill 54 (0.11) Skill 65 (0.12) Skill 115 (0.11) Skill 119 (0.11) Skill 63 (0.11) Skill 51 (0.11) Skill 34 (0.11) Skill 40 (0.11) Skill 122 (0.98) Skill 52 (0.22)
+
+Skill 99 (0.21) Skill 73 (0.19) Skill 7 (0.19) Skill 67 (0.19) Skill 5 (1.00) Skill 21 (1.00) Skill 16 (1.00) Skill 68 (0.25) Skill 85 (0.24) Skill 46 (0.25)
+
+Skill 50 (0.25) Skill 19 (0.20) Skill 15 (0.19) Skill 61 (0.18) Skill 28 (0.22) Skill 66 (0.21) Skill 47 (0.49) Skill 57 (0.50) Skill 97 (0.26) Skill 76 (0.24)
+
+Skill 81 (0.26) Skill 111 (0.24) Skill 1 (0.99) Skill 35 (0.33) Skill 30 (0.34) Skill 43 (0.33) Skill 58 (1.00) Skill 88 (0.25) Skill 118 (0.25) Skill 29 (0.24)
+
+Skill 71 (0.26) Skill 106 (0.49) Skill 27 (0.50) Skill 56 (0.14) Skill 6 (0.14) Skill 116 (0.15) Skill 64 (0.14) Skill 108 (0.15) Skill 104 (0.14) Skill 23 (0.14)
+
+Skill 39 (0.99) Skill 126 (0.46) Skill 109 (0.54) Skill 120 (0.49) Skill 37 (0.51) Skill 11 (0.24) Skill 4 (0.26) Skill 121 (0.25) Skill 0 (0.25) Skill 107 (0.20)
+
+Skill 82 (0.21) Skill 42 (0.19) Skill 62 (0.20) Skill 87 (0.19) Skill 93 (0.32) Skill 78 (0.36) Skill 94 (0.31) Skill 45 (0.48) Skill 75 (0.51) Skill 103 (1.00)
+
+Skill 69 (1.00) Skill 44 (1.00) Skill 112 (1.00) Skill 9 (1.00) Skill 98 (1.00) Skill 80 (0.50) Skill 31 (0.49) Skill 100 (1.00)
+
+Figure 19: Example Unbonused skill rollouts on Four Rooms. Each panel shows rollout for one
+skill. Panels are labeled with skill index and the probability the discriminator assigns to the correct
+skill label. Color indicates time within episode, moving from green (beginning) to yellow (end).
+Skills are sorted by final state. Unbonused skill learning fails to learn to reach many states beyond
+the first (upper left) room.
+
+
+-----
+
+100
+
+75
+
+Unbonused
+
+50 Ensemble
+
+Count
+
+skills learnt DISDAIN
+
+25
+
+0
+
+0.0e+00 2.5e+08 5.0e+08 7.5e+08 1.0e+09
+
+environment steps
+
+
+Figure 20: Four Rooms training curves broken out by seed. The exploration bonuses dramatically
+improve skill learning in most cases, though they also slow learning and add variance due to the
+training of an additional separate value function (and for DISDAIN, an ensemble of discriminators).
+
+
+-----
+

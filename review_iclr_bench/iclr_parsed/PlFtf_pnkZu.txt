@@ -1,0 +1,1956 @@
+# EXAMINING SCALING AND TRANSFER OF LANGUAGE MODEL ARCHITECTURES FOR MACHINE TRANSLA## TION
+
+**Anonymous authors**
+Paper under double-blind review
+
+ABSTRACT
+
+Natural language understanding and generation models follow one of the two
+dominant architectural paradigms: language models (LMs) that process concatenated sequences in a single stack of layers, and encoder-decoder models (EncDec)
+that utilize separate layer stacks for input and output processing. In machine translation, EncDec has long been the favoured approach, but with few studies investigating the performance of LMs. In this work, we thoroughly examine the role
+of several architectural design choices on the performance of LMs on bilingual,
+(massively) multilingual and zero-shot translation tasks, under systematic variations of data conditions and model sizes. Our results show that: (i) Different
+LMs have different scaling properties, where architectural differences often have
+a significant impact on model performance at small scales, but the performance
+gap narrows as the number of parameters increases, (ii) Several design choices,
+including causal masking and language-modeling objectives for the source sequence, have detrimental effects on translation quality, and (iii) When paired with
+full-visible masking for source sequences, LMs could perform on par with EncDec
+on supervised bilingual and multilingual translation tasks, but improve greatly on
+zero-shot directions by facilitating the reduction of off-target translations.
+
+1 INTRODUCTION
+
+The popularity of large, general-purpose text generation models has skyrocketed in recent years due
+to their outstanding performance across a wide range of natural language processing tasks (Brown
+et al., 2020; Raffel et al., 2020; Liu et al., 2020; Xue et al., 2021). These studies, under large-scale
+pretraining and also model scaling, show the promise of moving to unified neural architectures and
+that dropping various task-specific inductive biases improves model generalization and/or performance (Devlin et al., 2019; Kaplan et al., 2020). In neural machine translation (NMT), one essential
+task-specific inductive bias is to separately handle source sentence understanding and target sentence
+generation with the encoder-decoder paradigm (EncDec). Although such bias significantly benefits
+translation (Vaswani et al., 2017; Chen et al., 2018; Aharoni et al., 2019; Barrault et al., 2020; Ansari
+et al., 2020), some recent work shows insights challenging it, for example, aggressively simplifying
+the decoder yields little to no compromise on translation quality (Kasai et al., 2021). This thereby
+inspires the question how the removal of this separation, i.e. using a single unified module for both
+encoding and decoding (LMs), works for translation, and whether we can get any benefits out of
+that.
+
+Although some studies reported promising translation quality with LMs (He et al., 2018; Wang et al.,
+2021), they compare models under merely one configuration (model size), neglecting that neural
+models follow scaling laws (Kaplan et al., 2020; Ghorbani et al., 2021; Gordon et al., 2021) where
+the impact of each added parameter on model performance might vary across different models. How
+the inductive biases of LMs and EncDec impact the model’s performance as we increase their size
+and the amounts of training data are intriguing yet missing in the literature.
+
+In this paper, we explore various configurations of LM architectures for translation as in Figure 1,
+and compare them with EncDec on model scaling and cross-lingual transfer. We conduct a systematic study under a variety of data conditions, tasks (bilingual, multilingual and zero-shot) and model
+
+
+-----
+
+Attention Mask
+
+Source MLE Loss (optional) Target MLE Loss
+
+-log P(X) -log P(Y|X) x1 x2 x3 <s> y1 y2 x1 x2 x3 <s> y1 y2
+
+x1
+
+Top Encoding x2
+
+x3
+
+<s>
+
+y1
+
+Feed-Forward SubLayer y2
+
+PrefixLM CasualLM
+
+x L
+
+Self-Attention Self-Attention Masks in Encoder-Decoder Model
+
+LayerWise Encoding x1 x2 x3 x1 x2 x3 <s> y1 y2
+
+x1 <s> <s>
+
+Token Embeddings x1 x2 x3 <s> y1 y2 xx32 yy21 yy21
+
+encoder cross-attenti decoder
+
+Position Embeddings 0 1 2 0 1 2 mask on mask mask
+
+Figure 1: Illustration for translation-oriented language models. X and Y denote source and target input, respectively. To enable translation, we adapt the LM self-attention mask to either the PrefixLM mask or CausalLM
+mask (top right), where filled black circles indicate disallowed attention. We also explore top-only encoding
+(Top Encoding) for PrefixLM which feeds the final-layer source encodings to generation similar to EncDec,
+rather than layer-wise coordinated encodings (He et al., 2018). Masks of EncDec are shown in the bottom right
+
+for comparison.
+
+capacities. We examine architectural design choices associated with LMs, including causal masking
+(CausalLM) vs. full-visible masking (PrefixLM) for source sequences,[1] layer-wise coordination (He
+et al., 2018) vs. final-layer source encodings (TopOnly) for target sequence generation, increasing
+LM depth vs. width, and also the effect of adding source language modeling loss for CausalLM.
+
+We evaluate how these architectural priors affect translation quality as we increase the number of
+parameters available to the model, under a diverse set of bilingual translation settings and also (massively) multilingual settings, with a special focus on transfer to low-resource languages and zero-shot
+directions. Our main findings are summarized below:
+
+-  LMs show different scaling properties compared to EncDec. The architectural differences
+become less important as models scale, measured by reduced quality gap against EncDec,
+regardless of the language similarities, training data conditions and evaluation settings.
+
+-  PrefixLM variants often outperform their CausalLM counterparts; increasing LM depth
+benefits the translation task more than increasing the width; and adding a source-side language modeling objective to CausalLM doesn’t affect translation quality.
+
+-  Cross-lingual transfer also benefits from model scaling, where EncDec almost always dominates the quality Pareto frontier on supervised directions while zero-shot translation favors
+PrefixLM LMs. PrefixLM LMs significantly reduce off-target translations.
+
+-  Although LMs could reach or even surpass the translation quality of EncDec, they still lag
+far behind EncDec with respect to computational efficiency as measured in FLOPs.
+
+2 RELATED WORK
+
+Using language models in the task of translation has a long history, particularly in the era of statistical machine translation (SMT) where LM was used as a separate yet crucial component ensuring
+the fluency of generation (Stolcke, 2002; Heafield, 2011; Koehn, 2010). With neural networks,
+NMT unified those isolated SMT components including LM under the encoder-decoder formulation (Kalchbrenner & Blunsom, 2013; Cho et al., 2014; Sutskever et al., 2014; Bahdanau et al.,
+2015), which makes use of separate modules to process input and output. Further studies exploring
+architectural modifications by using LM alone as a translation model, nevertheless, got much less
+attention. He et al. (2018) proposed layer-wise coordination between encoder and decoder with
+tied weights, where each decoder layer attends to its corresponding encoder layer at the same depth
+as opposed to the conventional method of attending the top-most encoder representations. Later,
+
+1Also known as unidirectional vs bidirectional language modelling, where in the unidirectional case a token
+representation takes into account only the preceding tokens and their representations, but the bidirectional case
+takes into account both preceding and following tokens in a sequence.
+
+
+-----
+
+Objective Structure Src-Src Parameter
+Model
+
+_−_ log P (X) _−_ log P (Y |X) Layer-Wise TopOnly Mask Sharing
+
+EncDec   Full 
+
+PrefixLM   Full 
++ TopOnly   Full 
+
+CausalLM    Causal 
++ TgtOnly   Causal 
+
+Table 1: Comparison of different models. X/Y : source/target input. Layer-Wise: layer-wise coordination;
+_TopOnly: use topmost-layer source encodings; Src-Src Mask: the intra-source masking schema, either fully_
+visible (Full) or causal (Causal); Parameter Sharing: share parameters between source and target.
+
+Fonollosa et al. (2019) extended it with locality constraint. Dong et al. (2019) explored LMs for
+sequence generation under large-scale pretraining. Despite reporting promising results, these prior
+studies either focus only on bilingual tasks or do not consider the scaling properties of the models,
+leaving the picture incomplete: how the findings will change as we scale the models and how the
+languages benefit from/interfere each other as the architectural priors (inductive biases) change.
+
+Neural models follow some scaling laws. Kaplan et al. (2020) reported the test cross-entropy loss
+of LMs can be formulated as a power-law scaling function of either model size (excluding embedding parameters) or dataset size. Later on, researchers examined and confirmed such findings across
+different domains, including vision modeling (Zhai et al., 2021), knowledge transfer from pretraining (Hernandez et al., 2021), autoregressive generative modeling (Henighan et al., 2020), and neural
+machine translation (Gordon et al., 2021; Ghorbani et al., 2021), to name a few. We find it essential
+to study the scaling behavior of new architectures and approaches given the recent evidence on the
+emergent properties of the models at scale (Brown et al., 2020).
+
+Another critical component in machine translation is the number of languages being considered
+with the models, which is the very focus of multilingual NMT (Firat et al., 2016). Cross-lingual
+transfer in multilingual NMT often results from parameter sharing across languages, which benefits low-resource languages and also enables zero-shot translation (Johnson et al., 2017), although
+the quality on zero-shot directions is largely hindered by the off-target translation problem (Arivazhagan et al., 2019; Zhang et al., 2020). The structure of LMs further encourages parameter
+sharing, offering a chance to improve the transfer while magnifying the problem of interference
+(negative-transfer) (Wang et al., 2020; Zhang et al., 2021). Very recently, Wang et al. (2021) analyzed the cross-lingual transfer behavior of CausalLM, and reported encouraging zero-shot performance. However, we did not observe the same results likely because of data sampling, model
+architecture and optimization differences which zero-shot transfer is sensitive to.
+
+3 LANGUAGE MODEL ARCHITECTURES FOR TRANSLATION
+
+In this section, we briefly review EncDec and then present LM architectures for translation based on
+Transformer (Vaswani et al., 2017). Table 1 compares different models. Given a source sequence
+**X of length |X| and its target translation Y of length |Y |, EncDec performs translation via the**
+following structure:
+
+**X[l]** = FFN ◦ SAtt **X[l][−][1][]** _,_ **Y[l]** = FFN ◦ CAtt ◦ SAtt **Y[l][−][1], X[L][]** _,_ (1)
+
+where l denotes the layer index and  _◦_ indicates consecutive sublayers.  **X[l]** _∈_ R[|][X][|×][d] and
+**Y[l]** _∈_ R[|][Y][ |×][d] are the layer representations of the source and target sequence respectively, with a
+model dimension of d. The first input layer (X[0], Y[0]) is the summation of token embeddings and
+their positional encodings. We drop all the layer normalization and residual connections in our
+formulations for brevity.
+
+The encoder is a stack of L layers, each of which includes a multi-head self-attention sublayer
+(SAtt) followed by a feed-forward sublayer (FFN). SAtt in the encoder is bidirectional with full_visible masking that has full visibility to all source tokens, preceding and following. Its final-layer_
+representations X[L] are fed to the decoder, which shares a similar structure to the encoder but with
+
+
+-----
+
+#Samples (Sources) Experiments
+Dataset
+
+Train Dev Test BIL MUL
+
+
+WMT14 En-De 4.5M 3000 (WMT13) 3003 (WMT14) 
+WMT14 En-Fr 41M 3000 (WMT13) 3003 (WMT14)  
+
+1997 (WMT19, SO)
+WMT19 En-Zh 26M 3981 (WMT18)  
+2000 (WMT19 TO)
+
+4927/1997 (Web/WMT19, SO)
+Web En-De 2B 7927 (Web) 
+6000/2000 (Web/WMT19, TO)
+
+Table 2: Statistics of different datasets. M/B: million/billion; SO/TO: source-original/target-original test sets;
+_Web: in-house web-crawled datasets; BIL/MUL: the data is used for bilingual/multilingual experiments._
+
+an additional (multi-head) cross-attention sublayer (CAtt). Unlike encoder, SAtt in the decoder is
+unidirectional with causal masking, where attention to following tokens is disabled (masked). CAtt
+can always access all source inputs, though. Note we set the encoder and decoder depth equally to
+_L, and use d[ff]_ to denote the intermediate dimension of FFN. EncDec is often optimized with the
+target translation objective based on Y[L]:
+
+_L[EncDec](X, Y ) = L[TGT]_ = − log P (Y |X, Y[L]). (2)
+
+Rather than separately modeling source and target sequences, LM handles both with a single module:
+**X[l], Y[l][]** = FFN ◦ SAtt **X[l][−][1], Y[l][−][1][]** _, M_ _,_ (3)
+
+where M 0, 1  is the attention mask that controls the information flow within  
+_∈{_ _}[(][|][X][|][+][|][Y][ |][)][×][(][|][X][|][+][|][Y][ |][)]_
+the concatenated sequences ([·, ·]).[2] Two LM variants explored by changing the structure of mask
+**M, PrefixLM and CausalLM.**
+
+**PrefixLM merges different modules of EncDec, trained with L[TGT]. Its attention mask**
+
+**M[PrefixLM](i, j) = 1, if i ≥** _j or j ≤|X|; otherwise 0,_ (4)
+
+combines the encoder/decoder self-attention mask and the cross-attention mask of EncDec.
+
+**CausalLM, by contrast, is a strict LM that applies causal masking to both sequences:**
+
+**M[CausalLM](i, j) = 1, if i ≥** _j; otherwise 0._ (5)
+
+Apart from L[TGT], CausalLM also includes the source-side language modeling loss for training:
+
+_L[CausalLM](X, Y ) = L[SRC]_ + L[TGT] = − log P (X|X[L]) − log P (Y |X, Y[L]). (6)
+
+To improve our understanding of LMs for translation, we further incorporate two extensions:
+
+**PrefixLM + TopOnly The model defined in Equation 3 performs attention over the source and**
+target sequence within the same layer. In contrast, EncDec always uses the topmost-layer
+source encodings for translation. We mimic this with TopOnly extension by feeding toplayer encodings, i.e. X[L] instead of X[l][−][1], to each attention sublayer. It operates the same
+as EncDec but with the parameters of encoder and decoder tied.
+
+**CausalLM + TgtOnly The inclusion of the source-side objective enriches CausalLM’s learning**
+signal and encourages the model to absorb source language characteristics. However, it
+requires and occupies part of modeling capacity, which might negatively affect translation.
+To offset this impact, we add the TgtOnly extension that optimizes CausalLM with the target translation objective _C_ alone, which also aligns better with EncDec and PrefixLM.
+_L[T GT]_
+
+4 SETUP
+
+**Model Setting** We use Transformer for experiments. By default, we adopt the base setting, with
+_d = 512, d[ff]_ = 2048 and 8 attention heads. We also work with the Transformer big setting where
+each hyper-parameter above is doubled. Training and inference details are in Appendix A.
+
+2Note that, in our implementation we still use separate source and target positions as shown in Figure 1.
+
+
+-----
+
+3.07
+
+2.83
+
+
+3.93
+
+3.65
+
+
+2.40
+
+2.21
+
+0.08 0.19 0.43 0.97 2.22
+
+|Col1|Col2|EncDec|Col4|
+|---|---|---|---|
+|||EncDec PrefixL PrefixL PrefixL PrefixL CausalL CausalL CausalL CausalL Fitted S|M-Deep M-Wide M-TopOnly-Deep M-TopOnly-Wide M-Deep M-Wide M-TgtOnly-Deep M-TgtOnly-Wide caling Law|
+|||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#Params ×10[8]
+
+
+3.14
+
+2.91
+
+0.08 0.19 0.43 0.97 2.22
+
+|Col1|Col2|EncDec|Col4|
+|---|---|---|---|
+|||EncDec PrefixL PrefixL PrefixL PrefixL CausalL CausalL CausalL CausalL Fitted S|M-Deep M-Wide M-TopOnly-Deep M-TopOnly-Wide M-Deep M-Wide M-TgtOnly-Deep M-TgtOnly-Wide caling Law|
+|||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#Params ×10[8]
+
+
+(a) Log-Perplexity for En→Fr
+
+40.54
+
+36.62
+
+
+(b) Log-Perplexity for En→Zh
+
+29.51
+
+25.81
+
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDec PrefixL PrefixL PrefixL PrefixL||M-Deep M-Wide M-TopOnly-Deep M-TopOnly-Wide|
+||||CausalL CausalL CausalL CausalL|M-Deep M-Wide M-TgtOnly-Deep M-TgtOnly-Wide|
+
+
+0.08 0.19 0.43 0.97 2.22
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+
+#Params ×10[8]
+
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDec PrefixL PrefixL PrefixL PrefixL||M-Deep M-Wide M-TopOnly-Deep M-TopOnly-Wide|
+||||CausalL CausalL CausalL CausalL|M-Deep M-Wide M-TgtOnly-Deep M-TgtOnly-Wide|
+
+
+0.08 0.19 0.43 0.97 2.22
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+
+#Params ×10[8]
+
+
+(c) BLEU for En→Fr
+
+
+(d) BLEU for En→Zh
+
+
+Figure 2: Fitted scaling curves (top) and BLEU scores (bottom) for different models on WMT14 En-Fr (left)
+and WMT19 En-Zh (right) tasks. Top: dashed and solid fitted curves are for LM + Deep and LM + Wide,
+respectively. We represent the EncDec scaling with bold solid curve. Bottom: dashed curve denotes the BLEU
+scores of EncDec as a function of model parameters for reference. Markers in circles are for CausalLM variants.
+Models are trained in Transformer base setting. Best seen in color.
+
+**Datasets and Evaluation** We use WMT14 English-French (En-Fr), WMT14 English-German
+(En-De), WMT19 English-Chinese (En-Zh) and an in-house web-crawled (Web) En-De dataset
+for experiments, whose statistics are summarized in Table 2. We also report results on OPUS100 (Zhang et al., 2020), a massively multilingual corpus containing 100 languages. All datasets
+are pre-processed with byte pair encoding (Sennrich et al., 2016, BPE) implemented by SentencePiece (Kudo & Richardson, 2018). We set the BPE vocabulary size to 32K by default. We report test
+log-perplexity score (PPL) for scaling study particularly and also show SacreBLEU (Post, 2018)[3].
+
+5 EXPERIMENTS FOR MODEL SCALING
+
+
+Kaplan et al. (2020) reported the model performance can be described with a power-law, with respect
+to its parameters, as below:
+
+_p_
+
+_N0_
+(N ) = α + _,_ (7)
+_L_ _N_ _L∞_
+ 
+
+where L(N ) fits test PPL, and N denotes the number of parameters. N0 is a constant used for
+numerical stability which is obtained from 1-layer EncDec model. α, p, are fitted parameters,
+_L∞_
+and we mainly analyze the estimated scaling exponent p and the irreducible loss for different
+_L∞_
+models.
+
+The way of increasing model parameters varies for the same model and also across different models.
+We perform scaling firstly for EncDec by changing the depth L (from 1 to 26 layers, equally for its
+encoder and decoder) while keeping the other hyper-parameters intact following Ghorbani et al.
+(2021). We then align the scaling settings of LM with its EncDec counterpart in term of model
+parameters through increasing either its depth or width:
+
+-  LM + Deep adds parameters via stacking more Transformer layers, which was also used in
+previous studies (He et al., 2018; Wang et al., 2021).
+
+
+3Signature: BLEU+case.mixed+lang*+numrefs.1+smooth.exp+tok.13a+v.1.5.1
+
+
+-----
+
+|Col1|EncDec|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||PrefixLM-D PrefixLM-W PrefixLM-T|eep ide opOnly-Deep|||||
+||PrefixLM-T CausalLM- CausalLM-|opOnly-Wide Deep Wide|||||
+||CausalLM- CausalLM-|TgtOnly-Deep TgtOnly-Wide|||||
+||||||||
+||||||||
+
+
+Estimated Scaling Exponent Estimated Irreducible Loss
+
+1.0 2.40 EncDecPrefixLM-Deep
+
+PrefixLM-Wide
+
+0.9 2.35 PrefixLM-TopOnly-DeepPrefixLM-TopOnly-Wide
+
+CausalLM-Deep
+
+p 0.8 L 2.30 CausalLM-WideCausalLM-TgtOnly-DeepCausalLM-TgtOnly-Wide
+
+2.25
+
+Fitted 0.7 Fitted
+
+2.20
+
+0.6
+
+2.15
+
+0.5
+
+2.10
+
+All Src OrigTgt Orig Short Medium Long All Src OrigTgt Orig Short Medium Long
+
+
+Figure 3: Fitted scaling exponent (p, left) and irreducible loss (, right) over different evaluation settings on
+_L∞_
+WMT14 En-Fr (En→Fr). All: the whole test set; Src Orig, Tgt Orig: source-original and target-original test set,
+respectively; Short, Medium, Long: shortest, medium and longest ∼376 samples from the test set, respectively.
+
+-  LM + Wide, instead, grows the model width. We choose to enlarge the feed-forward dimension from d[ff] to 3d[ff]. Note other strategies for width scaling are possible and many, but
+exploring them is resource-consuming and beyond the scope of our paper.
+
+We distinguish data-limited regime from model size-limited regime for model scaling (Bahri et al.,
+2021), where the former has relatively fewer training samples than model parameters thus likely
+suffers from overfitting (e.g. with WMT14 En-Fr and WMT19 En-Zh), while the latter has enough
+samples for model fitting (e.g. with Web En-De).
+
+5.1 SCALING IN DATA-LIMITED REGIME
+
+**Architectural difference matters most when the model is at a small scale.** Figure 2 summarizes the scaling results on WMT14 En-Fr and WMT19 En-Zh. When there are fewer parameters,
+the model with inductive biases favoring translation will achieve better quality. Such inductive bias
+includes 1) allowing the full visibility to the source input as in PrefixLM[4] rather than causal masking;
+2) using topmost-layer source encodings for translation (TopOnly) rather than layer-wise coordinated
+encodings; 3) deeper LMs (Deep) rather than wider; and 4) training LMs without source-side language modeling loss (TgtOnly). The fact that LM + Deep outperforms LM + Wide shows that not
+only the number of parameters matters, but also the way parameters are added. This aligns with the
+previous findings: deeper models apply more non-linear operations and induce more abstract representations, which often helps translation (Wang et al., 2019). This also applies to TopOnly. Most of
+these findings are consistent across different languages and evaluation metrics (Figure 2a-2d).
+
+**Different models show different scaling properties, but the gap narrows at scale.** The impact
+of added parameters on translation performance differs across different models. The LMs performing poorly at small scale often gain more from the increased capacity. For instance, the difference
+between LM + Deep and LM + Wide almost disappears at the end, resonating with the optimal
+depth-vs.-width theory (Levine et al., 2020). We observe that PrefixLM and EncDec converge to a
+similar region, followed by CausalLM + TgtOnly while CausalLM still retains a clear gap against
+the others. This performance gap on WMT19 En-Zh is smaller, mainly because of model overfitting.
+BLEU scores in Figure 2c and 2d also show such a trend, although the relationship between BLEU
+and PPL is non-trivial (Ghorbani et al., 2021). These tell us that the success of architectural modifications on small-scale models might not transfer to large-scale settings, and that comparing different
+models under one model configuration might result in incomplete and misleading conclusions. Note
+we also observe reduced gap when considering the number of layers (see Figure 9 in the Appendix).
+
+**Do sentence length and originality of test samples affect scaling properties?** Not much! We
+further test how the scaling changes across different evaluation settings, and show the results on
+WMT14 En-Fr in Figure 3. The scaling exponent changes marginally over different settings (often
+less than 0.05), suggesting that the scaling curves are quite similar in these settings (see Figure 8,
+10, 11 in Appendix), although sentences of different originalities differ largely in style and natural
+4By default, we use PrefixLM (CausalLM) to refer to all PrefixLM variants (CausalLM variants). We adopt
+the italic form to denote a specific variant.
+
+
+-----
+
+3.07
+
+2.83
+
+
+3.93
+
+3.64
+
+
+2.40
+
+2.21
+
+0.15 0.30 0.63 1.30 2.69
+
+|Col1|EncD Prefix Prefix Prefix Prefix Caus Caus Caus Caus Fitted|ec LM-Deep LM-Wide LM-TopOn LM-TopOn alLM-Deep alLM-Wide alLM-TgtOn alLM-TgtOn Scaling La|
+|---|---|---|
+||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#FLOPs ×10[11]
+
+
+3.14
+
+2.91
+
+0.15 0.30 0.63 1.30 2.69
+
+|Col1|Col2|EncD Prefix Prefix Prefix Prefix Causa Causa Causa Causa Fitted|ec LM-Deep LM-Wide LM-TopOnl LM-TopOnl lLM-Deep lLM-Wide lLM-TgtOn lLM-TgtOn Scaling La|
+|---|---|---|---|
+|||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#FLOPs ×10[11]
+
+
+(a) En→Fr
+
+
+(b) En→Zh
+
+
+Figure 4: Fitted scaling curves for different models on WMT14 En-Fr and WMT19 En-Zh in term of FLOPs.
+
+
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly- M-TopOnly-|
+|---|---|---|---|
+||CausalL CausalL CausalL CausalL Fitted S||M-Deep M-Wide M-TgtOnly M-TgtOnly caling Law|
+|||||
+
+|Col1|Col2|Col3|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly- M-TopOnly-|
+|---|---|---|---|---|
+|||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly LM-TgtOnly caling Law|
+||||||
+
+
+Web (src original) Web (tgt original)
+
+2.67 EncDec 2.81 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+2.51 PrefixLM-TopOnly-Wide 2.64 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+2.37 CausalLM-TgtOnly-WideFitted Scaling Law 2.47 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+2.23 2.31
+
+2.10 2.17
+
+0.33 0.74 1.70 3.89 8.88 0.33 0.74 1.70 3.89 8.88
+
+#Params ×10[8] #Params ×10[8]
+
+
+Figure 5: Fitted scaling curves for different models on Web En-De (En→De). src/tgt: source/target; Web:
+in-domain evaluation set. Models are trained in the Transformer big setting.
+
+ness (Graham et al., 2020; Freitag et al., 2020). The estimated irreducible loss shows that targetoriginal parallel sentences are harder to model than the source-original ones, and that translating
+medium-length sentences is much easier. The loss ranking of different models changes little over
+these settings, supporting PrefixLM and EncDec generally more than CausalLM.
+
+**Do LMs deal with computational efficiency better than EncDec?** No! The FLOPs results in
+Figure 4 show that EncDec demands generally less computation than LM, but the gap narrows
+at scale. Note LM doesn’t save computations. By contrast, to perform similarly to EncDec, LM
+often goes wider or deeper, which even deteriorates its running (training and decoding) efficiency.
+Besides, EncDec allows arbitrary decoders, e.g. shallow decoders for faster inference, which is nonfeasible for LMs. Figure 4 also shows that adding the source-side loss hurts CausalLM’s efficiency.
+
+5.2 SCALING IN MODEL SIZE-LIMITED REGIME
+
+
+Figure 5 shows the in-domain scaling performance on Web En-De. Overall, we observe similar
+scaling patterns as discovered above, and such pattern transfers to out-of-domain evaluation, FLOPs
+and BLEU scores. More results are available in the Appendix (Figure 12, 13 and 14).
+
+6 EXPERIMENTS FOR CROSS-LINGUAL TRANSFER
+
+
+Based on the literature (Wang et al., 2020; Zhang et al., 2021), sharing capacity across languages
+could encourage knowledge transfer but might also gain the risk of negative interference. In this
+section, we further compare different models but on multilingual many-to-many translation. To enable multilingual NMT, we append a target language tag to each source sentence following Johnson
+et al. (2017). We perform over-sampling to balance the training data with a temperature of T = 5.
+
+**Do LMs facilitate the transfer to low-resource languages?** Not really! We start with multilingual translation for WMT En-De/Fr/Zh, and regard En-De as a relatively low-resource language pair.
+One reason behind the popularity of multilingual NMT is its transfer capability to low-resource languages. We analyze this transfer behavior for LMs and explore transfer (to De) from similar (Fr) and
+
+
+-----
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDe||c|
+||||PrefixL PrefixL PrefixL PrefixL Causal|M-Deep M-Wide M-TopOnly-Deep M-TopOnly-Wide LM-Deep|
+||||Causal Causal Causal|LM-Wide LM-TgtOnly-Deep LM-TgtOnly-Wide|
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDec|||
+||||PrefixL PrefixL PrefixL PrefixL Causal|M-Deep M-Wide M-TopOnly-Deep M-TopOnly-Wide LM-Deep|
+|||Causal Causal Causal||LM-Wide LM-TgtOnly-Deep LM-TgtOnly-Wide|
+
+
+Many-to-Many Model (EnDeFr) Many-to-Many Model (EnDeZh)
+
+30.50 30.50
+
+De)28.50 De)28.50
+
+26.50 EncDecPrefixLM-Deep 26.50 EncDecPrefixLM-Deep
+
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+Test BLEU (En24.50 PrefixLM-TopOnly-WideCausalLM-DeepCausalLM-Wide Test BLEU (En24.50 PrefixLM-TopOnly-WideCausalLM-DeepCausalLM-Wide
+
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+22.50 CausalLM-TgtOnly-Wide 22.50 CausalLM-TgtOnly-Wide
+
+0.35 0.68 1.01 1.35 1.68 0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8] #Params ×10[8]
+
+
+Figure 6: Cross-lingual transfer results (average BLEU scores) for different models from high-resource languages to the low-resource one (En-De) under different model sizes on WMT datasets. Average is performed
+over En→De and De→En evaluation. Left: multilingual En-De-Fr system; Right: multilingual En-De-Zh
+system. Both systems are many-to-many models. Models are trained in the Transformer base setting.
+
+
+
+
+
+27.00
+
+21.38
+
+15.75
+
+10.12
+
+
+27.00
+
+21.38
+
+15.75
+
+10.12
+
+
+27.00
+
+21.38
+
+15.75
+
+10.12
+
+
+4.50
+
+|In-Domain De Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|In-Domain De Fr||||
+|||||
+|||||
+|||||
+
+
+0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8]
+
+
+4.50
+
+|Out-of-Domain De Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|Out-of-Domain De Fr||||
+|||||
+|||||
+|||||
+
+
+0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8]
+
+
+4.50
+
+|Out-of-Domain Zh De/Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|Out-of-Domain Zh De/Fr||||
+|EncDec PrefixLM- PrefixLM- PrefixLM-|Deep Wide TopOnly-Deep|||
+|PrefixLM- CausalLM CausalLM CausalLM CausalLM|TopOnly-Wide -Deep -Wide -TgtOnly-Deep -TgtOnly-Wide|||
+|||||
+
+
+0.35 0.68 1.01 1.35 1.68
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+
+#Params ×10[8]
+
+
+
+
+
+3.65
+
+3.35
+
+3.05
+
+2.75
+
+
+3.65
+
+3.35
+
+3.05
+
+2.75
+
+
+3.65
+
+3.35
+
+3.05
+
+2.75
+
+|In-Domain De Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|In-Domain De Fr||||
+|||||
+
+|Out-of-Domain De Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|Out-of-Domain De Fr||||
+|||||
+
+|Out-of-Domain Zh De/Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|Out-of-Domain Zh De/Fr||||
+|EncDec PrefixLM-De|ep|||
+
+
+2.45
+
+0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8]
+
+
+2.45
+
+0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8]
+
+
+0.35 0.68 1.01 1.35 1.68
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+
+#Params ×10[8]
+
+
+
+
+
+100.0
+
+75.0
+
+50.0
+
+25.0
+
+
+100.0
+
+75.0
+
+50.0
+
+25.0
+
+
+100.0
+
+75.0
+
+50.0
+
+25.0
+
+
+0.0
+
+0.35 0.68 1.01 1.35 1.68
+
+|In-Domain De Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|In-Domain De Fr||||
+|||||
+|||||
+|||||
+
+
+#Params ×10[8]
+
+
+0.0
+
+0.35 0.68 1.01 1.35 1.68
+
+|Out-of-Domain De Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|Out-of-Domain De Fr||||
+|||||
+|||||
+|||||
+
+
+#Params ×10[8]
+
+
+0.0
+
+0.35 0.68 1.01 1.35 1.68
+
+|Out-of-Domain Zh De/Fr|Col2|Col3|Col4|
+|---|---|---|---|
+|Out-of-Domain Zh De/Fr||||
+|EncDec PrefixLM- PrefixLM- PrefixLM-|Deep Wide TopOnly-Deep|||
+|PrefixLM- CausalLM CausalLM CausalLM CausalLM|TopOnly-Wide -Deep -Wide -TgtOnly-Deep -TgtOnly-Wide|||
+|||||
+
+
+#Params ×10[8]
+
+
+Figure 7: Zero-shot transfer results of different models for multilingual many-to-many modeling on four
+languages (En-De-Fr-Zh) under different model sizes. Top: average BLEU scores; Middle: average PPL
+scores; Bottom: average translation language accuracy scores. In-domain: WMT test set; Out-of-domain:
+in-house sport-domain test sets.
+
+distant (Zh) languages separately. Figure 6 shows the results. PrefixLM produces comparable results
+to EncDec, while CausalLM lags far behind, and the incorporation of source-side objective actually
+hurts translation. Overall, we observe that EncDec almost dominates the transfer performance under different model sizes, regardless of language similarity. Similar results are also observed for
+low-resource to high-resource transfer (see Figure 15 in the Appendix).
+
+
+**Do LMs benefit zero-shot transfer?** PrefixLM does! We further test how LMs perform on zeroshot translation. We use the newstest2019 De-Fr test set as the in-domain zero-shot eval set, and
+an internal sports-domain N-way test set for De-Fr-Zh (2000 samples) as the out-of-domain eval
+
+
+-----
+
+En XX XX En Zero-Shot
+Model _→_ _→_
+
+High Med Low All High Med Low All BLEU ACC
+
+EncDec 25.8 32.4 31.9 29.2 31.4 34.3 35.0 33.1 4.80 24.21
+
+PrefixLM -0.34 -0.21 -0.82 -0.41 -0.27 -0.74 -1.59 -0.70 7.95 41.46
++ TopOnly -0.01 -0.14 -1.79 -0.44 -0.07 -0.71 -1.43 -0.57 6.59 39.06
+
+D
+
+CausalLM -4.51 -8.18 -12.9 -7.47 -5.18 -10.1 -13.0 -8.38 4.10 25.60
++ TgtOnly -0.83 -0.78 -1.40 -0.93 -1.27 -1.81 -2.43 -1.69 7.34 39.62
+
+PrefixLM -0.71 -0.75 -2.02 -1.01 -0.77 -0.88 -0.68 -0.78 7.44 38.60
++ TopOnly -0.40 -0.37 -0.66 -0.45 -0.47 -0.50 -1.41 -0.69 6.92 37.69
+
+W
+
+CausalLM -4.25 -7.58 -12.2 -7.03 -5.05 -9.88 -13.3 -8.32 4.49 28.08
++ TgtOnly -1.29 -1.27 -0.82 -1.18 -1.88 -1.96 -2.04 -1.94 5.53 29.75
+
+Table 3: Translation quality of different models for En→XX, XX→En and zero-shot language pairs on OPUS100. Models are trained in the Transformer big setting, aligned with 14-layer EncDec, containing about 412M
+parameters (excluding embedding and softmax layers). During training, we perform oversampling with a temperature of 5. We list average BLEU for High, Med, Low and All language groups. We also show average
+BLEU and translation language accuracy (ACC) for zero-shot test sets. D: LMs + Deep; W: LMs + Wide.
+
+set. Figure 7 shows the results. Scaling improves knowledge transfer for almost all models, while
+PrefixLM performs surprisingly well on zero-shot directions. In most settings, PrefixLM surpasses
+EncDec significantly with respect to BLEU, and such superiority is more obvious on out-of-domain
+evaluation and for distant language pairs.
+
+Nevertheless, we find that PrefixLM usually underperforms EncDec in terms of PPL. In other words,
+EncDec still possesses the best fitting ability on zero-shot language pairs. Results on translation
+language accuracy explains this mismatch: compared to EncDec, PrefixLM drastically reduces offtarget translation – a bottleneck of zero-shot translation (Zhang et al., 2020). This also suggests that
+EncDec suffers from more serious searching errors during inference (Stahlberg & Byrne, 2019),
+which the inductive biases of PrefixLM help.
+
+In addition, we observe no benefits from CausalLM on zero-shot translation, with or without the
+source-side language modeling objective. This finding disagrees with that of Wang et al. (2021),
+which we ascribe to various differences in model, data and optimization. Note that Wang et al.
+(2021) adopted more aggressive data oversampling, didn’t consider distant languages, proposed
+dedicated optimization with the source-side loss, used a different way to count model parameters,
+and designed different language tags for multilingual translation that could greatly affect zero-shot
+results (Wu et al., 2021). We leave the study of these differences to the future.
+
+**How do LMs perform on massively multilingual translation?** We further examine the scalability of LMs with respect to the number of languages, and experiment on massively multilingual
+translation using OPUS-100. We enlarge the BPE size to 64K to handle multilingual lexicons. Following Zhang et al. (2020), we divide the test language pairs into high-resource (High, >0.9M),
+low-resource (Low, <0.1M), and medium-resource (Med, others) groups, and report average scores
+for each group. Table 3 summarizes the results. EncDec outperforms LMs on supervised directions, with larger gap on low-resource languages and for XX→En translation. By contrast, LMs,
+particularly PrefixLM, perform better on zero-shot directions, with improved translation language
+accuracy. Overall, PrefixLM outperforms CausalLM, and also performs comparably to EncDec on
+supervised directions (often < −1 BLEU on average), echoing with our above findings.
+
+7 CONCLUSION AND FUTURE WORK
+
+In this paper, we revisited language model architectures for machine translation in the perspective
+of model scaling and cross-lingual transfer. Extensive experiments show that LMs often have different scaling properties where the impact of architectural differences gradually reduces as model
+scales up, and that LMs often deliver better zero-shot transfer than its EncDec counterpart with
+improved off-target translation although its cross-lingual transfer on supervised directions is suboptimal. PrefixLM, the one with full visibility to the source input, shows consistent superiority to its
+CausalLM counterpart, and performs similarly well to EncDec across different settings especially
+
+
+-----
+
+when paired with deep modeling. These findings show that while current product offerings for major
+language pairs or small on-device models should continue using EncDec, LMs can be an effective
+architecture for giant multilingual models with zero-shot transfer as a primary focus.
+
+We notice that the performance gap caused by architectural differences gradually disappears as the
+model size increases. This has several implications for future researches: 1) Comparing NMT models in one model setting is not enough, particularly with the widely adopted 6-layer Transformer base
+setting, because of the scaling property difference. We believe the best practice should portray the
+whole scaling picture for model comparison. 2) Just like NMT models optimized for high-resource
+translation transfer poorly to low-resource scenarios, many models developed in the past with claims
+outperforming Transformer might not transfer to large-scale model settings. These studies ideally
+should be revisited in the face of model scaling. 3) When models are compared in a single setting
+due to shortage of resources, best practice should state clearly which model size the conclusion is
+based on. 4) PrefixLM matches the performance of EncDec at large scale, and delivers promising zero-shot transfer, which deserves more efforts to study. This is also an encouraging signal for
+model unification, i.e. supporting disparate tasks with a large enough yet single model (including
+the translation tasks), which is an exciting future direction.
+
+We also notice that LMs underperform EncDec significantly on computational efficiency. In the
+future, we will put more efforts on developing more efficient networks for LM scaling. We are also
+interested in exploring the applicability of translation-optimized LMs to downstream monolingual
+and cross-lingual tasks.
+
+
+-----
+
+REFERENCES
+
+Roee Aharoni, Melvin Johnson, and Orhan Firat. Massively multilingual neural machine translation. In Proceedings of the 2019 Conference of the North American Chapter of the Association
+_for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Pa-_
+_pers), pp. 3874–3884, Minneapolis, Minnesota, June 2019. Association for Computational Lin-_
+[guistics. doi: 10.18653/v1/N19-1388. URL https://www.aclweb.org/anthology/](https://www.aclweb.org/anthology/N19-1388)
+[N19-1388.](https://www.aclweb.org/anthology/N19-1388)
+
+Ebrahim Ansari, Amittai Axelrod, Nguyen Bach, Ondˇrej Bojar, Roldano Cattoni, Fahim Dalvi,
+Nadir Durrani, Marcello Federico, Christian Federmann, Jiatao Gu, Fei Huang, Kevin Knight,
+Xutai Ma, Ajay Nagesh, Matteo Negri, Jan Niehues, Juan Pino, Elizabeth Salesky, Xing Shi,
+Sebastian Stüker, Marco Turchi, Alexander Waibel, and Changhan Wang. FINDINGS OF THE
+IWSLT 2020 EVALUATION CAMPAIGN. In Proceedings of the 17th International Confer_ence on Spoken Language Translation, pp. 1–34, Online, July 2020. Association for Compu-_
+[tational Linguistics. doi: 10.18653/v1/2020.iwslt-1.1. URL https://www.aclweb.org/](https://www.aclweb.org/anthology/2020.iwslt-1.1)
+[anthology/2020.iwslt-1.1.](https://www.aclweb.org/anthology/2020.iwslt-1.1)
+
+Naveen Arivazhagan, Ankur Bapna, Orhan Firat, Roee Aharoni, Melvin Johnson, and Wolfgang Macherey. The missing ingredient in zero-shot neural machine translation. _CoRR,_
+[abs/1903.07091, 2019. URL http://arxiv.org/abs/1903.07091.](http://arxiv.org/abs/1903.07091)
+
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural Machine Translation by Jointly
+Learning to Align and Translate. In Proceedings of the International Conference on Learning
+_Representations (ICLR), volume abs/1409.0473, September 2015._
+
+Yasaman Bahri, Ethan Dyer, Jared Kaplan, Jaehoon Lee, and Utkarsh Sharma. Explaining neural
+scaling laws. ArXiv, abs/2102.06701, 2021.
+
+Loïc Barrault, Magdalena Biesialska, Ondˇrej Bojar, Marta R. Costa-jussà, Christian Federmann,
+Yvette Graham, Roman Grundkiewicz, Barry Haddow, Matthias Huck, Eric Joanis, Tom Kocmi,
+Philipp Koehn, Chi-kiu Lo, Nikola Ljubeši´c, Christof Monz, Makoto Morishita, Masaaki Nagata,
+Toshiaki Nakazawa, Santanu Pal, Matt Post, and Marcos Zampieri. Findings of the 2020 conference on machine translation (WMT20). In Proceedings of the Fifth Conference on Machine
+_Translation, pp. 1–55, Online, November 2020. Association for Computational Linguistics. URL_
+[https://aclanthology.org/2020.wmt-1.1.](https://aclanthology.org/2020.wmt-1.1)
+
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh,
+Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot
+learners. In H. Larochelle, M. Ranzato, R. Hadsell, M. F. Balcan, and H. Lin (eds.), Ad_vances in Neural Information Processing Systems, volume 33, pp. 1877–1901. Curran Asso-_
+[ciates, Inc., 2020. URL https://proceedings.neurips.cc/paper/2020/file/](https://proceedings.neurips.cc/paper/2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf)
+[1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf.](https://proceedings.neurips.cc/paper/2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf)
+
+Mia Xu Chen, Orhan Firat, Ankur Bapna, Melvin Johnson, Wolfgang Macherey, George Foster, Llion Jones, Mike Schuster, Noam Shazeer, Niki Parmar, Ashish Vaswani, Jakob Uszkoreit, Lukasz Kaiser, Zhifeng Chen, Yonghui Wu, and Macduff Hughes. The best of both
+worlds: Combining recent advances in neural machine translation. In Proceedings of the 56th
+_Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers),_
+pp. 76–86, Melbourne, Australia, July 2018. Association for Computational Linguistics. doi:
+[10.18653/v1/P18-1008. URL https://aclanthology.org/P18-1008.](https://aclanthology.org/P18-1008)
+
+Kyunghyun Cho, Bart van Merrienboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio. Learning phrase representations using rnn encoder-decoder
+for statistical machine translation, 2014.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. BERT: Pre-training of deep
+bidirectional transformers for language understanding. In Proceedings of the 2019 Conference of
+
+
+-----
+
+_the North American Chapter of the Association for Computational Linguistics: Human Language_
+_Technologies, Volume 1 (Long and Short Papers), pp. 4171–4186, Minneapolis, Minnesota, June_
+[2019. Association for Computational Linguistics. doi: 10.18653/v1/N19-1423. URL https:](https://aclanthology.org/N19-1423)
+[//aclanthology.org/N19-1423.](https://aclanthology.org/N19-1423)
+
+Li Dong, Nan Yang, Wenhui Wang, Furu Wei, Xiaodong Liu, Yu Wang, Jianfeng Gao, Ming Zhou,
+and Hsiao-Wuen Hon. Unified language model pre-training for natural language understanding
+and generation. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E. Fox, and
+R. Garnett (eds.), Advances in Neural Information Processing Systems, volume 32. Curran As[sociates, Inc., 2019. URL https://proceedings.neurips.cc/paper/2019/file/](https://proceedings.neurips.cc/paper/2019/file/c20bb2d9a50d5ac1f713f8b34d9aac5a-Paper.pdf)
+[c20bb2d9a50d5ac1f713f8b34d9aac5a-Paper.pdf.](https://proceedings.neurips.cc/paper/2019/file/c20bb2d9a50d5ac1f713f8b34d9aac5a-Paper.pdf)
+
+Orhan Firat, Kyunghyun Cho, and Yoshua Bengio. Multi-way, multilingual neural machine translation with a shared attention mechanism. arXiv preprint arXiv:1601.01073, 2016.
+
+José A. R. Fonollosa, Noe Casas, and Marta Ruiz Costa-jussà. Joint source-target self attention with
+locality constraints. ArXiv, abs/1905.06596, 2019.
+
+Markus Freitag, David Grangier, and Isaac Caswell. BLEU might be guilty but references are
+not innocent. In Proceedings of the 2020 Conference on Empirical Methods in Natural Lan_guage Processing (EMNLP), pp. 61–71, Online, November 2020. Association for Computational_
+[Linguistics. doi: 10.18653/v1/2020.emnlp-main.5. URL https://aclanthology.org/](https://aclanthology.org/2020.emnlp-main.5)
+[2020.emnlp-main.5.](https://aclanthology.org/2020.emnlp-main.5)
+
+B. Ghorbani, Orhan Firat, Markus Freitag, Ankur Bapna, Maxim Krikun, Xavier García, Ciprian
+Chelba, and Colin Cherry. Scaling laws for neural machine translation. ArXiv, abs/2109.07740,
+2021.
+
+Mitchell A Gordon, Kevin Duh, and Jared Kaplan. Data and parameter scaling laws for neural
+[machine translation. In ACL Rolling Review - May 2021, 2021. URL https://openreview.](https://openreview.net/forum?id=IKA7MLxsLSu)
+[net/forum?id=IKA7MLxsLSu.](https://openreview.net/forum?id=IKA7MLxsLSu)
+
+Yvette Graham, Barry Haddow, and Philipp Koehn. Statistical power and translationese in machine
+translation evaluation. In Proceedings of the 2020 Conference on Empirical Methods in Natural
+_Language Processing (EMNLP), pp. 72–81, Online, November 2020. Association for Computa-_
+[tional Linguistics. doi: 10.18653/v1/2020.emnlp-main.6. URL https://aclanthology.](https://aclanthology.org/2020.emnlp-main.6)
+[org/2020.emnlp-main.6.](https://aclanthology.org/2020.emnlp-main.6)
+
+Tianyu He, Xu Tan, Yingce Xia, Di He, Tao Qin, Zhibo Chen, and Tie-Yan Liu. Layerwise coordination between encoder and decoder for neural machine translation. In
+S. Bengio, H. Wallach, H. Larochelle, K. Grauman, N. Cesa-Bianchi, and R. Garnett
+(eds.), Advances in Neural Information Processing Systems, volume 31. Curran Asso[ciates, Inc., 2018. URL https://proceedings.neurips.cc/paper/2018/file/](https://proceedings.neurips.cc/paper/2018/file/4fb8a7a22a82c80f2c26fe6c1e0dcbb3-Paper.pdf)
+[4fb8a7a22a82c80f2c26fe6c1e0dcbb3-Paper.pdf.](https://proceedings.neurips.cc/paper/2018/file/4fb8a7a22a82c80f2c26fe6c1e0dcbb3-Paper.pdf)
+
+Kenneth Heafield. KenLM: Faster and smaller language model queries. In Proceedings of the Sixth
+_Workshop on Statistical Machine Translation, pp. 187–197, Edinburgh, Scotland, July 2011. As-_
+[sociation for Computational Linguistics. URL https://aclanthology.org/W11-2123.](https://aclanthology.org/W11-2123)
+
+T. J. Henighan, Jared Kaplan, Mor Katz, Mark Chen, Christopher Hesse, Jacob Jackson, Heewoo
+Jun, Tom B. Brown, Prafulla Dhariwal, Scott Gray, Chris Hallacy, Benjamin Mann, Alec Radford, Aditya Ramesh, Nick Ryder, Daniel M. Ziegler, John Schulman, Dario Amodei, and Sam
+McCandlish. Scaling laws for autoregressive generative modeling. ArXiv, abs/2010.14701, 2020.
+
+Danny Hernandez, Jared Kaplan, T. J. Henighan, and Sam McCandlish. Scaling laws for transfer.
+_ArXiv, abs/2102.01293, 2021._
+
+Melvin Johnson, Mike Schuster, Quoc V. Le, Maxim Krikun, Yonghui Wu, Zhifeng Chen, Nikhil
+Thorat, Fernanda Viégas, Martin Wattenberg, Greg Corrado, Macduff Hughes, and Jeffrey
+Dean. Google’s multilingual neural machine translation system: Enabling zero-shot translation. _Transactions of the Association for Computational Linguistics, 5:339–351, 2017._ doi:
+[10.1162/tacl_a_00065. URL https://www.aclweb.org/anthology/Q17-1024.](https://www.aclweb.org/anthology/Q17-1024)
+
+
+-----
+
+Nal Kalchbrenner and Phil Blunsom. Recurrent continuous translation models. In Proceedings of the
+_2013 Conference on Empirical Methods in Natural Language Processing, pp. 1700–1709, Seattle,_
+[Washington, USA, October 2013. Association for Computational Linguistics. URL https:](https://aclanthology.org/D13-1176)
+[//aclanthology.org/D13-1176.](https://aclanthology.org/D13-1176)
+
+Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess, Rewon Child,
+Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language
+models. arXiv preprint arXiv:2001.08361, 2020.
+
+Jungo Kasai, Nikolaos Pappas, Hao Peng, James Cross, and Noah Smith. Deep encoder, shallow decoder: Reevaluating non-autoregressive machine translation. In International Confer_[ence on Learning Representations, 2021. URL https://openreview.net/forum?id=](https://openreview.net/forum?id=KpfasTaLUpq)_
+[KpfasTaLUpq.](https://openreview.net/forum?id=KpfasTaLUpq)
+
+Philipp Koehn. Statistical Machine Translation. Cambridge University Press, USA, 1st edition,
+2010. ISBN 0521874157.
+
+Taku Kudo and John Richardson. SentencePiece: A simple and language independent subword tokenizer and detokenizer for neural text processing. In Proceedings of the 2018 Con_ference on Empirical Methods in Natural Language Processing: System Demonstrations, pp._
+66–71, Brussels, Belgium, November 2018. Association for Computational Linguistics. doi:
+[10.18653/v1/D18-2012. URL https://www.aclweb.org/anthology/D18-2012.](https://www.aclweb.org/anthology/D18-2012)
+
+Yoav Levine, Noam Wies, Or Sharir, Hofit Bata, and Amnon Shashua. Limits to depth efficiencies
+of self-attention. In H. Larochelle, M. Ranzato, R. Hadsell, M. F. Balcan, and H. Lin (eds.),
+_Advances in Neural Information Processing Systems, volume 33, pp. 22640–22651. Curran As-_
+[sociates, Inc., 2020. URL https://proceedings.neurips.cc/paper/2020/file/](https://proceedings.neurips.cc/paper/2020/file/ff4dfdf5904e920ce52b48c1cef97829-Paper.pdf)
+[ff4dfdf5904e920ce52b48c1cef97829-Paper.pdf.](https://proceedings.neurips.cc/paper/2020/file/ff4dfdf5904e920ce52b48c1cef97829-Paper.pdf)
+
+Yinhan Liu, Jiatao Gu, Naman Goyal, Xian Li, Sergey Edunov, Marjan Ghazvininejad, Mike Lewis,
+and Luke Zettlemoyer. Multilingual denoising pre-training for neural machine translation. Trans_actions of the Association for Computational Linguistics, 8:726–742, 2020._
+
+Matt Post. A call for clarity in reporting BLEU scores. In Proceedings of the Third Con_ference on Machine Translation: Research Papers, pp. 186–191, Brussels, Belgium, Octo-_
+ber 2018. Association for Computational Linguistics. doi: 10.18653/v1/W18-6319. URL
+
+[https://aclanthology.org/W18-6319.](https://aclanthology.org/W18-6319)
+
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi
+Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning with a unified text-to[text transformer. Journal of Machine Learning Research, 21(140):1–67, 2020. URL http:](http://jmlr.org/papers/v21/20-074.html)
+[//jmlr.org/papers/v21/20-074.html.](http://jmlr.org/papers/v21/20-074.html)
+
+Rico Sennrich, Barry Haddow, and Alexandra Birch. Neural machine translation of rare words with
+subword units. In Proceedings of the 54th Annual Meeting of the Association for Computational
+_Linguistics (Volume 1: Long Papers), pp. 1715–1725, Berlin, Germany, August 2016. Association_
+[for Computational Linguistics. doi: 10.18653/v1/P16-1162. URL https://www.aclweb.](https://www.aclweb.org/anthology/P16-1162)
+[org/anthology/P16-1162.](https://www.aclweb.org/anthology/P16-1162)
+
+Noam Shazeer and Mitchell Stern. Adafactor: Adaptive learning rates with sublinear memory
+cost. In Jennifer Dy and Andreas Krause (eds.), Proceedings of the 35th International Con_ference on Machine Learning, volume 80 of Proceedings of Machine Learning Research, pp._
+[4596–4604. PMLR, 10–15 Jul 2018. URL https://proceedings.mlr.press/v80/](https://proceedings.mlr.press/v80/shazeer18a.html)
+[shazeer18a.html.](https://proceedings.mlr.press/v80/shazeer18a.html)
+
+Felix Stahlberg and Bill Byrne. On NMT search errors and model errors: Cat got your tongue?
+In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing
+_and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP),_
+pp. 3356–3362, Hong Kong, China, November 2019. Association for Computational Linguistics.
+[doi: 10.18653/v1/D19-1331. URL https://aclanthology.org/D19-1331.](https://aclanthology.org/D19-1331)
+
+Andreas Stolcke. Srilm - an extensible language modeling toolkit. In INTERSPEECH, 2002.
+
+
+-----
+
+Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks.
+In Z. Ghahramani, M. Welling, C. Cortes, N. D. Lawrence, and K. Q. Weinberger (eds.), Advances
+_in Neural Information Processing Systems 27, pp. 3104–3112. Curran Associates, Inc., 2014._
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Ł ukasz Kaiser, and Illia Polosukhin. Attention is all you need. In I. Guyon, U. V. Luxburg,
+S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (eds.), Advances in Neural In_formation Processing Systems 30, volume 30, pp. 5998–6008. Curran Associates, Inc., 2017. URL_
+[http://papers.nips.cc/paper/7181-attention-is-all-you-need.pdf.](http://papers.nips.cc/paper/7181-attention-is-all-you-need.pdf)
+
+Qiang Wang, Bei Li, Tong Xiao, Jingbo Zhu, Changliang Li, Derek F. Wong, and Lidia S. Chao.
+Learning deep transformer models for machine translation. In Proceedings of the 57th Annual
+_Meeting of the Association for Computational Linguistics, pp. 1810–1822, Florence, Italy, July_
+[2019. Association for Computational Linguistics. doi: 10.18653/v1/P19-1176. URL https:](https://aclanthology.org/P19-1176)
+[//aclanthology.org/P19-1176.](https://aclanthology.org/P19-1176)
+
+Shuo Wang, Zhaopeng Tu, Zhixing Tan, Wenxuan Wang, Maosong Sun, and Yang Liu. Language
+models are good translators. ArXiv, abs/2106.13627, 2021.
+
+Zirui Wang, Zachary C. Lipton, and Yulia Tsvetkov. On negative interference in multilingual models: Findings and a meta-learning treatment. In Proceedings of the 2020 Conference on Em_pirical Methods in Natural Language Processing (EMNLP), pp. 4438–4450, Online, November_
+2020. Association for Computational Linguistics. doi: 10.18653/v1/2020.emnlp-main.359. URL
+[https://www.aclweb.org/anthology/2020.emnlp-main.359.](https://www.aclweb.org/anthology/2020.emnlp-main.359)
+
+Liwei Wu, Shanbo Cheng, Mingxuan Wang, and Lei Li. Language tags matter for zero-shot neural machine translation. In Findings of the Association for Computational Linguistics: ACL_IJCNLP 2021, pp. 3001–3007, Online, August 2021. Association for Computational Linguis-_
+[tics. doi: 10.18653/v1/2021.findings-acl.264. URL https://aclanthology.org/2021.](https://aclanthology.org/2021.findings-acl.264)
+[findings-acl.264.](https://aclanthology.org/2021.findings-acl.264)
+
+Linting Xue, Noah Constant, Adam Roberts, Mihir Kale, Rami Al-Rfou, Aditya Siddhant, Aditya
+Barua, and Colin Raffel. mT5: A massively multilingual pre-trained text-to-text transformer.
+In Proceedings of the 2021 Conference of the North American Chapter of the Association for
+_Computational Linguistics: Human Language Technologies, pp. 483–498, Online, June 2021._
+[Association for Computational Linguistics. doi: 10.18653/v1/2021.naacl-main.41. URL https:](https://aclanthology.org/2021.naacl-main.41)
+[//aclanthology.org/2021.naacl-main.41.](https://aclanthology.org/2021.naacl-main.41)
+
+Xiaohua Zhai, Alexander Kolesnikov, Neil Houlsby, and Lucas Beyer. Scaling vision transformers.
+_ArXiv, abs/2106.04560, 2021._
+
+Biao Zhang, Philip Williams, Ivan Titov, and Rico Sennrich. Improving massively multilingual
+neural machine translation and zero-shot translation. In Proceedings of the 58th Annual Meeting
+_of the Association for Computational Linguistics, pp. 1628–1639, Online, July 2020. Association_
+[for Computational Linguistics. doi: 10.18653/v1/2020.acl-main.148. URL https://www.](https://www.aclweb.org/anthology/2020.acl-main.148)
+[aclweb.org/anthology/2020.acl-main.148.](https://www.aclweb.org/anthology/2020.acl-main.148)
+
+Biao Zhang, Ankur Bapna, Rico Sennrich, and Orhan Firat. Share or not? learning to schedule
+language-specific capacity for multilingual translation. In International Conference on Learning
+_[Representations, 2021. URL https://openreview.net/forum?id=Wj4ODo0uyCF.](https://openreview.net/forum?id=Wj4ODo0uyCF)_
+
+
+-----
+
+MODEL TRAINING AND INFERENCE
+
+
+We update model parameters via Adafactor (Shazeer & Stern, 2018) with label smoothing of value
+0.1, and scheduled learning rate of warmup steps 40K. We apply dropout of 0.1 to residuals, feedforward activations and attentions. We employ the post-norm Transformer by default; for some
+exceptional cases (often with deep models where training is unstable) we use the pre-norm one
+instead. Batch size is set to about 128K tokens. We train models for up to 1M steps on different
+tasks, except Web En-De where 500K steps is used. We average 10 checkpoints for evaluation.
+For bilingual experiments, these checkpoints are selected according to the dev set performance; for
+multilingual experiments, we use the last 10 checkpoints. Beam search is used for inference, with a
+beam size of 8 and length penalty of 0.5.
+
+B MORE EXPERIMENTAL RESULTS
+
+
+3.16
+
+2.90
+
+
+4.07
+
+3.75
+
+
+2.43
+
+2.22
+
+0.08 0.19 0.43 0.97 2.22
+
+|Col1|Col2|EncDec PrefixLM PrefixLM PrefixLM|
+|---|---|---|
+|||PrefixLM CausalL CausalL CausalL CausalL Fitted Sc|
+||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#Params ×10[8]
+
+
+3.19
+
+2.94
+
+0.08 0.19 0.43 0.97 2.22
+
+|Col1|Col2|EncDec PrefixLM PrefixLM PrefixLM|
+|---|---|---|
+|||PrefixLM CausalL CausalL CausalL CausalL Fitted S|
+||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#Params ×10[8]
+
+
+(a) En→Fr
+
+
+(b) En→Zh
+
+
+Figure 8: Fitted scaling curves for different models on WMT14 En-Fr and WMT19 En-Zh on the longest
+**sentence group. We rank our test set according to source sentence length, and then split it into 8 disjoint**
+groups. This shows the results on the longest group.
+
+
+3.07
+
+2.83
+
+
+3.93
+
+3.65
+
+
+2.60
+
+2.40
+
+
+3.38
+
+3.14
+
+
+2.21
+
+
+2.91
+
+
+4 10 27 68
+
+|Col1|Col2|EncDec|
+|---|---|---|
+|||EncDe PrefixL PrefixL PrefixL|
+|||PrefixL Causal Causal Causal Causal Fitted|
+||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#Layers
+
+(a) En→Fr
+
+
+4 10 27 68
+
+|Col1|Col2|EncDe|
+|---|---|---|
+|||EncDe PrefixL PrefixL PrefixL|
+|||PrefixL Causa Causa Causa Causa Fitted|
+||||
+
+
+EncDec
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+CausalLM-Deep
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+Fitted Scaling Law
+
+#Layers
+
+(b) En→Zh
+
+
+Figure 9: Fitted scaling curves for different models on WMT14 En-Fr and WMT19 En-Zh with respect to
+**the number of layers. Note under the same number of layers, LM + Deep has much fewer parameters than**
+EncDec and LM + Wide. The performance gap also narrows as model scales up.
+
+C RELATIVE VS. ABSOLUTE TRANSFER RESULTS
+
+
+-----
+
+|Col1|Col2|EncD Prefix Prefix Prefix Prefix Causa Causa Causa Causa Fitted|ec LM-Deep LM-Wide LM-TopOnly-Dee LM-TopOnly-Wid lLM-Deep lLM-Wide lLM-TgtOnly-De lLM-TgtOnly-Wi Scaling Law|
+|---|---|---|---|
+|||||
+
+|Col1|Col2|EncD Prefix Prefix Prefix Prefix Causa Causa Causa Causa Fitted|ec LM-Deep LM-Wide LM-TopOnly-Dee LM-TopOnly-Wid lLM-Deep lLM-Wide lLM-TgtOnly-Dee lLM-TgtOnly-Wid Scaling Law|
+|---|---|---|---|
+|||||
+
+
+src original tgt original
+
+2.98 EncDec 3.16 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+2.75 PrefixLM-TopOnly-Wide 2.91 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+2.54 CausalLM-TgtOnly-WideFitted Scaling Law 2.68 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+2.34 2.47
+
+2.16 2.27
+
+0.08 0.19 0.43 0.97 2.22 0.08 0.19 0.43 0.97 2.22
+
+#Params ×10[8] #Params ×10[8]
+
+
+(a) En→Fr
+
+|Col1|Col2|Col3|EncD Prefix Prefix Prefix|ec LM-Deep LM-Wide LM-TopOnly-Dee|
+|---|---|---|---|---|
+|||Prefix Causa Causa Causa Causa Fitted||LM-TopOnly-Wid lLM-Deep lLM-Wide lLM-TgtOnly-De lLM-TgtOnly-Wi Scaling Law|
+||||||
+
+|Col1|Col2|Col3|EncD Prefix Prefix Prefix|ec LM-Deep LM-Wide LM-TopOnly-Dee|
+|---|---|---|---|---|
+|||Prefix Causa Causa Causa Causa Fitted||LM-TopOnly-Wid lLM-Deep lLM-Wide lLM-TgtOnly-Dee lLM-TgtOnly-Wid Scaling Law|
+||||||
+
+
+src original tgt original
+
+3.93 EncDec 3.89 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+3.65 PrefixLM-TopOnly-Wide 3.58 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+3.38 CausalLM-TgtOnly-WideFitted Scaling Law 3.30 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+3.14 3.04
+
+2.91 2.80
+
+0.08 0.19 0.43 0.97 2.22 0.08 0.19 0.43 0.97 2.22
+
+#Params ×10[8] #Params ×10[8]
+
+
+(b) En→Zh
+
+Figure 10: Fitted scaling curves for different models on WMT14 En-Fr and WMT19 En-Zh evaluated on
+_source original and target original test sets._
+
+
+
+|Col1|Col2|Col3|Col4|Col5|Col6|Col7|Col8|Col9|
+|---|---|---|---|---|---|---|---|---|
+||||Enc Prefi Prefi Prefi Prefi|Dec xLM-Deep xLM-Wide xLM-TopOn xLM-TopOn|ly-Deep ly-Wide||||
+||||Cau Cau Cau Cau|salLM-Deep salLM-Wide salLM-TgtO salLM-TgtO|nly-Deep nly-Wide||||
+
+
+40.64 41.29
+
+37.27 38.25
+
+34.19 EncDecPrefixLM-Deep 35.43 EncDecPrefixLM-Deep
+
+Test BLEU PrefixLM-Wide Test BLEU PrefixLM-Wide
+
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide PrefixLM-TopOnly-Wide
+
+31.36 CausalLM-Deep 32.82 CausalLM-Deep
+
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+28.76 CausalLM-TgtOnly-Wide 30.40 CausalLM-TgtOnly-Wide
+
+10 15 20 25 30 35 40 45 10 15 20 25 30 35 40 45
+
+#Source Tokens #Source Tokens
+
+(a) En→Fr
+
+|Col1|Col2|Col3|Col4|Col5|Col6|Col7|Col8|
+|---|---|---|---|---|---|---|---|
+||||||E Pr Pr Pr Pr|ncDec efixLM- efixLM- efixLM- efixLM-|Deep Wide TopOnly- TopOnly-|
+||||||C C C C|ausalLM ausalLM ausalLM ausalLM|-Deep -Wide -TgtOnly -TgtOnly|
+
+|Col1|Col2|Col3|Enc Prefi Prefi Prefi Prefi|Dec xLM-Deep xLM-Wide xLM-TopOn xLM-TopOn|ly-Deep ly-Wide|Col7|Col8|Col9|
+|---|---|---|---|---|---|---|---|---|
+||||Cau Cau Cau Cau|salLM-Deep salLM-Wide salLM-TgtO salLM-TgtO|nly-Deep nly-Wide||||
+
+|Col1|Col2|Col3|Col4|Col5|C C|ausalLM ausalLM|-TgtOnly -TgtOnly|
+|---|---|---|---|---|---|---|---|
+|||||||||
+
+
+30.93 31.75 EncDec
+
+PrefixLM-Deep
+PrefixLM-Wide
+PrefixLM-TopOnly-Deep
+
+27.51 28.92 PrefixLM-TopOnly-WideCausalLM-Deep
+
+CausalLM-Wide
+CausalLM-TgtOnly-Deep
+CausalLM-TgtOnly-Wide
+
+24.48 EncDecPrefixLM-Deep 26.34
+
+Test BLEU PrefixLM-Wide Test BLEU
+
+PrefixLM-TopOnly-Deep
+PrefixLM-TopOnly-Wide
+
+21.78 CausalLM-DeepCausalLM-Wide 23.99
+
+CausalLM-TgtOnly-Deep
+
+19.37 CausalLM-TgtOnly-Wide 21.85
+
+10 15 20 25 30 35 40 45 10 15 20 25 30 35 40 45
+
+#Source Tokens #Source Tokens
+
+
+(b) En→Zh
+
+Figure 11: BLEU scores for different models on WMT14 En-Fr and WMT19 En-Zh as a function of source
+sentence length. Left: models aligned with 6-layer EncDec; Right: models aligned with 14-layer EncDec.
+
+
+-----
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-D M-TopOnly-W|
+|---|---|---|---|
+||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|||||
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-D M-TopOnly-W|
+|---|---|---|---|
+||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|||||
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-D M-TopOnly-W|
+|---|---|---|---|
+||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|||||
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-D M-TopOnly-W|
+|---|---|---|---|
+||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|||||
+
+
+WMT (src original) WMT (tgt original)
+
+2.85 EncDec 3.04 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+2.64 PrefixLM-TopOnly-Wide 2.80 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+2.44 CausalLM-TgtOnly-WideFitted Scaling Law 2.58 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+2.25 2.38
+
+2.08 2.19
+
+0.33 0.74 1.70 3.89 8.88 0.33 0.74 1.70 3.89 8.88
+
+#Params ×10[8] #Params ×10[8]
+
+Web (src original) Web (tgt original)
+
+2.67 EncDec 2.81 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+2.51 PrefixLM-TopOnly-Wide 2.64 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+2.37 CausalLM-TgtOnly-WideFitted Scaling Law 2.47 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+2.23 2.31
+
+2.10 2.17
+
+0.33 0.74 1.70 3.89 8.88 0.33 0.74 1.70 3.89 8.88
+
+#Params ×10[8] #Params ×10[8]
+
+
+Figure 12: Fitted scaling curves for different models on Web En-De (En→De). src/tgt: source/target; WMT:
+out-of-domain evaluation set; Web: in-domain evaluation set. Models are trained in the Transformer big setting.
+
+
+
+|Col1|EncDec PrefixL PrefixL PrefixL PrefixL Causal Causal Causal Causal Fitted S|M-Deep M-Wide M-TopOnly-D M-TopOnly-W LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|---|---|---|
+||||
+
+|Col1|EncDec PrefixL PrefixL PrefixL PrefixL Causal Causal Causal Causal Fitted S|M-Deep M-Wide M-TopOnly-D M-TopOnly-W LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|---|---|---|
+||||
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-D M-TopOnly-W|
+|---|---|---|---|
+||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|||||
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-D M-TopOnly-W|
+|---|---|---|---|
+||Causal Causal Causal Causal Fitted S||LM-Deep LM-Wide LM-TgtOnly-D LM-TgtOnly-W caling Law|
+|||||
+
+
+WMT (src original) WMT (tgt original)
+
+2.85 EncDec 3.04 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+2.64 PrefixLM-TopOnly-Wide 2.80 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+2.44 CausalLM-TgtOnly-WideFitted Scaling Law 2.58 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+2.25 2.38
+
+2.08 2.19
+
+0.42 0.92 2.02 4.44 9.74 0.42 0.92 2.02 4.44 9.74
+
+#FLOPs ×10[11] #FLOPs ×10[11]
+
+Web (src original) Web (tgt original)
+
+2.67 EncDec 2.81 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+2.51 PrefixLM-TopOnly-Wide 2.64 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+2.37 CausalLM-TgtOnly-WideFitted Scaling Law 2.47 CausalLM-TgtOnly-WideFitted Scaling Law
+
+Test PPL Test PPL
+
+2.23 2.31
+
+2.10 2.17
+
+0.42 0.92 2.02 4.44 9.74 0.42 0.92 2.02 4.44 9.74
+
+#FLOPs ×10[11] #FLOPs ×10[11]
+
+
+Figure 13: Fitted scaling curves for different models on Web En-De (En→De) in terms of FLOPs. Models are
+trained in the Transformer big setting.
+
+
+-----
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||EncDec PrefixL PrefixL PrefixL PrefixL CausalL|M-Deep M-Wide M-TopOnly-De M-TopOnly-Wi M-Deep|
+||||CausalL CausalL CausalL|M-Wide M-TgtOnly-D M-TgtOnly-W|
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||EncDec PrefixL PrefixL PrefixL PrefixL CausalL|M-Deep M-Wide M-TopOnly-De M-TopOnly-Wi M-Deep|
+||||CausalL CausalL CausalL|M-Wide M-TgtOnly-D M-TgtOnly-W|
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|Col4|M-Deep M-Wide M-TopOnly-De M-TopOnly-Wi|
+|---|---|---|---|---|
+||||CausalL CausalL CausalL CausalL|M-Deep M-Wide M-TgtOnly-D M-TgtOnly-W|
+
+|Col1|Col2|EncDec PrefixL PrefixL PrefixL PrefixL|Col4|M-Deep M-Wide M-TopOnly-De M-TopOnly-Wi|
+|---|---|---|---|---|
+||||CausalL CausalL CausalL CausalL|M-Deep M-Wide M-TgtOnly-D M-TgtOnly-W|
+
+
+WMT (src original) WMT (tgt original)
+
+38.68 38.23
+
+35.58 34.87
+
+32.72 EncDec 31.80 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+
+Test BLEU PrefixLM-Wide Test BLEU PrefixLM-Wide
+
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+30.09 PrefixLM-TopOnly-WideCausalLM-Deep 29.01 PrefixLM-TopOnly-WideCausalLM-Deep
+
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+27.68 CausalLM-TgtOnly-Wide 26.45 CausalLM-TgtOnly-Wide
+
+0.33 0.74 1.70 3.89 8.88 0.33 0.74 1.70 3.89 8.88
+
+#Params ×10[8] #Params ×10[8]
+
+Web (src original) Web (tgt original)
+
+38.66 38.60
+
+36.73 35.94
+
+34.90 EncDec 33.47 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+
+Test BLEU PrefixLM-Wide Test BLEU PrefixLM-Wide
+
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+33.16 PrefixLM-TopOnly-WideCausalLM-Deep 31.17 PrefixLM-TopOnly-WideCausalLM-Deep
+
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+31.51 CausalLM-TgtOnly-Wide 29.02 CausalLM-TgtOnly-Wide
+
+0.33 0.74 1.70 3.89 8.88 0.33 0.74 1.70 3.89 8.88
+
+#Params ×10[8] #Params ×10[8]
+
+
+Figure 14: BLEU scores for different models on Web En-De (En→De) as a function of model parameters.
+Models are trained in the Transformer big setting.
+
+
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDec|||
+||||PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-De M-TopOnly-Wi|
+||||CausalL CausalL CausalL CausalL|M-Deep M-Wide M-TgtOnly-De M-TgtOnly-W|
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDec|||
+||||PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-De M-TopOnly-Wi|
+||||CausalL CausalL CausalL CausalL|M-Deep M-Wide M-TgtOnly-De M-TgtOnly-W|
+
+
+Many-to-Many Model (EnDeFr) Many-to-Many Model (EnDeZh)
+
+38.06 24.42
+
+Fr)36.36 Zh)22.68
+
+34.65 EncDecPrefixLM-Deep 20.95 EncDecPrefixLM-Deep
+
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+Test BLEU (En32.95 PrefixLM-TopOnly-WideCausalLM-DeepCausalLM-Wide Test BLEU (En19.22 PrefixLM-TopOnly-WideCausalLM-DeepCausalLM-Wide
+
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+31.24 CausalLM-TgtOnly-Wide 17.48 CausalLM-TgtOnly-Wide
+
+0.35 0.68 1.01 1.35 1.68 0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8] #Params ×10[8]
+
+
+Figure 15: Cross-lingual transfer results (average BLEU scores) for different models from the low-resource
+language (En-De) to high-resource directions under different model sizes on WMT datasets. Average is performed over En↔Fr/Zh. Left: multilingual En-De-Fr system; Right: multilingual En-De-Zh system.
+
+
+-----
+
+|Col1|Col2|Col3|Col4|Col5|Col6|
+|---|---|---|---|---|---|
+|||EncDec||||
+|||||PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-Dee M-TopOnly-Wid|
+||||Causal Causal Causal Causal||LM-Deep LM-Wide LM-TgtOnly-Dee LM-TgtOnly-Wid|
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||EncDec|||
+||||PrefixL PrefixL PrefixL PrefixL|M-Deep M-Wide M-TopOnly-Dee M-TopOnly-Wid|
+||||Causal Causal Causal Causal|LM-Deep LM-Wide LM-TgtOnly-Dee LM-TgtOnly-Wid|
+
+|EncDec PrefixLM-De PrefixLM-Wi PrefixLM-To PrefixLM-To CausalLM-D CausalLM-W|ep de pOnly-Deep pOnly-Wide eep ide|Col3|Col4|Col5|
+|---|---|---|---|---|
+|CausalLM-T CausalLM-T|gtOnly-Deep gtOnly-Wide||||
+||||||
+
+|EncDec PrefixLM-De PrefixLM-Wi PrefixLM-To PrefixLM-To CausalLM-D CausalLM-W|ep de pOnly-Deep pOnly-Wide eep ide|Col3|Col4|Col5|
+|---|---|---|---|---|
+|CausalLM-T CausalLM-T|gtOnly-Deep gtOnly-Wide||||
+||||||
+
+
+Many-to-Many Model (EnDeFr) Many-to-Many Model (EnDeZh)
+
+38.53 28.66
+
+Fr) Zh)
+
+36.72 26.70
+
+34.90 EncDecPrefixLM-Deep 24.75 EncDecPrefixLM-Deep
+
+PrefixLM-Wide PrefixLM-Wide
+PrefixLM-TopOnly-Deep PrefixLM-TopOnly-Deep
+
+33.09 PrefixLM-TopOnly-WideCausalLM-Deep 22.80 PrefixLM-TopOnly-WideCausalLM-Deep
+
+Absolute BLEU (En CausalLM-WideCausalLM-TgtOnly-Deep Absolute BLEU (En CausalLM-WideCausalLM-TgtOnly-Deep
+
+31.27 CausalLM-TgtOnly-Wide 20.84 CausalLM-TgtOnly-Wide
+
+0.35 0.68 1.01 1.35 1.68 0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8] #Params ×10[8]
+
+Many-to-Many Model (EnDeFr) Many-to-Many Model (EnDeZh)
+
+-0.90 EncDec 1.42 EncDec
+
+PrefixLM-Deep PrefixLM-Deep
+
+Fr) PrefixLM-WidePrefixLM-TopOnly-Deep Zh) PrefixLM-WidePrefixLM-TopOnly-Deep
+
+-1.43 PrefixLM-TopOnly-Wide 0.21 PrefixLM-TopOnly-Wide
+
+CausalLM-Deep CausalLM-Deep
+CausalLM-Wide CausalLM-Wide
+CausalLM-TgtOnly-Deep CausalLM-TgtOnly-Deep
+
+-1.95 CausalLM-TgtOnly-Wide -1.00 CausalLM-TgtOnly-Wide
+
+-2.47 -2.21
+
+Relative BLEU (En Relative BLEU (En
+
+-3.00 -3.42
+
+0.35 0.68 1.01 1.35 1.68 0.35 0.68 1.01 1.35 1.68
+
+#Params ×10[8] #Params ×10[8]
+
+
+Figure 16: Absolute (top) and relative (bottom) transfer results of different models for En→Fr and En→Zh
+under different models sizes on WMT datasets. Left: multilingual En-De-Fr system; Right: multilingual EnDe-Zh system. Relative score is computed by comparing multilingual model and its corresponding bilingual
+counterpart. Overall, there is no clear pattern supporting that LMs encourage knowledge transfer better than
+EncDec.
+
+
+-----
+

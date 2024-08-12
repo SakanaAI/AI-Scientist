@@ -1,0 +1,2183 @@
+# DeepSplit: Scalable Verification of Deep Neural Networks via Operator Splitting
+
+**Anonymous authors**
+Paper under double-blind review
+
+Abstract
+
+Analyzing the worst-case performance of deep neural networks against input
+perturbations amounts to solving a large-scale non-convex optimization
+problem, for which several past works have proposed convex relaxations as a
+promising alternative. However, even for reasonably-sized neural networks,
+these relaxations are not tractable, and so must be replaced by even weaker
+relaxations in practice. In this work, we propose a novel operator splitting
+method that can directly solve a convex relaxation of the problem to high
+accuracy, by splitting it into smaller sub-problems that often have analytical
+solutions. The method is modular, scales to very large problem instances,
+and compromises of operations that are amenable to fast parallelization
+with GPU acceleration. We demonstrate our method in obtaining tighter
+bounds on the worst-case performance of large convolutional networks in
+image classification and reinforcement learning settings.
+
+1 Introduction
+
+Despite their superior performance, neural networks lack formal guarantees, raising serious
+concerns about their adoption in safety-critical applications such as autonomous vehicles
+(Cao et al., 2019) and medical machine learning (Finlayson et al., 2019). Motivated by
+this drawback, there has been an increasing interest in developing tools to verify desirable
+properties for neural networks, such as robustness to adversarial attacks. Neural network
+verification refers to the problem of verifying whether the output of a neural network satisfies
+certain properties for a bounded set of input perturbations. This problem can be framed as
+optimization problems of the form
+
+minimize _J(f_ (x)) subject to _x ∈X_ _,_ (1)
+
+where f is given by a deep neural network, J is a real-valued function representing a
+performance measure (or a specification), and X is a set of inputs to be verified. In this
+formulation, verifying the neural network amounts to certifying whether the optimal value of
+(1) is bounded below by a certain threshold. This problem is large-scale and non-convex,
+making it extremely difficult to solve efficiently–both in terms of time and memory. For
+ReLU activation functions and linear objectives, the problem in (1) can be cast as a MixedInteger Linear Program (MILP) (Lomuscio & Maganti, 2017; Cheng et al., 2017; Dutta et al.,
+2018; Fischetti & Jo, 2018), which can be solved for the global solution via, for example,
+Branch-and-Bound (BaB) methods. While we do not expect these approaches to scale to
+large problems, for small neural networks they can still be practical.
+
+Instead of solving (1) for its global minimum, one can instead find guaranteed lower bounds
+on the optimal value via convex relaxations, such as Linear Programming (LP) (Wong &
+Kolter, 2017) and Semidefinite Programming (SDP) (Raghunathan et al., 2018; Fazlyab et al.,
+2019; 2020). Verification methods based on convex relaxations are sound but incomplete, i.e.,
+they are guaranteed to detect all false negatives but also produce false positives, whose rate
+depends on the tightness of the relaxation. Although convex relaxations are polynomial-time
+solvable (in terms of number of decision variables), in practice they are not computationally
+tractable for large-scale neural networks. To improve scalability, these relaxations must
+typically be further relaxed (Wong & Kolter, 2017; Weng et al., 2018; Zhang et al., 2018;
+Dvijotham et al., 2018; Bunel et al., 2020a).
+
+
+-----
+
+**Contributions** In this work, we propose an algorithm for solving convex relaxations
+_exactly for large-scale neural networks. Our starting point is to express (1) as a constrained_
+optimization problem whose constraints are imposed by the forward passes in the network.
+We then introduce additional decision variables and consensus constraints that naturally
+split the corresponding problem into independent subproblems, which often have closed-form
+solutions. Finally, we employ an operator splitting technique based on the Alternating
+Direction Method of Multipliers (ADMM) (Boyd et al., 2011), to solve the corresponding
+Lagrangian relaxation of the problem. This approach has several favorable properties. First,
+the method requires minimal parameter tuning and relies on simple operations, which scale to
+very large problems and can achieve a good trade-off between runtime and solution accuracy.
+Second, all the solver operations are amenable to fast parallelization with GPU acceleration.
+Third, our method is fully modular and applies to standard network architectures.
+
+We employ our method to compute exact solutions to LP relaxations on the worst-case
+performance of adversarially trained deep networks, with a focus on networks whose convex
+relaxations were previously impossible to solve exactly due to their size. Specifically, we
+perform extensive experiments in the ℓ perturbation setting, where we verify robustness
+_∞_
+properties of image classifiers for CIFAR10 and deep Q-networks (DQNs) in Atari games
+(Zhang et al., 2020). Our method is able to quickly solve LP relaxations at scales that are
+too large for exact BaB verifiers, SDP relaxations, or commercial LP solvers such as Gurobi.
+
+1.1 Related Work
+
+**Convex relaxations** LP relaxations are relatively the most scalable form of convex relaxations (Ehlers, 2017). However, even solving LPs can become computationally prohibitive for
+small convolutional networks (Salman et al., 2019). One line of work studies computationally
+cheaper but looser bounds of the LP relaxation (Wong & Kolter, 2017), which have been
+extended to larger and more general networks and settings (Wong et al., 2018; Weng et al.,
+2018; Zhang et al., 2018; Xu et al., 2020). These bounds tend to be loose unless optimized
+during training, which typically comes at a significant cost to standard performance. Further
+work has aimed to tighten these bounds (Singh et al., 2019; Tjandraatmadja et al., 2020;
+de2), however these works focus primarily on small convolutional networks and struggle
+to scale to more typical deep networks. Other work has studied the limits of these convex
+relaxations on these small networks using vast amounts of CPU-compute (Salman et al.,
+2019). Recent SDP-based approaches (Dathathri et al., 2020) can produce much tighter
+bounds on these small networks.
+
+**Lagrangian-based bounds** Related to our work is that which solves the Lagrangian of
+the LP relaxation (Dvijotham et al., 2018; Bunel et al., 2020a), which can tighten the bound
+but do not aim to solve the LP exactly due to relatively slow convergence. However, these
+works primarily study small networks whose LP relaxation can still be solved exactly with
+Gurobi. Although these works could in theory be used on larger networks, only the faster,
+linear-based bounds (Xu et al., 2020) have demonstrated applicability to standard deep
+learning architectures. In our work, we solve the LP relaxation exactly in large network
+settings that previously have only been studied with loose bounds of the LP relaxation such
+as LiRPA (Xu et al., 2020).
+
+**Complete verification methods** These methods verify properties of deep networks
+exactly (without false positives or false negatives) using methods such as SMT solvers
+(Scheibler et al., 2015; Ehlers, 2017; Katz et al., 2017) and MILP solvers (Lomuscio &
+Maganti, 2017; Cheng et al., 2017; Dutta et al., 2018; Fischetti & Jo, 2018). Complete
+verification methods typically rely on BaB algorithms (Bunel et al., 2017), in which the
+verification problem is divided into subproblems (branching) that can be verified using
+incomplete verification methods (bounding) (Bunel et al., 2020b). However, these methods
+have a worst-case exponential runtime and have difficulty scaling beyond relatively small
+convolutional networks. Motivated by this, several recent works have improved the practical
+running time of BaB methods with custom solvers for medium-sized networks (Bunel et al.,
+2020a; De Palma et al., 2021; Xu et al., 2021; Wang et al., 2021), but have yet to scale to
+larger deep networks.
+
+
+-----
+
+**Operator splitting methods** Operator splitting, and in particular the ADMM method, is
+a powerful technique in solving structured convex optimization problems and has applications
+in numerous settings ranging from optimal control (O’Donoghue et al., 2013) to training
+neural networks (Taylor et al., 2016). These methods scale well with the problem dimensions,
+can exploit sparsity in the problem data efficiently (Zheng et al., 2017), are amenable to
+parallelization on GPU (Schubiger et al., 2020), and have well-understood convergence
+properties under minimal regularity assumptions (Boyd et al., 2011). The benefit of ADMM
+as an alternative to interior-point solvers has been shown in various classes of optimization
+problems (O’donoghue et al., 2016). Our operator splitting method is specifically tailored
+for neural network verification in order to fully exploit the problem structure.
+
+**Notation. We denote the set of real numbers by R, the set of nonnegative real numbers**
+by R+, the set of real n-dimensional vectors by R[n], the set of m × n-dimensional matrices
+by R[m][×][n], and the n-dimensional identity matrix by In. The p-norm (p ≥ 1) is denoted by
+_p : R[n]_ R+. For a set, we define the indicator function I (x) of as I (x) = 0 if
+_∥· ∥_ _→_ _S_ _S_ _S_ _S_
+_x_ and I (x) = + otherwise. Given a function f :, the graph of f is the set
+_∈S_ _S_ _∞_ _X →Y_
+_Gf = {(x, f_ (x)) | x ∈X}.
+
+2 Scalable Neural Network Verification via Operator
+Splitting
+
+We consider an ℓ-layer feed-forward neural network f (x) : R[n][0] _→_ R[n][ℓ] described by the
+following recursive equations,
+_x0 = x,_ _xk+1 = φk(xk)_ _k = 0, · · ·, ℓ_ _−_ 1, _f_ (x) = xℓ (2)
+wherelayer, and x0 ∈ φkR :[n] R[0] _[n]is the input to the neural network,[k]_ _→_ R[n][k][+1] is the operator of the k x-th layer, which can represent anyk ∈ R[n][k] is the input to the k-th
+commonly-used operator in deep networks, such as linear (convolutional) layers, MaxPooling
+units, and activation functions.
+
+Given the neural network f, a specification function J : R[n][ℓ] _7→_ R, and an input set X ⊂ R[n][0],
+we say that f satisfies the specification J if J(f (x)) ≥ 0 for all x ∈X . This is equivalent
+to verifying that the optimal value of (1) is non-negative. We assume X ⊂ R[n][0] is a closed
+convex set and J : R[n][ℓ] _→_ R ∪{+∞} is a convex function, defining a performance measure on
+the output of the network. Note that our formulation generalizes to arbitrary computational
+graphs (e.g. residual blocks) and general objective functions (see Appendix B).
+
+Using the sequential representation of the neural network in (2), we may rewrite the
+optimization problem in (1) as the following constrained optimization problem,
+_J_ _[⋆]_ _←_ minimize _J(xℓ)_ subject to _xk+1 = φk(xk),_ _k = 0, · · ·, ℓ_ _−_ 1, _x0 ∈X_ _,_ (3)
+
+with n := _k=0_ _[n][k][ decision variables. We can rewrite (3) equivalently as]_
+_J_ _[⋆]_ minimize _J(xℓ)_ subject to (xk, xk+1) _φk_ _,_ _k = 0,_ _, ℓ_ 1, _x0_ _,_ (4)
+_←_ _∈G_ _· · ·_ _−_ _∈X_
+whereand ¯xk G areφk =[P] a priori[ℓ] {(xk, x known bounds onk+1) | xk+1 = φk x(xkk when), xk ≤ x0 ∈Xxk ≤. The problem inx¯k} is the graph of (4) is non-convex φk. Here xk
+due to presence of nonlinear operators in the network, such as activation layers. By overapproximating Gφk by a convex set (or ideally by its convex hull), we arrive at a direct
+layer-wise convex relaxation of the problem. However, solving this relaxation directly cannot
+scale to even medium-sized neural networks Salman et al. (2019). In this section, by exploiting
+the sequential structure of the constraints, we propose a reformulation of (3) whose convex
+relaxation can be solved efficiently and in a scalable manner.
+
+2.1 Variable Splitting
+
+By introducing the intermediate variables yk and zk, we can rewrite (3) as
+_J_ _[⋆]_ minimize _J(xℓ)_ (5)
+_←_
+subject to _yk = xk, zk = φk(yk), xk+1 = zk,_ _k = 0, · · ·, ℓ_ _−_ 1,
+_x0_
+_∈X_
+
+
+-----
+
+Figure 1: Left: Illustration of the network structure (top) and DeepSplit computation
+module for a generic layer (bottom). Adding identity layers in between the neural network
+layers decouples the variables xk and allows processing them independently. Right: Overapproximation of the graph of tanh (top) and ReLU (bottom) function by convex hull.
+
+which has now 3n _n0_ _nℓ_ decision variables. Intuitively, we have introduced additional
+_−_ _−_
+“identity layers” between consecutive layers (see Figure 1). By overapproximating Gφk by a
+convex set _φk_, we obtain the convex relaxation
+_S_
+
+_Jrelaxed[⋆]_ _J(xℓ)_ (6)
+
+_[←][minimize]_
+subject to _yk = xk, (yk, zk) ∈Sφk_ _, xk+1 = zk,_ _k = 0, · · ·, ℓ_ _−_ 1,
+_x0_ _,_
+_∈X_
+
+for which Jrelaxed[⋆]
+variable xk. As shown below, this “overparameterization” allows us to split the optimization[≤] _[J]_ _[⋆][. This form is known as consensus as][ y][k][ and][ z][k][−][1][ are just copies of the]_
+problem into smaller sub-problems that can be solved in parallel and often in closed form.
+
+2.2 Lagrangian Relaxation and Operator Splitting
+
+We use x = (x0, · · ·, xℓ), y = (y0, · · ·, yℓ−1) and z = (z0, · · ·, zℓ−1) to denote the concatenated variables. By relaxing the equality constraints with Lagrangian multipliers, we define
+the augmented Lagrangian for (6) as follows,
+
+
+_ℓ−1_
+
+ISφk (yk, zk)+IX (x0) + (ρ/2)
+_k=0_
+
+X
+
+
+_ℓ−1_
+
+_k=0_
+
+X
+
+
+_xk_ _yk + λk_ 2 2
+_∥_ _−_ _∥[2]_ _[−∥][λ][k][∥][2]_
+
+
+(x, y, z, λ, µ)= _J(xℓ)+_
+_L_
+
+
+_ℓ−1_
+
+_k=0_
+
+X
+
+
+_xk+1_ _zk + µk_ 2 2 _._ (7)
+_∥_ _−_ _∥[2]_ _[−∥][µ][k][∥][2]_
+
+
+
++ (ρ/2)
+
+
+where λ = (λ0, · · ·, λℓ−1) and µ = (µ0, · · ·, µℓ−1) are the scaled dual variables (by 1/ρ) and
+_ρ > 0 is the augmentation constant. Note that we have only relaxed the equality constraints_
+in (6), and the constraints describing the sets Sφk as well as X are kept intact. Furthermore,
+the inclusion of augmentation will render the dual function differentiable (see the Appendix
+for more details), and hence, easier to optimize. For the Lagrangian in (7), the dual function,
+which provides a lower bound to Jrelaxed[⋆] [, is given by][ g][(][λ][,][ µ][) =][ inf] [(][x][,][y][,][z][)][ L][(][x][,][ y][,][ z][,][ λ][,][ µ][)][.]
+The best lower bound can then be found by maximizing the dual function. [1]
+
+Solving the inner problem jointly over (x, y, z) to find the dual function is as difficult as
+solving a direct convex relaxation of (3). Instead, we split the primal variables (x, y, z) into
+**x and (y, z) and apply the classical ADMM algorithm to obtain the following iterations**
+
+1If strong duality holds, then this best lower bound would match Jrelaxed⋆ [. As shown in Salman]
+et al. (2019), strong duality holds under mild conditions.
+
+
+-----
+
+**Algorithm 1: DeepSplit Algorithm**
+**Data: neural network f (Eq. 2), bounded convex input set X**, convex function J.
+**Result: lower bound Jrelaxed[⋆]** [on Problem (1).]
+**Initialization:k = 0, · · ·, ℓ** _− x1, augmentation constant0 ∈X_, xk+1 = φk(xk), y ρ >k = x 0.k, zk = xk+1, λk = 0, µk = 0,
+**repeat**
+
+**Step 1: x-update (9)**
+**Step 2: (y, z)-update (10)**
+**Step 3: dual update (13)**
+**until stopping criterion is met;**
+**Output: J(xℓ)**
+
+(shown in Figure 1) for updating the primal and dual variables,
+
+**x[+]** argminx (x, y, z, λ, µ) (8a)
+_∈_ _L_
+
+(y[+], z[+]) argmin(y,z) (x[+], y, z, λ, µ) (8b)
+_∈_ _L_
+
+(λ[+], µ[+])=(λ, µ)+ (λ,µ) (x[+], y[+], z[+], λ, µ). (8c)
+_∇_ _L_
+
+As we show below, the Lagrangian has a separable structure by construction that can be
+exploited in order to efficiently implement each step of (8).
+
+2.3 The x-update
+
+The Lagrangian in (7) is separable across the xk variables; hence, the minimization in (8a)
+can be done independently for each xk. Specifically, for k = 0, we obtain the following
+update rule for x0,
+
+_x[+]0_ [= Proj] [(][y][0][ −] _[λ][0][)][.]_ (9a)
+_X_
+
+Projections onto the ℓ and ℓ2 balls can be done in closed-form. For the ℓ1 ball, we can use
+_∞_
+the efficient projection scheme proposed in (Duchi et al., 2008), which has (n0) complexity
+_O_
+in expectation. For subsequent layers k = 1, · · ·, ℓ, we obtain the updates
+
+_x[+]k_ [= 1] (9b)
+
+2 [(][y][k][ −] _[λ][k][ +][ z][k][−][1][ −]_ _[µ][k][−][1][)]_
+
+_x[+]ℓ_ [=arg min] _J(xℓ)+_ _[ρ]_ 2[.] (9c)
+_xℓ_ 2 _[∥][x][ℓ]_ _[−][z][ℓ][−][1]_ [+][µ][ℓ][−][1][∥][2]
+
+For convex J and ρ > 0, the optimization problem for updating xℓ is strongly convex with a
+unique optimal solution. Indeed, its solution is the proximal operator of J/ρ evaluated at
+_zℓ−1_ _−µℓ−1. For the special case of linear objectives, J(xℓ) = c[⊤]xℓ, we obtain the closed-form_
+solution x[+]ℓ [=][ −][c/ρ][ + (][z][ℓ][−][1][ −] _[µ][ℓ][−][1][)][.]_
+
+2.4 The (y, z)-update
+
+Similarly, the Lagrangian is also separable across the (yk, zk) variables. Updating these
+variables in (8b) corresponds to the following projection operations per layer,
+
+(yk[+][, z]k[+][) = Proj]Sφk [(][x]k[+] [+][ λ][k][, x]k[+]+1 [+][ µ][k][)][,] (10)
+
+for k = 0, · · ·, ℓ _−_ 1. Depending on the type of the layer (linear, activation, convolution,
+etc.), we obtain different projections, which we describe below.
+
+**Affine Layers. Suppose φk(yk) = Wkyk +** _bk is an affine layer representing a fully-connected,_
+convolutional, or an average pooling layer. Then the graph of φk is already a convex set
+given by Gφk = {(yk, zk) | zk = Wkyk + bk}. Choosing Sφk = Gφk, the projection in (10)
+takes the form
+
+
+_yk[+]_ [= (][I][n]k [+][W][ ⊤]k _[W][k][)][−][1][(][x]k[+]_ [+][ λ][k] [+][W][ ⊤]k [(][x]k[+]+1 [+][µ][k] _[−][b][k][))]_
+
+(11)
+_zk[+]_ [=][ W][k][y]k[+] [+][ b][k][.]
+
+
+-----
+
+The matrix (Ink + Wk[⊤][W][k][)][−][1][ can be pre-computed and cached for subsequent iterations.]
+We can do this efficiently for convolutional layers using the fast Fourier transform, which we
+discuss later in Section D.3.
+
+**Activation Layers. For an activation layer of the form φ(x) := [ϕ1(x1)** _ϕn(xn)][⊤], the_
+_· · ·_
+convex relaxation of Gφ is given by the Cartesian product of individual convex relaxations
+i.e.,concave upper bound Sφ = Sϕ1 × · · · × S ¯ϕϕ and a convex lower boundn. For a generic activation function ϕ on ϕ over an interval ϕ : R → R, suppose we have a I = [x, ¯x], i.e.,
+_ϕ(x) ≤_ _ϕ(x) ≤_ _ϕ¯(x) ∀_ _x ∈_ [x, ¯x]. A convex overapproximation of Gϕ is
+
+_Sϕ =_ _{(x, y) | ϕ(x) ≤_ _y ≤_ _ϕ¯(x), x ≤_ _x ≤_ _x¯},_ (12)
+
+which turns out to be the convex hull of G(ϕ) when ¯ϕ and ϕ are concave and convex
+envelopes of ϕ, respectively. As an example, when x < 0 < ¯x, the ReLU activation function
+_y = max(0, x) admits the envelopes ϕ(x) = max(0, x), ¯ϕ(x) = y +_ _xy¯¯−yx_ [(][x][ −] _[x][)][ on][ [][x,][ ¯]x ],_
+_−_
+where y = max(0, x) and ¯y = max(0, ¯x) (Ehlers, 2017; Wong & Kolter, 2017) (see Figure 1).
+The assumed pre-activation bounds x and ¯x used to relax the activation functions can be
+obtained a priori via a variety of existing techniques (Wong & Kolter, 2017; Zhang et al.,
+2018; 2019). We present projection operators of additional layers in Appendix C.
+
+2.5 The (λ, µ)-update
+
+Finally, we update the scaled dual variables as follows,
+
+
+_λ[+]k_ [=][ λ][k][ + (][x]k[+] _[−]_ _[y]k[+][)][,]_ _k = 0, · · ·, ℓ_ _−_ 1, (13)
+
+_µ[+]k_ [=][ µ][k][ + (][x]k[+]+1 _[−]_ _[z]k[+][)][,]_ _k = 0, · · ·, ℓ_ _−_ 1.
+
+The DeepSplit Algorithm is summarized in Algorithm 1. We provide further details such as
+parameter selection and efficient implementations for convolutional layers in Appendix D.
+
+3 Connection to Lagrangian-based methods
+
+In this section, we draw connections to two related methods relying on Lagrangian relaxation.
+Specifically, we relate our approach to an earlier dual method (Dvijotham et al., 2018)
+(Section 3.1), as well as a recent Lagrangian decomposition method (Bunel et al., 2020a)
+(Section 3.2). Overall, these approaches use a similar Lagrangian formulation, but the
+specific choices in splitting and augmentation of the Lagrangian result in poorer theoretical
+convergence guarantees when solving the convex relaxation to optimality.
+
+3.1 Dual method via Lagrangian Relaxation of the nonconvex problem
+
+Instead of splitting the neural network equations (3) with auxiliary variables, an alternative
+strategy is to directly relax (3) with Lagrangian multipliers (Dvijotham et al., 2018):
+
+
+_ℓ−1_
+
+_λ[⊤]k_ [(][x][k][+1] [(][x][0][)][.] (14)
+_k=0_ _[−]_ _[φ][k][(][x][k][)) +][ I][X]_
+
+X
+
+
+(x, λ) = J(xℓ) +
+_L_
+
+
+where x = (x0, · · ·, xℓ) and λ = (λ0, · · ·, λℓ−1). This results in the dual problem g[⋆] _←_
+maximize g(λ), where the dual function is
+
+
+_ℓ−1_
+
+inf _k_ 1[x][k] _[−][λ][⊤]k_ _[φ][k][(][x][k][)][}][+ inf]_ 0 _[φ][0][(][x][0][)][}][.]_
+_xk_ _xk_ _x¯k[{][λ][⊤]−_ _x0_ 0[{−][λ][⊤]
+_k=1_ _≤_ _≤_ _∈X_
+
+X
+
+
+_g(λ)=_ inf _ℓ_ 1[x][ℓ][}][ +]
+_xℓ_ _xℓ_ _x¯ℓ_ _[{][J][(][x][ℓ][) +][ λ][⊤]−_
+_≤_ _≤_
+
+
+By weak duality, g[⋆] _≤_ _J_ _[⋆]. The inner minimization problems in g(λ) to compute the dual_
+function for a given λ can often be solved efficiently or even in closed-form (Dvijotham et al.,
+2018). The resulting dual problem is unconstrained but non-differentiable; hence it is solved
+using dual subgradient method (Dvijotham et al., 2018). However, subgradient methods are
+known to be very slow with convergence rate O(1/√N ) where N is the number of updates
+
+(Nesterov, 2003), making it inefficient to find exact solutions to the convex relaxation. On
+the other hand, this method can be stopped at any time to obtain a valid lower bound.
+
+
+-----
+
+3.2 Lagrangian method via a non-separable splitting
+
+Another related approach is the Lagrangian decomposition method from Bunel et al. (2020a).
+To decouple the constraints for the convex relaxation of (3), this approach can be viewed as
+introducing one set of intermediate variables yk as copies of xk to obtain
+
+_Jrelaxed[⋆]_ _J(yℓ)_ (15)
+
+_[←][minimize]_
+subject to (yk, xk+1) _φk_ _k = 0,_ _, ℓ_ 1
+_∈S_ _· · ·_ _−_
+_yk = xk_ _k = 0, · · ·, ℓ_
+_x0_
+_∈X_
+
+This splitting is in the spirit of the splitting introduced in Bunel et al. (2020a;b),[2] and
+differs from our splitting which uses two sets of variables in (5). By relaxing the consensus
+constraints yk = xk, the Lagrangian is
+
+
+_ℓ−1_
+
+ISφk (yk, xk+1) + IX (x0). (16)
+_k=0_
+
+X
+
+
+_µ[⊤]k_ [(][y][k]
+_k=0_ _[−]_ _[x][k][) +]_
+
+X
+
+
+(x, y, µ) = J(yℓ) +
+_L_
+
+
+Again the Lagrangian is separable and its minimization results in the following dual function
+
+
+_ℓ−1_
+
+inf _µ[⊤]k_ _[y][k]_ _k+1[x][k][+1][}][ + inf]_ 0 _[x][0][}][.]_
+_k=0_ (yk,xk+1)∈Sφk _{_ _[−]_ _[µ][⊤]_ _x0∈X_ _[{−][µ][⊤]_
+
+X
+
+
+_g(µ) =_ inf _ℓ_ _[y][ℓ][}][ +]_
+_xℓ_ _yℓ_ _x¯ℓ[{][J][(][y][ℓ][)+][µ][⊤]_
+_≤_ _≤_
+
+
+Since the dual function is not differentiable, it must be maximized by a subgradient method,
+which again has an O(1/√N ) rate. To induce differentiability in the dual function and
+
+improve speed, Bunel et al. (2020a) uses Augmented Lagrangian (AL). Since only one set of
+variables was introduced in (15), the AL is no longer separable across the primal variables.
+Therefore, for each update of the dual variable, the AL must be minimized iteratively.
+To this end, Bunel et al. (2020a) use the Frank-Wolfe Algorithm in a block-coordinate as
+an iterative subroutine. However, this slows down overall convergence and suffers from
+compounding errors when the sub-problems are not fully solved. When stopping early, the
+primal minimization must be solved to convergence in order to compute the dual function
+and produce a valid bound.
+
+In contrast to the approach described above, in this paper we used a different variable
+splitting scheme in (5) that allows us to fully separate layers in a neural network. This
+subtle difference has a significant impact: we can efficiently minimize the corresponding AL
+in closed form, without resorting to any iterative subroutine. Specifically, we use the ADMM
+algorithm, which is known to converge at an O(1/N ) rate (He & Yuan, 2012). In summary,
+our method enjoys an order of magnitude faster theoretical convergence, is more robust to
+numerical errors, and has minimal requirements for parameter tuning. To stop early, we can
+use a similar strategy as the Frank-Wolfe approach from Bunel et al. (2020a) and run the
+primal iteration to convergence with fixed dual variables to get a valid bound.
+
+4 Experiments
+
+The strengths of our method are (a) its ability to exactly solve LP relaxations and (b) do so
+at scales that were previously impossible. To evaluate this, we first demonstrate how solving
+the LP to optimality leads to tighter certified robustness guarantees in image classification
+and reinforcement learning tasks (Section 4.1). We then stress test our method in both speed
+and scalability against a commercial LP solver and in the large network setting (Section 4.2).
+
+**Setup** In all the experiments, we focus on the setting of verification-agnostic networks,
+similar to Dathathri et al. (2020). However, we focus on significantly larger networks that
+
+2If we define φk(xk) = Wk+1σ(xk) + bk+1, where Wk+1, bk+1 are the parameters of the affine
+layer and σ is a layer of activation functions, this splitting coincides with the one proposed in Bunel
+et al. (2020a;b)
+
+
+-----
+
+Table 1: Certified test accuracy (%) of PGD-trained models on CIFAR10 through ADMM,
+the Lagrangian decomposition methods (Dvijotham et al., 2018; Bunel et al., 2020b), and
+fast dual/linear (Wong et al., 2018; Xu et al., 2020) or interval bounds (Gowal et al., 2018).
+All the methods are given the same time budget.
+
+Exact Lagrangian methods Fast bounds
+
+_ϵ_ ADMM Adam Prox Dual Adam Dual Decomp Adam Linear IBP
+
+1/255 **64.0** 47.4 61.1 47.6 47.8 59.8 42.8
+1.5/255 **45.7** 28.4 41.8 28.5 28.8 36.8 16.8
+2/255 **19.5** 10.9 17.4 11.0 11.1 13.2 3.6
+2.5/255 **5.5** 2.6 4.5 2.7 2.7 3.3 0.7
+
+have previously only been feasibly bounded with fast linear-based bounds of the LP relaxation
+(Wong et al., 2018; Xu et al., 2020). All the networks have been trained adversarially with
+the PGD attack (Madry et al., 2017). Full details about the network architecture, network
+training, and the parameters for our splitting method can be found in Appendix F.
+
+4.1 Improved Bounds From Exact LP Solutions with ADMM
+
+We first demonstrate how solving the LP exactly with our method results in tighter bounds
+than prior work. We consider two main settings: certifying the robustness of classifiers for
+CIFAR10 and deep Q-networks (DQNs) in Atari games. We defer additional analogous
+results in the smaller MNIST setting to Appendix F.3.
+
+**CIFAR10** Much work studying verification in CIFAR10 has focused primarily on a small
+CNN with only 6k hidden units—smaller than the classic LeNet from MNIST (LeCun et al.,
+2015). In this regime, tighter approaches such as SDP and branch-and-bound are applicable.
+
+Instead, we consider an order of magnitude larger model, which cannot be feasibly solved by
+these alternatives. Up until this point, the only solutions for large networks were linear-based
+bounds to the LP relaxation (Wong et al., 2018; Xu et al., 2020). However, these bounds are
+known to be quite loose. How much better can we do if we solve the LP exactly?
+
+In Table 1, we find that solving the LP exactly leads to significant gains in certified robustness
+for large networks, with up to 4% additional certified robustness over the best-performing
+alternative. All the methods in Table 1 are given the same time budget. Indeed, the better
+theoretical convergence guarantees of ADMM translate to better results in practice: when
+given a similar budget, the Lagrangian baselines have worse convergence and cannot verify
+as many examples. A complete description of these baselines is in Appendix F.3, with
+implementation details for the Lagrangian methods in Appendix G.
+
+**State-robust RL** We demonstrate our approach on a non-classification benchmark from
+reinforcement learning: verifying the robustness of deep Q-networks (DQNs) to adversarial
+state perturbations (Zhang et al., 2020). Specifically, we verify whether a learned DQN policy
+outputs stable actions in the discrete space when given perturbed states. Similar to the large
+network considered in the CIFAR10 setting, this benchmark has only been demonstrably
+verified with fast but loose linear-based bounds (Xu et al., 2020).
+
+Similar to the CIFAR10 setting, we observe consistent improvement in certified robustness
+of the DQN when solving the LP exactly with ADMM across multiple RL settings. We
+summarize the results using our method and the linear-based bounds on LP relaxations (Wong
+et al., 2018; Xu et al., 2020) in Table 2. Further details regarding the dataset, the DQN
+architectures, and this task can be found in Appendix F.4.
+
+4.2 Speed and Scalability
+
+In this section, we stress test several aspects of DeepSplit for solving LP relaxations. We first
+compare solving speeds of our ADMM-based LP solver to a commercial-grade LP solver. We
+then push the limits of architecture size and solve the LP relaxation for a standard ResNet18.
+
+
+-----
+
+Table 2: The percentage of actions from a deep Q-network that are certifiably robust to
+changes in the state space for three RL tasks: Bankheist, Roadrunner, and Pong. We
+compare fast linear bounds (Linear) (Wong et al., 2018; Xu et al., 2020) and ADMM.
+
+|Bankheist|Roadrunner|Pong|
+|---|---|---|
+|ϵ Linear ADMM|ϵ Linear ADMM|ϵ Linear ADMM|
+|0.0016 67.0 71.4 0.0020 39.7 49.5 0.0024 12.7 25.9 0.0027 1.4 7.3|0.0012 32.6 36.6 0.0016 26.3 27.5 0.0020 19.6 22.8 0.0024 1.1 3.7|0.0004 96.1 97.4 0.0008 93.4 95.6 0.0012 92.1 94.3 0.0016 82.1 84.0|
+
+
+
+
+500
+
+400
+
+300
+
+frequency200
+
+100
+
+0 0% 25% 50% 75% 100% 125% 150% 175% 200%
+
+relative improvement of lower bounds
+
+
+300
+
+250
+
+200
+
+150
+
+frequency
+
+100
+
+50
+
+0 0.0% 2.0% 4.0% 6.0% 8.0% 10.0%
+
+relative improvement of upper bounds
+
+
+Figure 2: A total of 1000 ResNet18 output lower and upper bounds are computed from
+ADMM and LiRPA for comparison in CIFAR10. Histograms of the relative improvement
+percentage of ADMM over LiRPA are shown for the lower (left) and upper (right) bounds,
+which have an average relative improvement of 31.61% and 2.32%, respectively.
+
+**Speed comparison** We first compare the solving speeds of our method with state-of-theart solvers for convex relaxations: a commercial-grade LP solver, Gurobi. Since Gurobi
+cannot handle large networks, we benchmark the approaches on a fully connected network
+that Gurobi can handle (see Appendix H for further details on experimental setup, as well
+as additional speed comparisons to alternative approaches).
+
+We find that our method provides a nearly 7x speedup over Gurobi. On average, it takes
+ADMM 38 seconds per example to calculate these intermediate bounds using a single GeForce
+GTX 1080, in comparison to 258 seconds per example for Gurobi on an Intel Core i7-6700K.
+
+**Scalability** Finally, to test the scalability and generality of our approach, we consider
+solving the LP relaxation for a ResNet18, which up to this point has simply not been
+possible. The only applicable method here is LiRPA (Xu et al., 2020)—a highly scalable
+implementation of the linear-based bounds that works for arbitrary networks but can be
+quite loose in practice. We defer specific experimental details to Appendix I.
+
+We find that exact LP solutions with our ADMM solver can also produce substantial
+improvements in the bound at ResNet18 scales, as shown in Figure 2. For a substantial
+number of examples, we find that ADMM can find significantly tighter bounds (especially
+for lower bounds). A tabular presentation of the results is in Table 5 of Appendix I.
+
+5 Conclusion
+
+In this paper, we proposed DeepSplit, a scalable and modular operator splitting technique for
+solving convex relaxation-based verification problems for neural networks. The method can
+exactly solve large-scale LP relaxations with GPU acceleration with favorable convergence
+rates. Our approach leads to significantly tighter bounds across a range of classification
+and reinforcement learning benchmarks, and can scale to a standard ResNet18. We leave as
+future work a further investigation of variations of ADMM that can improve convergence
+rates in deep learning-sized problem instances, as well as extensions beyond the LP setting.
+
+
+-----
+
+References
+
+Dimitri P Bertsekas. Nonlinear programming. Journal of the Operational Research Society,
+48(3):334–334, 1997.
+
+Stephen Boyd, Neal Parikh, and Eric Chu. Distributed optimization and statistical learning
+_via the alternating direction method of multipliers. Now Publishers Inc, 2011._
+
+Rudy Bunel, Ilker Turkaslan, Philip HS Torr, Pushmeet Kohli, and M Pawan Kumar. A unified
+view of piecewise linear neural network verification. arXiv preprint arXiv:1711.00455,
+2017.
+
+Rudy Bunel, Alessandro De Palma, Alban Desmaison, Krishnamurthy Dvijotham, Pushmeet
+Kohli, Philip Torr, and M Pawan Kumar. Lagrangian decomposition for neural network
+verification. In Conference on Uncertainty in Artificial Intelligence, pp. 370–379. PMLR,
+2020a.
+
+Rudy Bunel, Jingyue Lu, Ilker Turkaslan, Pushmeet Kohli, P Torr, and P Mudigonda.
+Branch and bound for piecewise linear neural network verification. Journal of Machine
+_Learning Research, 21(2020), 2020b._
+
+Yulong Cao, Chaowei Xiao, Benjamin Cyr, Yimeng Zhou, Won Park, Sara Rampazzi,
+Qi Alfred Chen, Kevin Fu, and Z Morley Mao. Adversarial sensor attack on lidar-based
+perception in autonomous driving. In Proceedings of the 2019 ACM SIGSAC conference
+_on computer and communications security, pp. 2267–2281, 2019._
+
+Chih-Hong Cheng, Georg Nührenberg, and Harald Ruess. Maximum resilience of artificial
+neural networks. In International Symposium on Automated Technology for Verification
+_and Analysis, pp. 251–268. Springer, 2017._
+
+Sumanth Dathathri, Krishnamurthy Dvijotham, Alexey Kurakin, Aditi Raghunathan,
+Jonathan Uesato, Rudy Bunel, Shreya Shankar, Jacob Steinhardt, Ian Goodfellow, Percy
+Liang, et al. Enabling certification of verification-agnostic networks via memory-efficient
+semidefinite programming. arXiv preprint arXiv:2010.11645, 2020.
+
+Alessandro De Palma, Rudy Bunel, Alban Desmaison, Krishnamurthy Dvijotham, Pushmeet
+Kohli, Philip HS Torr, and M Pawan Kumar. Improved branch and bound for neural
+network verification via lagrangian decomposition. arXiv preprint arXiv:2104.06718, 2021.
+
+John Duchi, Shai Shalev-Shwartz, Yoram Singer, and Tushar Chandra. Efficient projections
+onto the l 1-ball for learning in high dimensions. In Proceedings of the 25th international
+_conference on Machine learning, pp. 272–279, 2008._
+
+Souradeep Dutta, Susmit Jha, Sriram Sankaranarayanan, and Ashish Tiwari. Output range
+analysis for deep feedforward neural networks. In NASA Formal Methods Symposium, pp.
+121–138. Springer, 2018.
+
+Krishnamurthy Dvijotham, Robert Stanforth, Sven Gowal, Timothy Mann, and Pushmeet Kohli. A dual approach to scalable verification of deep networks. arXiv preprint
+_arXiv:1803.06567, 2018._
+
+Ruediger Ehlers. Formal verification of piece-wise linear feed-forward neural networks. In
+_International Symposium on Automated Technology for Verification and Analysis, pp._
+269–286. Springer, 2017.
+
+Mahyar Fazlyab, Alexander Robey, Hamed Hassani, Manfred Morari, and George J Pappas.
+Efficient and accurate estimation of lipschitz constants for deep neural networks. arXiv
+_preprint arXiv:1906.04893, 2019._
+
+Mahyar Fazlyab, Manfred Morari, and George J Pappas. Safety verification and robustness
+analysis of neural networks via quadratic constraints and semidefinite programming. IEEE
+_Transactions on Automatic Control, 2020._
+
+
+-----
+
+Samuel G Finlayson, John D Bowers, Joichi Ito, Jonathan L Zittrain, Andrew L Beam, and
+Isaac S Kohane. Adversarial attacks on medical machine learning. Science, 363(6433):
+1287–1289, 2019.
+
+Matteo Fischetti and Jason Jo. Deep neural networks and mixed integer linear optimization.
+_Constraints, 23(3):296–309, 2018._
+
+Sven Gowal, Krishnamurthy Dvijotham, Robert Stanforth, Rudy Bunel, Chongli Qin,
+Jonathan Uesato, Timothy Mann, and Pushmeet Kohli. On the effectiveness of interval
+bound propagation for training verifiably robust models. arXiv preprint arXiv:1810.12715,
+2018.
+
+Bingsheng He and Xiaoming Yuan. On the o(1/n) convergence rate of the douglas–rachford
+alternating direction method. SIAM Journal on Numerical Analysis, 50(2):700–709, 2012.
+
+BS He, Hai Yang, and SL Wang. Alternating direction method with self-adaptive penalty
+parameters for monotone variational inequalities. Journal of Optimization Theory and
+_applications, 106(2):337–356, 2000._
+
+Guy Katz, Clark Barrett, David L Dill, Kyle Julian, and Mykel J Kochenderfer. Reluplex:
+An efficient smt solver for verifying deep neural networks. In International Conference on
+_Computer Aided Verification, pp. 97–117. Springer, 2017._
+
+Yann LeCun et al. Lenet-5, convolutional neural networks. _URL: http://yann. lecun._
+_com/exdb/lenet, 20(5):14, 2015._
+
+Alessio Lomuscio and Lalit Maganti. An approach to reachability analysis for feed-forward
+relu neural networks. arXiv preprint arXiv:1706.07351, 2017.
+
+Aleksander Madry, Aleksandar Makelov, Ludwig Schmidt, Dimitris Tsipras, and Adrian
+Vladu. Towards deep learning models resistant to adversarial attacks. arXiv preprint
+_arXiv:1706.06083, 2017._
+
+Yurii Nesterov. Introductory lectures on convex optimization: A basic course, volume 87.
+Springer Science & Business Media, 2003.
+
+Brendan O’Donoghue, Giorgos Stathopoulos, and Stephen Boyd. A splitting method for
+optimal control. IEEE Transactions on Control Systems Technology, 21(6):2432–2442,
+2013.
+
+Brendan O’donoghue, Eric Chu, Neal Parikh, and Stephen Boyd. Conic optimization via
+operator splitting and homogeneous self-dual embedding. Journal of Optimization Theory
+_and Applications, 169(3):1042–1068, 2016._
+
+Aditi Raghunathan, Jacob Steinhardt, and Percy S Liang. Semidefinite relaxations for
+certifying robustness to adversarial examples. In Advances in Neural Information Processing
+_Systems, pp. 10900–10910, 2018._
+
+Hadi Salman, Greg Yang, Huan Zhang, Cho-Jui Hsieh, and Pengchuan Zhang. A convex
+relaxation barrier to tight robustness verification of neural networks. arXiv preprint
+_arXiv:1902.08722, 2019._
+
+Karsten Scheibler, Leonore Winterer, Ralf Wimmer, and Bernd Becker. Towards verification
+of artificial neural networks. In MBMV, pp. 30–40, 2015.
+
+Michel Schubiger, Goran Banjac, and John Lygeros. Gpu acceleration of admm for large-scale
+quadratic programming. Journal of Parallel and Distributed Computing, 144:55–67, 2020.
+
+Gagandeep Singh, Rupanshu Ganvir, Markus Püschel, and Martin Vechev. Beyond the single
+neuron convex barrier for neural network certification. Advances in Neural Information
+_Processing Systems, 32:15098–15109, 2019._
+
+Gavin Taylor, Ryan Burmeister, Zheng Xu, Bharat Singh, Ankit Patel, and Tom Goldstein.
+Training neural networks without gradients: A scalable admm approach. In International
+_conference on machine learning, pp. 2722–2731. PMLR, 2016._
+
+
+-----
+
+Christian Tjandraatmadja, Ross Anderson, Joey Huchette, Will Ma, Krunal Patel, and
+Juan Pablo Vielma. The convex relaxation barrier, revisited: Tightened single-neuron
+relaxations for neural network verification. arXiv preprint arXiv:2006.14076, 2020.
+
+Shiqi Wang, Huan Zhang, Kaidi Xu, Xue Lin, Suman Jana, Cho-Jui Hsieh, and J Zico Kolter.
+Beta-crown: Efficient bound propagation with per-neuron split constraints for complete
+and incomplete neural network verification. arXiv preprint arXiv:2103.06624, 2021.
+
+Tsui-Wei Weng, Huan Zhang, Hongge Chen, Zhao Song, Cho-Jui Hsieh, Duane Boning,
+Inderjit S Dhillon, and Luca Daniel. Towards fast computation of certified robustness for
+relu networks. arXiv preprint arXiv:1804.09699, 2018.
+
+Eric Wong and J Zico Kolter. Provable defenses against adversarial examples via the convex
+outer adversarial polytope. arXiv preprint arXiv:1711.00851, 1(2):3, 2017.
+
+Eric Wong, Frank R Schmidt, Jan Hendrik Metzen, and J Zico Kolter. Scaling provable
+adversarial defenses. arXiv preprint arXiv:1805.12514, 2018.
+
+Eric Wong, Leslie Rice, and J Zico Kolter. Fast is better than free: Revisiting adversarial
+training. arXiv preprint arXiv:2001.03994, 2020.
+
+Kaidi Xu, Zhouxing Shi, Huan Zhang, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya
+Kailkhura, Xue Lin, and Cho-Jui Hsieh. Automatic perturbation analysis for scalable
+certified robustness and beyond. Advances in Neural Information Processing Systems, 33,
+2020.
+
+Kaidi Xu, Huan Zhang, Shiqi Wang, Yihan Wang, Suman Jana, Xue Lin, and Cho-Jui Hsieh.
+Fast and complete: Enabling complete neural network verification with rapid and massively
+parallel incomplete verifiers. In International Conference on Learning Representations,
+[2021. URL https://openreview.net/forum?id=nVZtXBI6LNn.](https://openreview.net/forum?id=nVZtXBI6LNn)
+
+Huan Zhang, Tsui-Wei Weng, Pin-Yu Chen, Cho-Jui Hsieh, and Luca Daniel. Efficient
+neural network robustness certification with general activation functions. arXiv preprint
+_arXiv:1811.00866, 2018._
+
+Huan Zhang, Hongge Chen, Chaowei Xiao, Sven Gowal, Robert Stanforth, Bo Li, Duane
+Boning, and Cho-Jui Hsieh. Towards stable and efficient training of verifiably robust
+neural networks. arXiv preprint arXiv:1906.06316, 2019.
+
+Huan Zhang, Hongge Chen, Chaowei Xiao, Bo Li, Duane Boning, and Cho-Jui Hsieh. Robust
+deep reinforcement learning against adversarial perturbations on observations. Advances
+_in Neural Information Processing Systems, 2020._
+
+Yang Zheng, Giovanni Fantuzzi, Antonis Papachristodoulou, Paul Goulart, and Andrew
+Wynn. Fast admm for semidefinite programs with chordal sparsity. In 2017 American
+_Control Conference (ACC), pp. 3335–3340. IEEE, 2017._
+
+
+-----
+
+Demonstration of our codes are anonymously available in the attachment.
+
+A Convergence Analysis of DeepSplit
+
+By defining x1 = x, x2 = (y, z) (the primal variables) and ν = (λ, µ) (the scaled dual
+variables), we can write the split convex relaxation in (6) as
+
+minimize f1(x1) + f2(x2) (17)
+subject to A1x1 + A2x2 = 0
+
+with the corresponding Augmented Lagrangian
+
+(x1, x2, ν) = f1(x) + f2(x2) + _[ρ]_ 2 2[)] (18)
+_L_ 2 [(][∥][A][1][x][1][ +][ A][2][x][2][ +][ ν][∥][2] _[−∥][ν][∥][2]_
+
+where f1 : R[n] _→_ R _∪{+∞} and f2 : R[2][n][−][2][n][ℓ]_ _→_ R _∪{+∞} are extended real-valued functions_
+defined as f1(x1) := J(xℓ)+IX (x0), f2(x2) := _k=0_ [I][S]φk [(][y][k][, z][k][)][. Moreover,][ A][1][x][1][+][A][2][x][2][ = 0]
+represents the set of equality constraints yk = xk and xk+1 = zk for k = 0, · · ·, ℓ. The dual
+function is given by
+
+[P][ℓ][−][1]
+
+_g(ν) = inf_ (19)
+**x1,x2**
+
+_[L][(][x][1][,][ x][2][,][ ν][)][.]_
+
+By Danskin’s theorem (Bertsekas, 1997), the sub-differential of the dual function is given by
+
+_∂g(ν) = {A1x¯1 + A2x¯2 : (¯x1, ¯x2) ∈_ arg min L(x1, x2, ν)} (20)
+Here ¯x1, ¯x2 are minimizers of the Lagrangian (not necessarily unique), which satisfy the
+optimality conditions
+
+0 ∈ _∂f1(¯x1) + ρA[⊤]1_ [(][A][1]x[¯]1 + A2x¯2 + ν) (21)
+
+0 ∈ _∂f2(¯x2) + ρA[⊤]2_ [(][A][1]x[¯]1 + A2x¯2 + ν)
+
+First, we show that the sub-differential is a singleton, i.e., g is continuously differentiable. Suppose (x¯1, ¯x2) arg min (ξ, ν) and ( ¯w1, ¯w2) arg min (ξ, ν) are two distinct minimizers
+_∈_ _L_ _∈_ _L_
+of the Lagrangian, hence satisfying
+
+0 _∂f1( ¯w1) + ρA[⊤]1_ [(][A][1]w[¯] 1 + A2 ¯w2 + ν) (22)
+_∈_
+
+0 _∂f2( ¯w2) + ρA[⊤]2_ [(][A][1]w[¯] 1 + A2 ¯w2 + ν)
+_∈_
+
+By monotonicity of the sub-differentials, we can write
+
+(∂f1(¯x1) _∂f1( ¯w1))[⊤](¯x1_ **w¯** 1) 0 (23)
+_−_ _−_ _≥_
+
+(∂f2(¯x2) _∂f2( ¯w2))[⊤](¯x2_ **w¯** 2) 0
+_−_ _−_ _≥_
+
+By substituting (21) and (22) in (23), we obtain
+
+(ρA[⊤]1 [(][A][1]x[¯]1 + A2x¯2 + ν) _ρA[⊤]1_ [(][A][1]w[¯] 1 + A2 ¯w2 + ν))[⊤](¯x1 **w¯** 1) 0 (24)
+_−_ _−_ _−_ _≥_
+
+(ρA[⊤]2 [(][A][1]x[¯]1 + A2x¯2 + ν) _ρA[⊤]2_ [(][A][1]w[¯] 1 + A2 ¯w2 + ν))[⊤](¯x2 **w¯** 2) 0
+_−_ _−_ _−_ _≥_
+
+By adding the preceding inequalities, we obtain
+
+_ρ_ _A1x¯1 + A2x¯2_ (A1 ¯w1 + A2 ¯w2) 2 (25)
+_−_ _∥_ _−_ _∥[2]_ _[≥]_ [0]
+This implies that A1x¯1 + A2x¯2 = A1 ¯w1 + A2 ¯w2 and hence, the sub-differential ∂g is a
+singleton.
+
+_Convergence._ When is a closed nonempty convex set, I (x0) is a convex closed proper
+_X_ _X_
+(CCP) function. Assuming that J is also CCP, then we can conclude that f1 is CCP.
+Furthermore, since the sets Sφk are nonempty convex sets, we can conclude that f2 is CCP.
+Under these assumptions, the augmented Lagrangian has a minimizer (not necessarily unique)
+for each value of the dual variables. Finally, under the assumption that the Augmented
+Lagrangian has a saddle point (which produces a solution to (17)), the ADMM algorithm we
+have primal convergence _rp_ 0 (see (31)), dual residual convergence _rd_ 0, as well as
+_∥_ _∥→_ _∥_ _∥→_
+objective convergence J(xℓ) _J_ _[⋆]_ (Boyd et al., 2011).
+_→_
+
+We remark that the convergence guarantees of ADMM holds even if f1 and f2 assume the
+value +∞. This is the case for indicator functions resulting in projections in the first two
+updates of ADMM.
+
+
+-----
+
+B ADMM for General Computational Graphs
+
+To handle general computational graphs, we follow the approach used in (Wong et al., 2018).
+Specifically, consider a generalized ℓ-"layer" neural network given by the equations
+
+
+_φik(xi)_ Φk(x1:k) _k = 0,_ _, ℓ_ 1 (26)
+_≡_ _· · ·_ _−_
+_i=1_
+
+X
+
+
+_xk+1 =_
+
+
+where x1:k denotes the concatenated vector of variables (x1, · · ·, xk). Note that this view
+of a network reduces to the feedforward equations in (2) when φik(xi) = 0 for all i < k.
+Furthermore, this view subsumes arbitrary skip connections, such as residual connections.
+Then, the graph form of the verification problem in (4) can be rewritten for the generalized
+neural network as
+_J_ _[⋆]_ minimize _J(xℓ)_ (27)
+_←_
+subject to (x1:k, xk+1) _φk(x1:k)_ _k = 0,_ _, ℓ_ 1
+_∈G_ _· · ·_ _−_
+
+_x0_ _._
+_∈X_
+Similar to before, let Sφk be a sound convex approximation of Gφk . Then, our convex
+relaxation introduces additional intermediate variables y1:k and zk to get the following
+convex relaxation (analogous to (6)):
+_p[⋆]relaxed_ _J(xℓ)_ (28)
+
+_[←][minimize]_
+subject to _y1:k = x1:k_ _k = 0, · · ·, ℓ_ _−_ 1
+(y1:k, zk) _φk_ _k = 0,_ _, ℓ_ 1
+_∈S_ _· · ·_ _−_
+_xk+1 = zk_ _k = 0, · · ·, ℓ_ _−_ 1
+_x0_ _._
+_∈X_
+Thus, producing an ADMM layer for a network with arbitrary skip connections reduces to
+deriving the corresponding projection operator onto _φk_ . Since most residual connections
+_S_
+simply add an affine transformation of a previous layer, these projections are straightforward
+and have a closed form (an example of a typical residual ADMM block is in Appendix C).
+
+C ADMM layers
+
+C.1 ReLU projection
+
+Consider the ReLU function y = ϕ(x) = max(0, x) on the interval x ∈ [x, ¯x]. The projection
+of a point (x[(0)], y[(0)]) onto the convex hull of G(ϕ) has a closed-form solution. We consider
+three cases.
+
+1. Active neuron (x ≥ 0). In this case, the convex hull is given by
+_Sϕ = {(x, y) | y = x, x ≤_ _x ≤_ _x¯}._
+
+and the projection of (x[(0)], y[(0)]) onto _ϕ is given by x[′]_ = y[′] = min(max( _[x][(0)][+]2_ _[y][(0)]_ _, x), ¯x)._
+_S_
+
+2. Inactive neuron (x¯ ≤ 0). In this case, the convex hull is
+_Sϕ = {(x, y) | y = 0, x ≤_ _x ≤_ _x¯}._
+
+and the projection of (x[(0)], y[(0)]) onto Sϕ is given by x[′] = min(max(x[(0)], x), ¯x), y[′] = 0.
+
+3. Unknown neuron (x ≤ 0 ≤ _x¯). The convex hull is given by_
+_Sϕ = {(x, y) | y ≥_ 0, y ≥ _x, y ≤_ _y + s(x −_ _x)}_
+
+where s = _xy¯¯−yx_ [,][ y][ =][ max][(0][, x][)][,][ ¯]y = max(0, ¯x). We first project (x[(0)], y[(0)]) onto each facet of
+_−_
+the triangle and then select the point with the minimal distance.
+
+_x[(1)]_ = min(max( _[x][(0)][ +][ y][(0)]_ _, 0), ¯x)_ _y[(1)]_ = x[(1)]
+
+
+_x[(2)]_ = min(max( _[x][(0)][ +][ sy][(0)][ +][ s][(][sx][ −]_ _[y][)]_ _, x), ¯x)_ _y[(2)]_ = _[s][(][x][(0)][ −]_ _[x][) +][ s][2][y][(0)][ +][ y]_
+
+_s[2]_ + 1 _s[2]_ + 1
+
+_x[(3)]_ = min(max(0, x[(0)]), x) _y[(3)]_ = 0
+
+
+-----
+
+Figure 3: Projection of a point (x0, y0) onto the convex hull of the ReLU function y =
+max(0, x) over the interval [x, ¯x]. We first project (x0, y0) onto all facets of the convex hull
+and then select the point with minimal distance to (x0, y0).
+
+The projected point is (x[′], y[′]) = (x[(][i][⋆][)], y[(][i][⋆][)]), where _i[⋆]_ =
+arg min1≤i≤3 (x[(0)] _−_ _x[(][i][)])[2]_ + (y[(0)] _−_ _y[(][i][)])[2]._
+p
+
+C.2 Convolutions
+
+Although a convolution is technically a linear operator, it is impractical to directly form the
+inverse matrix from the projection step of the DeepSplit algorithm. Instead, we represent a
+typical convolutional layer fconv with stride, padding and bias as
+
+_fconv = fbias ◦_ _fds ◦_ _fcrop ◦_ _fcirc ◦_ _fpad = fpost ◦_ _fcirc ◦_ _fpad,_ (29)
+
+where fpad is a padding step, fcirc is a circular convolution step, fcrop is a cropping step,
+_fds is a downsampling step to handle stride greater than one, and fbias is a step that adds_
+the bias. Then, the last three steps are combined into one post-processing step fpost to
+reduce the number of concensus constraints in the DeepSplit algorithm. The projection steps
+for all of these operators are presented next in Sections C.3 through C.6, and an efficient
+implementation of the projection step for the affine layer fcirc is in Appendix E.
+
+C.3 Padding
+
+The padding layer fpad takes an image as input and adds padding to it. Denote the input
+image by yk and the padded image by zk. We can decompose the output zk into two vectors,
+_zk[0]_ [which is a copy of the input][ y][k][, and][ z]k[1] [which represents the padded zeros on the edges of]
+image. Equivalently, the padding layer zk = φk(yk) can be written in an affine form
+
+
+_zk =_ _zk[0]_
+_zk[1]_
+
+
+
+_yk = Wkyk,_
+
+
+for which the projection operator reduces to the affine case.
+
+C.4 Cropping
+
+The cropping layer fcrop crops the output of the circular convolution fcirc to the original size
+of the input image before padding. Denote yk the input image and zk the output image of
+the cropping layer. By decomposing the input image yk into the uncropped pixels yk[0] [and]
+the cropped pixels yk[1][, the cropping layer][ z][k][ =][ φ][k][(][y][k][)][ has an affine formulation]
+
+
+_zk = yk[0]_ [= [][I] 0] _yk[0]_
+_yk[1]_
+
+
+whose projection operator is given in Section 2.4.
+
+C.5 Down-sampling and bias
+
+
+= Wkyk
+
+
+If the typical convolutional layer fconv has stride greater than one, a down-sampling layer
+is added in the DeepSplit algorithm, which essentially has the same affine form as the
+
+
+-----
+
+cropping layer with different values of yk[0] [and][ y]k[1][. Therefore, the projection operator for the]
+down-sampling layer reduces to the affine case as well.
+
+The bias layer in the DeepSplit algorithm handles the case when the convolutional layer
+_fconv has a bias bk and is implemented by zk = φk(yk) = yk + bk. This is an affine expression_
+and its projection operator is given in Section 2.4.
+
+C.6 Convolutional post-processing layer
+
+We combine the cropping, down-sampling and bias layers into one post-processing layer,
+i.e., fpost = fbias ◦ _fds ◦_ _fcrop, as shown in (29). This reduces the total number of concensus_
+constraints in the DeepSplit algorithm. Since all the three layers are in fact affine, the
+post-processing layer is also affine and its projection operator can be obtained correspondingly.
+
+C.7 Maxpooling
+
+Consider a Maxpooling layer φ(x) = maxk xk, k = 1, · · ·, n over x ≤ _x ≤_ _x¯. (Bunel et al.,_
+2020b, Appendix B.2) shows that the Maxpooling layer can be equivalently decomposed
+as a combination of linear and ReLU layers. This is motivated by the following fact that
+max(x1, x2, x3, x4) = max(max(x1, x2), max(x3, x4)) and max(x1, x2) = max(x1 _x2, 0) +_
+max(x2 _x2, 0) + x2. Therefore, we can represent the Maxpooling layer by a composition of −_
+_−_
+pairwise maximum functions which can themselves be decomposed into a combination of
+linear and ReLU layers. The projection operations onto the convex hull of the ReLU and
+linear layers are closed-form as shown in Appendix C.1 and Section 2.4, respectively.
+
+C.8 Residual connection
+
+We consider a typical residual connection φk(yk, yi) = yk + Wiyi + bi for i < k, where yi is an
+arbitrary layer before yk and Wi, bi is any affine transformation (i.e. a 1 by 1 convolution for
+upsampling or downsampling layer frequently used in residual connections with differently
+sized feature maps). Then, we can write this as
+
+_φk(yki) = Wkiyki + bi,_ (30)
+
+where yki = _yk_ and Wki = [I _Wi]. Then, the projection operator reduces to the affine_
+_yi_
+ 
+
+case but with weights Wki, bi for input yki.
+
+C.9 Batch normalization and average pooling
+
+The batch normalization and average pooling layers that appear in the architecture of the
+residual networks, e.g., ResNet18 applied in this paper, are essentially affine mapping layers
+whose weights and biases can be extracted accordingly. Therefore, the projection onto the
+graph of these two layers has a closed-form solution as shown in Eq. (11).
+
+D Implementation Details
+
+D.1 Convergence and Stopping Criterion
+
+The DeepSplit algorithm converges to the optimal solution of the convex problem (6) under
+mild conditions. Specifically, when J is closed, proper and convex, and when the sets _k_
+_S_
+(convex outer approximations of the graph of the layers) along with X are closed and convex,
+we can resort to the convergence results of ADMM (Boyd et al., 2011).
+
+
+-----
+
+For the LP relaxation (6) of a feed-forward neural network, the primal and dual residuals
+are defined as
+
+
+_ℓ−1_
+
+_yk[+]_ _k_ _k+1_ _k_ (31)
+_k=0_ _{∥_ _[−]_ _[x][+][∥][2][ +][ ∥][x][+]_ _[−]_ _[z][+][∥][2][}]_
+
+X
+
+
+_rp =_
+
+
+_ℓ−1_
+
+_k=1_ _∥(yk[+]_ _[−]_ _[y][k][) + (][z]k[+]−1_ _[−]_ _[z][k][−][1][)][∥]2[2]_ [+][ ρ] _∥y0[+]_ _[−]_ _[y][0][∥]2[2]_ [+][ ∥][z]ℓ[+]−1 _[−]_ _[z][ℓ][−][1][∥]2[2]_
+
+X  
+
+
+_rd = ρ_
+
+
+These are the residuals of the optimality conditions for (6) and converge to zero as the
+algorithm proceeds. A reasonable termination criterion is that the primal and dual residuals
+must be small, i.e. rp ≤ _ϵp and rd ≤_ _ϵd, where ϵp > 0 and ϵd > 0 are tolerance levels (Boyd_
+et al., 2011, Chapter 3). These tolerances can be chosen using an absolute and relative
+criterion, such as
+
+
+_ℓ−1_ 1
+
+_∥xi∥2[2]_ [+][∥][x][ℓ][∥][2]2[)] 2 + (
+_i=1_
+
+X
+
+
+_ℓ−1_
+
+(∥yi∥2[2] [+][ ∥][z][i][∥]2[2][)][1][/][2][}]
+_i=0_
+
+X
+
+
+_ϵp =_ _[√]p ϵabs_ +ϵrel max{(∥x0∥2[2] [+2]
+
+
+_ℓ−1_ 1
+
+_λi_ +µi 1 2 [+][ ∥][µ][ℓ][−][1][∥]2[2][)] 2,
+_∥_ _−_ _∥[2]_
+_i=1_
+
+X
+
+
+_ϵd =_ _[√]n ϵabs_ +ϵrel(∥λ0∥2[2] [+]
+
+
+where p = n0 + 2 _i=1_ _[n][i][ +][ n][ℓ][,][ n][ =][ P]i[ℓ]=0_ _[n][i][,][ ϵ][abs][ >][ 0][ and][ ϵ][rel][ >][ 0][ are absolute and relative]_
+tolerances. Here n is the dimension of x, the vector of primal variables that are updated in
+the first step of the algorithm, and p is the total number of consensus constraints.
+
+[P][ℓ][−][1]
+
+For neural networks with general computational graphs such as residual networks, the primal
+and dual residuals as well as the stopping criteria have different representations from what’s
+shown above. But with our proposed splitting method, these representations are easy to
+derive from (Boyd et al., 2011, Chapter 3).
+
+D.2 Parameter Selection
+
+A proper selection of the augmentation constant ρ has a dramatic effect on the convergence
+of the method. Large values of ρ enforces consensus more quickly, yielding smaller primal
+residuals but larger dual ones. Conversely, smaller values of ρ leads to larger primal and
+smaller dual residuals. A commonly used heuristic to make this trade-off is residual balancing
+He et al. (2000), in which the penalty parameter varies adaptively based on the following
+rule:
+
+
+_τρ_ if rp > µrd
+_ρ/τ_ if rd > µrp
+_ρ_ otherwise,
+
+
+_ρ[+]_ =
+
+
+where µ, τ > 1 are parameters. In our experiments, we found this rule to be effective in
+speeding up the practical convergence.
+
+D.3 Convolutional Layers
+
+The projection step for affine layers from (11) requires multiplication by the matrix (Ink +
+_Wk[⊤][W][k][)][−][1][ for that layer, where][ n][k][ is the number of neurons in the layer. When handling]_
+networks with convolutional layers on image data, nk can easily exceed tens of thousands,
+so the resulting matrix and its inversion can exceed reasonable memory and computational
+constraints.
+
+To make the update step practical and in line with typical computational costs of deep
+convolutional networks, we replace the typical deep learning convolution with an equivalent
+circular convolution. Specifically, let fconv be a typical strided convolution with padding.
+We can rewrite fconv as three sequential updates using a circular convolution as fconv =
+_fpost ◦_ _fcirc ◦_ _fpad, where fpad is a padding step, fcirc is a circular convolution, and fpost is a_
+
+
+-----
+
+post-processing step that performs cropping, downsampling, and adds any bias term from
+_fconv._
+
+We can now treat these three updates as separate, individual layers in our ADMM algorithm.
+The key observation is that we can use the convolution theorem to implement the ADMM
+update for the circular convolutionthe projection step from (11) for a circular convolution can be calculated in fcirc efficiently. Specifically, for an input of size O(n n[2]k _k[log] ×[ n] n[k]k[)],_
+using the fast Fourier transform. We provide the specific details of this procedure in Appendix
+E.
+
+E FFT implementation for circular convolutions
+
+In order to efficiently implement convolutional layers, recall that we decompose a convolution
+into the following three steps:
+
+_fconv = fpost ◦_ _fcirc ◦_ _fpad_ (32)
+
+We now discuss in detail how to efficiently perform the (y, z) update for multi-channel,
+circular convolutions fcirc using Fourier transforms. We begin with the single-channel setting,
+and then extend our procedure to the multi-channel setting. See Appendix C for details
+regarding the ADMM projection step for fpad and fpost.
+
+E.1 Single-channel circular convolutions
+
+Let U represent the discrete Fourier transform (DFT) as a linear operator, and let W be the
+weight matrix for the circular convolution fcirc(x) = W ∗ _x. Then, using matrix notation,_
+the convolution theorem states that
+
+_fcirc(x) = W ∗_ _x = U_ _[∗](UW · Ux) = U_ _[∗]DUx_ (33)
+
+where D = diag(UW ) is a diagonal matrix containing the Fourier transform of W and U _[∗]_ is
+the conjugate transpose of U . Then, we can represent the inverse operator from (11) as
+
+(I + fcirc[⊤] _[f][circ][)][−][1][ =][ U][ ∗][(][I][ +][ DD][)][−][1][U]_ (34)
+
+Since (I + DD) is a diagonal matrix, its inverse can be computed quickly by simply inverting
+the diagonal elements, and requires storage space no larger than the original kernel matrix.
+Thus, multiplication by the inverse matrix for a circular convolution reduces to two DFTs
+and an element-wise product. For an input of size n × n, this step has an overall complexity
+of O(n[2] log n) when using fast Fourier transforms.
+
+E.2 Multi-channel circular convolutions
+
+We now extend the operation for single-channel circular convolutions to multi-channel, which
+is typically used in convolutional layers found in deep vision classifiers. Specifically, for a
+circular convolution with n input channels and m output channels, we have
+
+
+_Wij_ _xi_ (35)
+_i=1_ _∗_
+
+X
+
+
+_fcirc(x)j =_
+
+
+where fcirc(x)j is the jth output channel output of the circular convolution, Wij is the kernel
+of the ith input channel for the jth output channel, and xi is the ith channel of the input x.
+The convolutional theorem again tells us that
+
+
+_U_ _DijUxi_ (36)
+
+_[∗]_
+_i=1_
+
+X
+
+
+_fcirc(x)j =_
+
+
+where Dij = diag(UWij). This can be re-written more compactly using matrices as
+
+_fcirc(x) = U[¯]_ _[∗]D[¯]_ _U[¯] ¯x_ (37)
+
+where
+
+
+-----
+
+_· · ·_ 0
+.
+... ..  is a block diagonal matrix with n copies of U along the diagonal
+
+_· · ·_ _U_ 
+
+
+
+_U_ _[∗]_ _· · ·_ 0
+. .
+.. ... ..  is a block diagonal matrix with m copies of U along the
+0 _· · ·_ _U_ _[∗]_ 
+
+
+
+
+
+-  _U[¯] =_
+
+
+
+
+-  _U[¯]_ =
+
+_[∗]_ 
+
+
+
+diagonal
+
+
+_D11_ _Dn1_
+
+_· · ·_
+. .
+
+-  _D[¯] =_  .. ... ..
+
+_D1m_ _Dnm_
+
+ _· · ·_
+
+block is _Dij_
+
+
+is a block matrix with diagonal blocks where the ijth
+
+
+
+
+_x1_
+.
+.
+.
+_xn_
+
+
+.
+
+-  ¯x = . is a vertical stacking of all the input channels.
+
+.
+_xn_
+
+ 
+ 
+
+Then, we can represent the inverse operator from (11) as
+
+
+
+-  ¯x =
+
+
+(I + fcirc[⊤] _[f][circ][)][−][1][ = ¯]U_ _[∗](I + D[¯]_ _D[¯]_ )[−][1][ ¯]U (38)
+
+where I + _D[¯]_ _D[¯] is a block matrix, where each block is a diagonal matrix. The inverse can_
+then be calculated by the inverting sub-matrices formed from sub-indexing the diagonal
+components. Specifically, let _D[¯]_ _j::p be a slice of_ _D[¯] containing elements spaced m elements_
+apart in both column and row directions, starting with the jth item. For example, _D[¯]_ 0::p is
+the matrix obtained by taking the top-left most element along the diagonal of every block.
+Then, for j = 1 . . . m, we have
+
+(I + D[¯] _D[¯]_ )[−]j::[1]p [=] (I + D[¯] _D[¯]_ )j::p _−1_ (39)
+
+Thus, calculating this matrix amounts to inverting a batch of   _p matrices of size m × m. For_
+typical convolutional networks, m is typically well below 1, 000, and so this can be calculated
+quickly. Further note that this only needs to be calculated once as a pre-computation step,
+and can be reused across different inputs and objectives for the network.
+
+**Memory and runtime requirements** In practice, we do not store the fully-expanded
+block diagonal matrices; instead, we omit the zero entries and directly store the the diagonal
+entries themselves. Consequently, for an input of size p, the diagonal matrices require storage
+of size O(mnp), and the inverse matrix requires storage of size O(m[2]p). Since the discrete
+Fourier transform can be done in O(p log p) time with fast Fourier transforms, the overall
+runtime of the precomputation step to form the matrix inverse is the cost of the initial DFT
+and the batch matrix inverse, or O(nmp log p + m[3]p). Finally, the runtime of the projection
+step is O((n + _m)p log p_ + _n[2]mp), which is the respective costs of the DFT transformations_ _U[¯]_
+and _U[¯]_ _[∗], as well as the multiplication by_ _D[¯]_ . Since the number of channels in a deep network
+are typically much smaller than the size of the input to a convolution (i.e. n < p and m < p),
+the costs of doing the cyclic convolution with Fourier transforms are in line with typical deep
+learning architectures.
+
+F Experimental details
+
+F.1 Architectures, datasets, and training specifics
+
+**MNIST** We consider two ReLU based architectures. The first one is a fully connected
+network with layer sizes 784−600−400−200−100−10 which we denote MNIST-A. It is more
+than triple the size of that considered by (Dathathri et al., 2020) with one additional layer. It
+is, however, still small enough such that Gurobi is able to solve the LP relaxation, and allows
+us to compare our running time against Gurobi. The second one is a convolutional network
+
+
+-----
+
+Table 3: Approximate verification time for solving the LP relaxation through ADMM.
+Epsilons are evenly spaced within the range.
+
+Model # of epsilon Epsilon range Time (hrs)
+
+MNIST-A 10 [0.01, 0.1] 13.12
+MNIST-B 10 [0.01, 0.1] 19.92
+CIFAR10 8 [0.5/255, 4/255] 50.69
+Bankheist 10 [0.1/255, 1/255] 4.96
+Roadrunner 10 [0.1/255, 1/255] 52.33
+Pong 10 [0.1/255, 1/255] 31.06
+
+which uses the small convolutional architecture from (Wong et al., 2018) and consists of two
+convolutional layers of size 16 − 32 with kernel sizes 4 − 4, strides 2 − 2, and padding 1 − 1.
+We denote this network by MNIST-B. This architecture is comparable to the convolutional
+architecture considered by (Dathathri et al., 2020), and allows us to compare our running
+time against the gradient-based SDP solver.
+
+We train both models with an ℓ PGD adversary at radius ϵ = 0.1, using 7 steps of size
+_∞_
+_α = 0.02, with batch size 100 for 100 epochs. We use the Adam optimizer with a cyclic_
+learning rate (maximum learning rate of 0.005), and both models achieve a clean accuracy of
+99%.
+
+**CIFAR10** For CIFAR10, we use the large convolutional architectures from (Wong et al.,
+2018), which consists of four convolutional layers with 32 − 32 − 64 − 64 channels, with
+strides 1 − 2 − 1 − 2, kernel sizes 3 − 4 − 3 − 4, and padding 1 − 1 − 1 − 1. This is followed
+by three linear layers of size 512 − 512 − 10. This is significantly larger than the CIFAR10
+architectures considered by (Dathathri et al., 2020), and has sufficient capacity to reach 43%
+adversarial accuracy against an ℓ PGD adversary at ϵ = 8/255.
+_∞_
+
+The model is trained against a PGD adversary with 7 steps of size α = 2/255 at a maximum
+radius of ϵ = 8.8/255, with batch size 128 for 200 epochs. We used the SGD optimizer with
+a cyclic learning rate (maximum learning rate of 0.23), momentum 0.9, and weight decay
+0.0005. The model achieves a clean test accuracy of 71.8%.
+
+**State-robust RL** We use the pretrained, adversarially trained, DQNs released by (Zhang
+et al., 2020) from
+```
+           https://github.com/chenhongge/SA_DQN
+
+```
+which has not included any license information up to the date of submission of this paper.
+These models were trained to be robust at ϵ = 1/255 with a PGD adversary for the Atari
+games Pong, Roadrunner, Freeway, and BankHeist. Each input to the DQN is of size
+1 × 84 × 84, which is more than double the size of CIFAR10. The DQN architectures are
+convolutional networks, with three convolutional layers with 32 − 64 − 64 channels, with
+kernel sizes 8 − 4 − 3, strides 4 − 2 − 1, and no padding. This is followed by two linear layers
+of size 512 − _K, where K is the number of discrete actions available in each game._
+
+F.2 Timing experiments
+
+**Runtime summary: We certify the robustness of classifiers for MNIST and CIFAR10 and**
+DQNs in Atari games to ℓ perturbations over a range of radii. The specific verification
+_∞_
+setups can be found in Appendix F.3 and F.4. We report the approximate runtime for all
+experiments in Table 3.
+
+**Effects of ADMM parameters: In this subsection, we demonstrate the effects of the**
+algorithm parameters on the convergence of ADMM through two networks: MNIST-A
+(fully-connected) and MNIST-B (convolutional). Specifically, we focus on the choice of ρ and
+the application of residual balancing.
+
+
+-----
+
+25 ρ = 0.1
+
+20 ρ = 1.0
+
+ρ = 10.0
+
+15 res. balancing
+
+10
+
+5
+
+0
+
+objective value −5
+
+−10
+
+−15
+
+0 500 1000 iteration1500 2000 2500 3000
+
+
+10[1] ρ = 0.1
+
+ρ = 1.0
+
+ρ = 10.0
+
+10[0] res. balancing
+
+10[−1]
+
+primal residual10[−2]
+
+10[−3]
+
+0 500 1000 iteration1500 2000 2500 3000
+
+
+10[0] ρ = 0.1
+
+ρ = 1.0
+
+ρ = 10.0
+
+res. balancing
+
+10[−1]
+
+dual residual
+
+10[−2]
+
+0 500 1000 iteration1500 2000 2500 3000
+
+
+Figure 4: The objective values (left), primal residuals (middle), and dual residuals (right)
+of ADMM under different augmentation parameters ρ on the MNIST-A (fully-connected)
+network.
+
+
+
+
+
+30
+
+20
+
+10
+
+objective value ρ = 0.1
+
+0 ρ = 1.0
+
+ρ = 10.0
+
+res. balancing
+
+0 500 1000 iteration1500 2000 2500 3000
+
+
+10[1] ρ = 0.1
+
+ρ = 1.0
+
+ρ = 10.0
+
+10[0] res. balancing
+
+10[−1]
+
+primal residual
+
+10[−2]
+
+0 500 1000 iteration1500 2000 2500 3000
+
+
+10[0] ρ = 0.1
+
+ρ = 1.0
+
+ρ = 10.0
+
+res. balancing
+
+10[−1]
+
+dual residual
+
+10[−2]
+
+0 500 1000 iteration1500 2000 2500 3000
+
+
+Figure 5: The objective values (left), primal residuals (middle), and dual residuals (right)
+of ADMM under different augmentation parameters ρ on the MNIST-B (convolutional)
+network.
+
+We conduct our experiment on the 1938-th example which is randomly chosen from the
+MNIST test data set. For this example, both MNIST-A and MNIST-B predicts its class
+(number 4) correctly. We add an ℓ perturbation of radius ϵ = 0.02 to the input image
+_∞_
+and verify if the network outputs are robust with respect to class number 3. The maximum
+number of iterations is restricted to 3000. The objective values, primal and dual residuals of
+ADMM for MNIST-A and MNIST-B under different augmentation parameters ρ are plotted
+in Figure 4 and 5, respectively. The residual balancing in this experiment is applied with
+initial ρ = 10.0, τ = 2, and µ = 10 as described in Section D.2.
+
+The update rule of ADMM suggests that a large value of ρ tends to produce small primal
+residuals since it puts a large penalty on the violation of the primal feasibility. However,
+the dual residuals for such ρ tends to be larger. Conversely, a small ρ tends to reduce
+the dual residuals at the cost of larger primal residuals. This phenomenon is illustrated
+empirically with the fully-connected network MNIST-A in Figure 4 and the convolutional
+network MNIST-B in Figure 5.
+
+Since ADMM terminates when both the primal and dual residuals are small enough, in
+practice we prefer to choose the augmentation parameter ρ not too large or too small in order
+to balance the reduction in the primal and dual residuals. An effective way to choose a good
+_ρ is residual balancing, which tries to keep the primal and dual residuals close during the_
+ADMM updates by adjusting ρ online. In both Figure 4 and Figure 5, ADMM with residual
+balancing is initialized with ρ = 10.0 and shows significant improvement in convergence rate
+compared with the case of constant ρ = 10.0. As observed in our other experiments, with
+residual balancing, ADMM becomes insensitive to the initialization of ρ and usually achieves
+a good convergence rate.
+
+In all of the test accuracy certification results reported in this paper, we initialize ρ =
+1.0 and apply residual balancing when running ADMM. In different experiments, the
+stopping criterion parameters ϵabs, ϵrel of ADMM are chosen by trial-and-error to achieve a
+balance between the accuracy and the running time of the algorithm. Although ADMM has
+convergence guarantees for its objective values, primal and dual residuals, it may take too
+many iterations for ADMM to achieve a solution of high accuracy (Boyd et al., 2011).
+
+
+-----
+
+MNIST-A
+
+10000 LP-ADMM
+
+LP-Dual
+
+8000
+
+6000
+
+4000
+
+certified number
+
+2000
+
+0
+
+0.02 0.04 0.06 0.08 0.10
+ε
+
+
+MNIST-A
+
+800
+
+600
+
+400
+
+difference
+
+200
+
+0
+
+0.02 0.04 0.06 0.08 0.10
+ε
+
+
+MNIST-B
+
+10000 LP-ADMM
+
+LP-Dual
+
+8000
+
+6000
+
+4000
+
+certified number
+
+2000
+
+0
+
+0.02 0.04 0.06 0.08 0.10
+ε
+
+
+MNIST-B
+
+1600
+
+1400
+
+1200
+
+1000
+
+800
+
+difference 600
+
+400
+
+200
+
+0
+
+0.02 0.04 0.06 0.08 0.10
+ε
+
+
+Figure 6: The numbers of certified examples (left column) of ADMM and the linear-based
+bounds (Wong et al., 2018; Xu et al., 2020) for the MNIST-A (upper row) and MNIST-B
+(lower row) networks and their differences (right column) for each ϵ ∈{0.01, 0.02, · · ·, 0.10}.
+
+F.3 Image classification
+
+
+In this section, we report the details of certified test accuracy of our proposed method
+(ADMM) and the scalable linear-based bounds on LP relaxations (Linear) (Wong et al., 2018;
+Xu et al., 2020) in the image classification tasks of MNIST and CIFAR10.
+
+**MNIST: For both the fully-connected network MNIST-A and the convolutional network**
+MNIST-B, we apply LP-ADMM with ϵabs = 10[−][3], ϵrel = 10[−][3] as the stopping criterion, and
+residual balancing with the initial ρ = 1.0. For each classifier network, we go through the
+10000 examples in the MNIST test data set and a range of ℓ perturbation radii ϵ to count
+_∞_
+the number of certified examples. To make the counting more efficient, we (i) search over
+_ϵ in a descending order since examples that are robust for a larger ϵ are also robust for a_
+smaller ϵ, and (ii) only apply ADMM on examples that cannot be verified by Linear (Wong
+et al., 2018; Xu et al., 2020) since Linear (Wong et al., 2018; Xu et al., 2020) gives a more
+relaxed bound than the LP-relaxation. For each batch of test examples, ADMM solves ten
+optimization problems of the form (5) with the linear objective function given with respect
+to each prediction class.
+
+For a range of ϵ ∈{0.01, 0.02, · · ·, 0.10}, the numbers of verified examples of ADMM and
+Linear (Wong et al., 2018; Xu et al., 2020) and their differences are shown in Figure 6 for
+MNIST-A and MNIST-B, respectively. Exact certified accuracy is reported in Table 4 for a
+range of ϵ.
+
+**CIFAR10: On the CIFAR10 data set, we compare ADMM and Linear (Wong et al., 2018;**
+Xu et al., 2020) following the same process as on the MNIST data set. The stopping
+criterion for LP-ADMM is set as ϵabs = 10[−][4], ϵrel = 10[−][4] and the range of ϵ is set as
+_{0.5/255, 1.0/255, · · ·, 4.0/255}. The numbers of certified examples of ADMM and Lin-_
+ear (Wong et al., 2018; Xu et al., 2020) and their differences are shown in Figure 7.
+
+**Further details for baselines in Table 1** In Table 1, we report the certified accuracy of
+solving the LP exactly with ADMM in comparison to a range of baselines. We compare with
+methods that have previously demonstrated the ability to bound networks of this size: fast
+
+
+-----
+
+CIFAR10
+
+7000 LP-ADMM
+
+LP-Dual
+
+6000
+
+5000
+
+4000
+
+3000
+
+certified number2000
+
+1000
+
+0
+
+0.002 0.004 0.006 0.008 0.010 0.012 0.014 0.016
+ε
+
+
+CIFAR10
+
+800
+
+600
+
+400
+
+difference
+
+200
+
+0
+
+0.002 0.004 0.006 0.008 0.010 0.012 0.014 0.016
+ε
+
+
+Figure 7: The number of certified examples (left) of ADMM and the linear-based
+bounds (Wong et al., 2018; Xu et al., 2020) for the CIFAR10 network and their differences (right) for each ϵ ∈{0.5/255, 1.0/255, · · ·, 4.0/255}.
+
+Table 4: Certified accuracy of PGD-trained models on MNIST when using a computationally
+cheap bound (linear-based bounds (Wong et al., 2018; Xu et al., 2020)) vs. our method
+(ADMM)
+
+Certified test accuracy (%)
+
+
+**Model** **Epsilon** **Linear** **ADMM** **Diff**
+
+MNIST-A 0.02 67.8 77.1 **9.3**
+0.03 7.8 14.2 **6.5**
+
+MNIST-B 0.07 88.8 91.5 **2.7**
+0.08 74.5 82.2 **7.7**
+0.09 43.0 58.9 **15.9**
+0.10 2.6 8.8 **6.2**
+
+bounds of the LP (Linear) (Wong et al., 2018; Xu et al., 2020), and interval bounds (IBP)
+(Gowal et al., 2018). We additionally compare to a suite of Lagrangian-based baselines, whose
+effectiveness at this scale was previously unknown. These methods include supergradient
+ascent (Adam) (Bunel et al., 2020b), dual supergradient ascent (Dual Adam) (Dvijotham
+et al., 2018) and a variant thereof (Dual Decomp Adam) (Bunel et al., 2020b), and a
+proximal method (Prox) (Bunel et al., 2020a). Lagrangian-based baselines were given the
+same computational budget as the ADMM solver, with further details in Appendix G.
+
+
+F.4 Reinforcement learning
+
+We compare the tightness of ADMM and Linear (Wong et al., 2018; Xu et al., 2020) by
+verifying the robustness of DQNs on three Atari game benchmarks: BankHeist, Roadrunner,
+and Pong [3]. The DQNs applied in these experiments are introduced in Appendix F.1.
+
+For each benchmark, we collect 10, 000 frames (each with dimension 1 × 84 × 84) across 100
+episodes using the natural policy with 100 frames sampled randomly from each episode as
+the test data set. Note that the input images to the DQNs are already pre-processed such
+that the pixel values are normalized to [0, 1] with a single channel.
+
+In each game, for each frame in the sampled data set, we verify if the DQN does not change
+its actions when an ℓ perturbation of various radii is added to the frame which is the state
+_∞_
+observation of the agent. The number of actions in BankHeist, Roadrunner and Pong are
+6, 6, 4, respectively. Essentially, we reduce the verification of the DQN with finite discrete
+action space to the same setting as verifying classifiers. Therefore, we apply the same
+verification process as descried in Appendix F.3 with ϵ ∈{0.1/255, 0.2/255, · · ·, 1.0/255} on
+
+3(Zhang et al., 2020) consider one additional RL setting (Freeway). However, the released
+PGD-trained DQN is completely unverifiable for nearly all epsilons that we considered.
+
+
+-----
+
+BankHeist
+
+LP-ADMM
+LP-Dual
+
+8000
+
+6000
+
+4000
+
+certified number
+
+2000
+
+0
+
+0.0005 0.0010 0.0015 0.0020 0.0025 0.0030 0.0035 0.0040
+ε
+
+
+BankHeist
+
+1200
+
+1000
+
+800
+
+600
+
+difference
+
+400
+
+200
+
+0
+
+0.0005 0.0010 0.0015 0.0020 0.0025 0.0030 0.0035 0.0040
+ε
+
+
+Roadrunner
+
+LP-ADMM
+
+8000 LP-Dual
+
+6000
+
+4000
+
+certified number
+
+2000
+
+0
+
+0.0005 0.0010 0.0015 0.0020 0.0025 0.0030 0.0035 0.0040
+ε
+
+
+Roadrunner
+
+400
+
+350
+
+300
+
+250
+
+200
+
+difference150
+
+100
+
+50
+
+0
+
+0.0005 0.0010 0.0015 0.0020 0.0025 0.0030 0.0035 0.0040
+ε
+
+
+Pong
+
+10000 LP-ADMM
+
+LP-Dual
+
+8000
+
+6000
+
+4000
+
+certified number
+
+2000
+
+0
+
+0.0005 0.0010 0.0015 0.0020 0.0025 0.0030 0.0035 0.0040
+ε
+
+
+Pong
+
+1200
+
+1000
+
+800
+
+600
+
+difference
+
+400
+
+200
+
+0
+
+0.0005 0.0010 0.0015 0.0020 0.0025 0.0030 0.0035 0.0040
+ε
+
+
+Figure 8: The numbers of certified examples (left column) of ADMM and the linear-based
+bounds (Wong et al., 2018; Xu et al., 2020) and their differences (right column) in the
+verification of DQNs from the BankHeist (first row), Roadrunner (second row) and Pong
+(third row) benchmarks. The range of ϵ is given by {0.1/255, 0.2/255, · · ·, 1.0/255}.
+
+all three tasks. The numbers of certified examples of ADMM and Linear (Wong et al., 2018;
+Xu et al., 2020) and their differences on each task are plotted in Figure 8.
+
+
+Additional details on comparison to Lagrangian-based
+methods
+
+
+In Section 4.1, we compared the certified test accuracy of ADMM with a suite of Lagrangianbased methods (Bunel et al., 2020a) on CIFAR10. These Lagrangian-based baselines were
+implemented using the codes at
+```
+      https://github.com/oval-group/decomposition-plnn-bounds
+
+```
+
+under the MIT license. As mentioned in Section 3.2, these baselines require solving an
+inner optimization problem through iterative algorithms. In the experiments of Table 1, the
+number of iterations of different iterative algorithms are bounded separately such that each
+Lagrangian-based method listed in Section 4.1 has runtime of 9 seconds to finish verifying
+one example.
+
+
+-----
+
+Our ADMM solver averages 9 seconds runtime per example in this verification task, which
+is the same as the average runtime of the Lagrangian-based methods, with the stopping
+criterion of ϵabs = 10[−][4], ϵrel = 10[−][3] and ρ = 1.0.
+
+**Architecture size.** We note that the architecture we verify in this paper is 10x larger
+than considered by (Bunel et al., 2020b). However, the released framework could not handle
+this model size due to their implementation of intermediate bounds. In order to handle this
+model size, we externally calculated the intermediate bounds (using (Wong et al., 2018))
+and loaded these into the framework for the Lagrangian-based baselines.
+
+H Speed comparison
+
+**Comparison with LP solver: To demonstrate the effectiveness of GPU-acceleration in**
+the DeepSplit algorithm, we compare the runtime of DeepSplit and Gurobi in solving LP
+relaxations that bound the output range of MNIST-A network (the fully connected network
+defined in Appendix F.1) with ℓ perturbations in the input. Specifically, for a given example
+_∞_
+in the MNIST test data set, we apply DeepSplit/Gurobi layer-by-layer to find the tightest
+pre-activation bounds under the LP-relaxation.
+
+Recall that the MNIST-A network is a fully-connected netowrk with architecture 784 _−_ 600 _−_
+400 − 200 − 100 − 10. With the Gurobi solver, we need to solve 2 × 600 LPs sequentially to
+obtain the lower and upper bounds for the first activation layer, 2 × 400 LPs for the second
+activation layer, and so forth. With DeepSplit, the pre-activation bounds can be computed
+in batch and allows GPU-acceleration.
+
+In our experiment, we fix the radius of the ℓ perturbation at the input image as ϵ = 0.02.
+_∞_
+For the Gurobi solver, we randomly choose 10 samples from the test data set and compute
+the pre-activation bounds layer-by-layer. The LP relaxation is formulated in CVXPY and
+solved by Gurobi v9.1 on an Intel Core i7-6700K CPU, which has 4 cores and 8 threads.
+For each example, the total solver time of Gurobi is recorded with the average solver time
+being 275.9 seconds. For the DeepSplit method, we compute the pre-activation bounds
+layer-by-layer on 19 randomly chosen examples. The algorithm applies residual balancing
+with the initial ρ = 1.0 and the stopping criterion is given by ϵabs = 10[−][4], ϵrel = 10[−][3]. The
+total running time of DeepSplit is 717.9 seconds, with 37.8 seconds per example on average.
+With the GPU-acceleration, out method achieves 7x speedup in verifying NN properties
+compared with the commercial-grade Gurobi solver.
+
+**Comparison with SDP solver: Our method is significantly faster than solving the convex**
+relaxation through other approaches. For example, it took our method approximately 20
+hours to verify all MNIST test set images for the convolutional architecture at 10 different
+epsilon values (See Table 3), taking on average 2 hours per epsilon to verify all 10,000
+examples. See F.2 for the running time summary of each experiment. In contrast, the
+SDP relaxation (Raghunathan et al., 2018) takes 3 hours to verify 500 examples at one
+epsilon value for a similarly sized CNN. This highlights the difference in speed and scalability
+of solving the LP relaxation over the SDP one, albeit at the cost of looser verification
+guarantees.
+
+**Comparison with branch-and-bound solver: Branch-and-bound methods have expo-**
+nential runtime as opposed to the polynomial runtime of LP-solvers. In practice, this leads to
+significantly longer solve times that has largely limited these methods to the small network
+regime. For example, the fastest branch-and-bound method from Bunel et al. (2020a) takes
+on average 6 minutes per example to verify a small convolutional network, whereas our solver
+takes on average 9 seconds per example (40x faster) to verify an order-of-magnitude larger
+network.
+
+
+-----
+
+Figure 9: ResNet18 output lower (left) and upper (right) bounds obtained using either
+ADMM (blue dots) and LiRPA (orange triangles) from the first 100 CIFAR10 test examples.
+Higher lower bounds and lower upper bounds are better. For ease of visualization, bounds
+are sorted in ascending order according to the ADMM bound.
+
+Table 5: Comparison of computed bounds using LiRPA (Xu et al., 2020)) vs. our method
+(ADMM) on a ResNet18 for CIFAR10.
+
+**Linear** **ADMM** Diff
+
+Upper bounds 39.87 ± 66.42 38.02 ± 62.21 2.32% ± 2.35%
+
+Lower bounds 0.04 ± 17.02 4.76 ± 7.56 31.61% ± 43.38%
+
+I Scalability
+
+To highlight the scalability of our approach, we consider a ResNet18 network trained on
+CIFAR10 whose max pooling layer is replaced by a down-sampling convolutional layer for
+comparison with LiRPA (Xu et al., 2020) [4] (codes available at
+```
+          https://github.com/KaidiXu/auto_LiRPA
+
+```
+under the BSD 3-Clause "New" or "Revised" license), which is capable of computing provable
+linear bounds for the outputs of general neural networks and is the only method available
+so far that can handle ResNet18. The ResNet18 is adversarially trained using the fast
+adversarial training code from (Wong et al., 2020).
+
+In our experiments, for the first 100 test examples in CIFAR10, we use LiRPA to compute the
+preactivation bounds for each ReLU layer in ResNet18 and then apply ADMM to compute
+the lower and upper bounds of ResNet18 outputs (there are 10 outputs corresponding to the
+10 classes of the dataset). The ADMM is run with stopping criterion ϵabs = 10[−][5], ϵrel = 10[−][4]
+and augmentation parameter ρ = 1.0. With ϵ = 1/255, the lower/upper bounds of ADMM
+from these 100 examples are arranged in an ascending order in Figure 9 and are compared
+with those obtained by LiRPA. We observe that the bounds from ADMM are consistently
+tighter than those from LiRPA. The average running time of ADMM across the 100 examples
+is 2312 seconds. Overall bound statistics are shown in Table 5.
+
+4The max pooling layer has not been considered in the implementation of LiRPA by the submission
+of this paper.
+
+
+-----
+

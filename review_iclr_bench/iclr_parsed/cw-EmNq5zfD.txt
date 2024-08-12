@@ -1,0 +1,1705 @@
+# GROUP-BASED INTERLEAVED PIPELINE PARALLELISM
+## FOR LARGE-SCALE DNN TRAINING
+
+**Pengcheng Yang, Xiaoming Zhang, Wenpeng Zhang, Ming Yang, Hong Wei**
+Ant Group, China
+yangpc615@gmail.com, xiaominglan.zhang@antgroup.com
+zhangwenpeng0@gmail.com, vincent.ym@antgroup.com
+weihong9646@hotmail.com
+
+ABSTRACT
+
+The recent trend of using large-scale deep neural networks (DNN) to boost performance has propelled the development of the parallel pipelining technique for
+efficient DNN training, which has resulted in the development of several prominent
+pipelines such as GPipe, PipeDream, and PipeDream-2BW. However, the current
+leading pipeline PipeDream-2BW still suffers from two major drawbacks, i.e., the
+excessive memory redundancy and the delayed weight updates across all stages.
+In this work, we propose a novel pipeline named WPipe, which achieves better
+memory efficiency and fresher weight updates. WPipe uses a novel pipelining
+scheme that divides model partitions into two groups. It moves the forward pass of
+the next period of weight updates to the front of the backward pass of the current
+period of weight updates in the first group, retains the order in the second group,
+and updates each group alternatively. This scheme can eliminate half of the delayed
+gradients and memory redundancy compared to PipeDream-2BW. The experiments,
+which train large BERT language models, show that compared to PipeDream-2BW,
+WPipe achieves 1.4× acceleration and reduces the memory footprint by 36%,
+without nearly sacrificing any final model accuracy.
+
+1 INTRODUCTION
+
+Several recent lines of research (Liu et al., 2019; Yang et al., 2019; Lan et al., 2019; Raffel et al., 2019;
+Brown et al., 2020; Lin et al., 2021) on various application domains have collectively demonstrated
+that larger DNN models can yield better performance. This creates an emerging trend in scaling up
+the number of model parameters, resulting in very large DNNs, the memory footprint of which will
+be beyond the limit of a single accelerator.
+
+To resolve the aforementioned problem, researchers and practitioners have focused on model parallelism, which allows to further scale up model parameters significantly by partitioning a large model
+over multiple accelerators/workers. However, the conventional model parallelism, which includes
+inter-layer model parallelism (Narayanan et al., 2021) and intra-layer model parallelism (Shoeybi
+et al., 2019), either suffers from low resource utilization or high communication overhead. Recently,
+some studies proposed the pipeline-parallel technique to accelerate conventional model-parallel
+training. The pipelining technique can effectively improve the utilization of computing resources by
+scheduling different workers to consume different mini-batches in parallel. However, naive pipelining
+cannot be directly used for DNN training due to two problems: (1) staleness of weight updates
+(Harlap et al., 2018), which is caused by the inconsistency of the weight versions used in a forward
+pass and its corresponding backward pass, and (2) excessive in-flight activations, which are heaped
+up by continuous forward activations waiting for their corresponding backward passes in pipelining.
+
+To address the staleness problem, some workable pipelines have been proposed with different
+emphases on low memory footprint and high throughput. GPipe proposes the periodic pipeline
+flushing technique, which maintains only one weight version. This technique can achieve a low
+memory footprint and almost the same weight update semantics as data parallelism, but at the cost of
+introducing bubble overhead (Huang et al., 2019), thus limiting throughput. PipeDream proposes the
+weights stashing (Harlap et al., 2018) technique to eliminate bubble overhead, resulting in higher
+
+
+-----
+
+throughput; however, the multiple weight versions incur a high memory footprint. To further reduce
+the weight versions maintained in PipeDream, PipeDream-2BW was proposed in which the doublebuffered weight update technique (Narayanan et al., 2021) is used, which largely reduces the number
+of weight versions and enables similar weight update semantics as that in data parallelism.
+
+To reduce in-flight activations, GPipe and PipeDream-2BW adopt activation recomputation (Chen
+et al., 2016; Jain et al., 2019). Recomputation enables the forward pass to execute without retaining
+the internal activations, which are recomputed in the corresponding backward pass. This method
+of being recomputed when needed can effectively alleviate the stacking up of in-flight activations
+and greatly reduce the memory footprint. Although both GPipe and PipeDream-2BW utilize the
+recomputation technique, PipeDream-2BW has fewer in-flight activations than GPipe owing to the
+more timely execution of the backward pass in its pipeline. Regarding Pipedream, unfortunately, it
+doesn’t take effective measures on this issue, which prevents it from training a larger model.
+
+Currently, PipeDream-2BW is the pipeline-parallel system with the best overall performance. However,
+it still suffers from two main problems: delayed weight updates and excessive memory redundancy on
+weight versions and activations (Narayanan et al., 2021). In this paper, we propose a novel pipeline,
+named WPipe, to solve these two problems. In WPipe, model partitions are divided into two groups,
+namely G0 and G1, which share the same workers. In the execution pipeline, the forward pass of
+the next update period is moved to the front of the backward pass of the current update period in
+_G0, and the execution order in G1 is retained, and then, G0 and G1 are updated alternatively. We_
+named the alternate update technique for the grouping weights as double-grouped weight updates
+(2GW). Compared to 2BW, 2GW has two main improvements: (1) 2GW realizes the same weight update
+semantics as that in data parallelism and only maintains one weight version without introducing
+bubble overhead in G1. (2) 2GW reduces half of the in-flight activations since only half of the weights
+are involved in the training at a time.
+
+Additionally, we incorporate some conventional but effective communication optimization techniques
+including the overlap of computation and communication, hybrid parallelism, and heterogeneous
+communication to further reduce communication overhead. Finally, our throughput experiments
+show that WPipe achieves acceleration of 7.1× compared to that of PipeDream and 2.1× compared
+to that of GPipe for Bert192 with 1.4 billion parameters. When training models with up to 5.5
+billion parameters, which cannot be trained by GPipe and PipeDream, WPipe is 1.4× faster than
+PipeDream-2BW. Memory experiments show that compared to PipeDream-2BW, WPipe reduces the
+memory footprint by 35.8% for Bert96. Convergence experiments show that WPipe can achieve
+similar final accuracy to data parallelism.
+
+2 BACKGROUND
+
+In this section, we briefly introduce the related techniques of model parallelism.
+
+**Model parallelism. Model parallelism (Chen et al., 2018; Chilimbi et al., 2014; Dean et al., 2012;**
+Jia et al., 2018) partitions a large model into multiple parts and assigns them to different workers.
+Each worker is responsible for their own weight updates and sending and receiving intermediate
+activations and gradients. The conventional model parallelism includes inter-layer model parallelism
+and intra-layer model parallelism (Shoeybi et al., 2019). The former suffers from underutilized
+resources as only one worker is active at a time, as shown in Figure 1a. The latter requires all-to-all
+aggregation with intermediate activations/gradients for each layer. The all-to-all communication
+overhead, which grows in proportion to the number of layers, makes it difficult to expand to deeper
+layers, especially in heterogeneous network interconnections.
+
+|1|Col2|Col3|1|
+|---|---|---|---|
+||1|1||
+
+
+|1|Col2|2|1|3|2|4|3|
+|---|---|---|---|---|---|---|---|
+||1|1|2|2|3|3|4|
+
+
+Forward Pass Backward Pass Idle
+
+Worker0 1 1 Worker0 1 2 1 3 2 4 3
+
+Worker1 1 1 Worker1 1 1 2 2 3 3 4
+
+Time Time
+
+(a) (b)
+
+
+Figure 1: The execution timelines of inter-layer model parallelism and naive pipeline parallelism.
+
+
+-----
+
+**Pipeline Parallelism. Pipeline parallelism can effectively improve the utilization of computing**
+resources of inter-layer model parallelism by scheduling different workers to consume different
+mini-batches simultaneously. However, naive pipeline parallelism suffers from a staleness issue for
+weight updates. As shown in Figure 1b, when the backward pass of the latter mini-batch is executed,
+its corresponding weights could be updated by the prior mini-batch. For example, for mini-batch 2,
+the weights used in the backward pass were updated by mini-batch 1.
+
+Existing solutions tackle the issue by trading off throughput and memory footprint. GPipe proposes
+the periodic pipeline flushing technique (Huang et al., 2019). As shown in Figure 2a, it splits a minibatch into multiple smaller micro-batches, which are injected into the model continuously to achieve
+pipelining. Within each pipeline period, GPipe can accumulate gradients across micro-batches and
+flush synchronously. In this way, it achieves the same weight update semantics as data parallelism
+and only maintains one weight version. However, in GPipe, bubble overhead (Huang et al., 2019)
+limits throughput, especially when a large mini-batch cannot be supported. PipeDream-flush is
+essentially the same as GPipe (Narayanan et al., 2021), and its main improvement is to move forward
+the backward pass, thereby releasing in-flight activations as soon as possible and reducing memory
+footprint.
+
+
+Forward Pass Backward Pass Update Idle
+
+|1|2|Col3|Col4|2|1|Update|
+|---|---|---|---|---|---|---|
+||1|2|2|1||Update|
+
+
+|1|Col2|2|1|3|2|4|3|5|4|𝑊!! 𝑊!" 𝑊"!|𝑊!"|
+|---|---|---|---|---|---|---|---|---|---|---|---|
+||1|1|2|2|3|3|4|4|5|||
+
+
+1 2 2 1 Update
+
+1 2 2 1 Update
+
+
+Time
+
+(a) (c)
+
+
+Worker0
+
+Worker1
+
+Time
+
+Worker0
+
+Worker1
+
+|me|Col2|Col3|(a)|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+|1||2|1||2|Update|
+||1|1|2|2||Update|
+
+
+
+Time
+
+
+𝑊!!
+
+
+𝑊!"
+
+
+𝑊"!
+
+
+|me|Col2|Col3|Col4|Col5|(c)|Col7|Col8|Col9|Col10|Weight stashing|
+|---|---|---|---|---|---|---|---|---|---|---|
+|1||2|1|3|2|4|3|5|4|𝑊!! 𝑊!" 𝑊"! 𝑊""|
+||1|1|2|2|3|3|4|4|5||
+
+
+𝑊!!
+
+
+𝑊!"
+
+
+𝑊"!
+
+
+𝑊""
+
+
+Time 2BW
+
+(d)
+
+
+(b)
+
+
+Figure 2: Timelines of various pipeline-parallel executions: (a) GPipe updates the weights in a
+mini-batch. (b) PipeDream-flush moves backward pass forward compared to GPipe. (c) PipeDream
+implements weight stashing to update the weight immediately by default. (d) PipeDream-2BW
+realizes periodic updates through gradient accumulation. For example, when the update period is 2,
+micro-batches 2 and 4 update weights in the figure.
+
+PipeDream uses the weight stashing technique to tackle the staleness issue without introducing
+the bubble overhead, and thus achieves higher throughput (Harlap et al., 2018). However, it must
+maintain a large number of weight versions. From Figure 2b worker i(i = 0, 1, ...) comprises N − _i_
+weight versions, where N is the number of model partitions. This results in a high memory footprint,
+especially when N is large. Moreover, in PipeDream, the weight update semantics has different delay
+terms at different stages.
+
+PipeDream-2BW (Narayanan et al., 2021), as an upgraded version of PipeDream, has higher throughput and more memory efficiency. As shown in Figure 2c, it uses double-buffered weight updates
+(2BW), which is combined with gradient accumulation, to reduce effectively the number of weight
+versions maintained on each worker from N − _i to 2. Notably, in 2BW, its weight update semantics_
+has only one weight delay term at each stage (Narayanan et al., 2021).
+
+3 SYSTEM DESIGN OF WPIPE
+
+In this section, we first analyze the problems of 2BW. Then, we propose double-grouped weight
+updates (2GW) and analyze 2GW from three aspects: model partitions grouping, effective learning,
+and memory footprint. Finally, we introduce several communication optimization techniques.
+
+3.1 INTRODUCTION
+
+To simplify the description, we denote the naive model-parallel timeline as V2 (where “2” represents
+the number of model partitions), as shown in Figure 1a. Then we denote the process of cross-splicing
+_V2s to form a pipeline as P_ (nV2) (where n represents the number of V2), as shown in Figure 1b.
+Analyzing the execution regular of the pipeline in Figure 1b, we can find that P (nV2) can ensure that
+
+
+-----
+
+|1|Col2|2|1|Col5|2|3|Col8|4|3|Col11|4|5|Col14|6|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||1|1|2|2|||3|3|4|4|||5|5|
+
+
+Forward Pass Backward Pass Idle
+
+
+Introduced Idle
+
+
+Figure 3: Separate two adjacent update periods in PipeDream-2BW by introducing idle time blocks.
+
+the backward pass is executed immediately after the forward pass is completed so that the forward
+activations can be released in time to alleviate the stacking up of the activations. However, the P (nV2)
+cannot be used directly due to the inconsistency issue discussed above. To address the issue, 2BW
+uses two weight versions and combines gradient accumulation. Why does 2BW work effectively?
+The point is that 2BW effectively handles the intersection of adjacent update periods. As shown in
+Figure 2c, the forward pass for micro-batch 3 is executed before the backward pass for micro-batch
+2, but its backward pass is executed after the backward pass for micro-batch 2. At this time, it is
+necessary to continue to use the old weight version in the period of micro-batches 3 and 4, and the
+new weight version (updated by micro-batch 2) will be used in the next period (micro-batches 5
+and 6). Thus, if we want to further reduce the number of weight versions, we need to eliminate the
+intersections of micro-batches 2 and 3, 4 and 5, etc. To achieve this, we temporarily introduce idle
+time blocks, as shown in Figure 3 (its pipeline is the same as PipeDream-flush).
+
+If these idle time blocks cannot be eliminated, can we fill them? Through the statistical analysis, we
+found that for a pipeline of PipeDream-2BW with n model partitions, at least the idle time blocks
+shaped like P (xVn), x >= (n 1) are required to eliminate the intersections. In addition, a pipeline
+_−_
+accumulation period has at least execution time blocks shaped like P (xVn), x >= n. Obviously,
+when x >= n, they have the same shape. Thus, can we fill these idle time blocks with the pipelining
+of another part of the weights of the same model?
+
+3.2 DOUBLE-GROUPED WEIGHT UPDATES (2GW)
+
+In this subsection, we introduce the 2GW technique from two points: model partitions grouping and
+weight update semantics.
+
+|1 G,F 1 0|1 G, F&B 1 1 1 1|1 1 G,B 0|
+|---|---|---|
+
+
+|1 G 1,F 1&B 1 1 1 1|2 G 0,F 2&B 1 1 2 1|
+|---|---|
+
+
+𝐺! Forward Pass 𝐺! Backward Pass 𝐺" Forward Pass 𝐺" Backward Pass Idle
+
+1 1 G1, F&B 1 1 1 1 G1,F1&B1 1 2 G0,F2&B1 1
+
+G0,F 1 1 1 1 G0,B 1 1 1 2 1
+
+(a) (b)
+
+1 2 1 2 1 3 2 4 1 3 2 4 3 5 4
+
+1 2 1 1 2 2 3 1 4 2 3 3 4 4 5
+
+(c)
+
+
+Figure 4: Derivation of WPipe pipeline: (a) Further partitioning and grouping, (b) moving the G0
+forward pass of the next step to the front of the backward pass of G0 of the current, (c) expansion of
+the pipelining for (b).
+
+**Model Partitions Grouping. As shown in Figure 4a, based on Figure 1a, we further split each**
+model partition into two and obtain twice the number of model partitions. Then, we divide them
+into two groups, G0 and G1, and train them on the same devices. For G1, it is a typical V2 structure,
+which can realize continuous pipeline expansion through P . But for G0, since its forward pass and
+backward pass are separated, a continuous pipeline cannot be directly achieved by cross-splicing
+(P ). Therefore, we first need to convert it into a V2 structure. By analyzing the execution rules of the
+pipeline after grouping, we found that moving the forward pass of G0 of the next step to the front
+of the backward pass of G0 of the current step can form a V2, as shown in Figure 4b. After doing
+this, we can cross-splice G0 and G1 respectively to obtain P (G0) and P (G1), and then continue to
+cross-splice their results to obtain P (P (G0), P (G1)). For G1, its micro-batches 2 and 3 can be well
+
+
+-----
+
+Table 1: Details of the memory footprint of pipeline systems of GPipe, PipeDream, PipeDream-2BW,
+and WPipe, where we ignore the intermediate activations for recomputation.
+
+BUBBLE THE SIZE OF ACTIVATIONS ACTIVATIONS
+PIPELINE
+RATIO ALL BUFFERS (NON-RECOMPUTATION) (RECOMPUTATION)
+
+PGPIPEIPEDREAM _MN+0−N1−1_ _N2+10Sm_ 2M _−MS2N_ +1a _Sa_ NSONEa
+
+PIPEDREAM-2BW 0 2Sm 2M _−2N_ +1 _Sa_ _Sa_
+
+WPIPE 0 **_Sm_** 4M _−4N_ +1 _Sa_ **0.5Sa**
+
+
+separated by the pipelining of G0 (P (G0)), as shown in Figure 4c. This also answers the question
+mentioned in section 3.1. The pipelining of G0 can fill in the idle time blocks in Figure 3.
+
+|1|2|3|4|1|Col6|2|Col8|3|Col10|4|1|5|2|6|3|7|4|8|1|5|2|6|3|7|4|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||1|2|3|4|1||2||3|1|4|2|5|3|6|4|7|1|8|2|5|3|6|4|7|
+|||1|2|3|4|1||2|1|3|2|4|3|5|4|6|1|7|2|8|3|5|4|6|5|
+||||1|2|3|4|1|1|2|2|3|3|4|4|5|1|6|2|7|3|8|4|5|5|6|
+
+|𝑊!!|𝑊!"|
+|---|---|
+|𝑊"!|𝑊""|
+|𝑊#!|𝑊#"|
+|𝑊$!|𝑊$"|
+
+
+𝑊!!
+
+
+𝑊!"
+
+
+𝑊"!
+
+
+𝑊""
+
+
+𝑊#!
+
+
+𝑊#"
+
+
+𝑊$!
+
+
+𝑊$"
+
+
+Time
+
+
+𝐺!
+
+
+𝐺! Forward Pass 𝐺! Backward Pass 𝐺" Forward Pass 𝐺" Backward Pass Idle
+
+
+Figure 5: Timeline of execution of 2GW, where only G0 needs double weight versions.
+
+**Weight Update Semantics. As shown in Figure 4c, G1 only maintains one weight version and has**
+the same weight update semantics as data parallelism. For G0, due to the movement operation, the
+intersections naturally exist, such as micro-batches 3, 4, and 2 in Figure 4c. Nevertheless, G0 only
+needs to maintain two weight versions and has only one delay term in the weight update semantics,
+which is the same as 2BW. If using SGD optimizer, the weight update semantics of 2GW are as
+follows:
+_wG[t][+1]i_ [=][ w]G[t] _i_ _[−]_ _[ν][ ·][ ▽][f]_ [(][w]G[(][t]i[−]1[1+][i][)], wG[(][t]i[−]2[1+][i][)], ..., wG[(][t]i[−]n[1+][i][)]), i ∈{0, 1}. (1)
+
+Other optimizers can be similarly analyzed. Figure 5 shows a more detailed pipeline-parallel timeline
+of 2GW. In each pipeline stage, the model partitions of G0 and G1 are executed alternately without
+introducing bubbles after the system is warmed up.
+
+3.3 MEMORY FOOTPRINT ANALYSIS
+
+The memory footprint of most pipelines is mainly divided into four parts, i.e., naive model weights,
+weight buffers (saving history weight versions), in-flight activations, and optimizers. Since the
+naive model weights and optimizers are roughly the same for each pipeline method, we mainly
+analyze weight buffers and in-flight activations. In WPipe, G1 has no weight buffer, and the size of
+_G0’s weight buffer is 2. We use Sp to represent the size of the entire model parameters, MG0 and_
+_MG1 represent the sizes of G0 and G1, respectively. Supposing that the model is evenly divided_
+(MG1 = MG0), the size of weight buffer of WPipe is M = 2MG1 = MG0 + MG1 = Sp. For
+in-flight activations, we use Sa to indicate the activations of the entire model for a micro-batch. From
+Figure 5, we statistically conclude that the in-flight activation amount of stagei is equal to M 2N
+_∗_ _[S][a]_
+
+for G0 and (M − _i) ∗_ 2[S]N[a] [for][ G][1][, and of all stages is equal to:]
+
+
+_i=N_ _−1_
+
+(2M _i)_
+_−_ _∗_ 2[S]N[a] [= 4][M][ −]4[N][ + 1]
+_i=0_
+
+X
+
+
+_Sa,_ (2)
+_∗_
+
+
+where the N and M indicate the number of pipeline stages and micro-batches, respectively, and
+_M >= N_ . The same statistical method is used for GPipe, PipeDream, and PipeDream-2BW to obtain
+the size of all weight buffers and in-flight activations, respectively, as shown in Table 1.
+
+**With Activation Recomputation. From Table 1, the in-flight activations increase linearly with the**
+number of pipeline stages, which will become a memory bottleneck when training a large model. Thus,
+a pipeline system must take measures to reduce in-flight activations. The activation recomputation is
+
+
+-----
+
+an effective method widely accepted, especially for 2GW. It can eliminate the stacking up of historical
+in-flight activations, leaving only the activations in an active state in the system, as shown in Table 1.
+From the table, we can summarize the following points: (a) compared to PipeDream-2BW, the weight
+buffer size of WPipe is reduced by half, and the superiority is more obvious compared to PipeDream.
+Although GPipe has no weight buffer, it has to introduce _MN+−N1_ 1 [bubble overhead; (b) recomputation]
+
+_−_
+can significantly reduce in-flight activations for GPipe, PipeDream-2BW, and especially WPipe.
+
+3.4 COMMUNICATION OPTIMIZATION
+
+We use Ca to represent the cost of intermediate activations/gradients in one communication, and then
+1)the model-parallel communication overheads of different pipeline systems arenumber of stages. They show that with the same number of stages, the communication overhead ofCa, C2BW = 2(Ns − 1)Ca, and CGPipe = 2(Ns − 1)Ca, respectively, where C NWPipes indicates the = 2(2Ns −
+WPipe is twice that of GPipe and PipeDream-2BW. Nevertheless, in most cases, Ca is small and can
+be ignored, especially when training some language models, such as Transformer (Vaswani et al.,
+2017). When Ca is large, We have the following countermeasures:
+
+**Combination with Data Parallelism.** Normally, too large Ca is caused by too large a
+micro-batch. we can proportionally reduce the stage0 G00 G10 G00 G10 G00 G10 G00 G10
+depth of the pipeline while reducing the size of
+
+G00 G10
+
+G00 G10
+
+G00 G10
+
+G00 G10
+
+the micro-batch, and then we proportionally in- stage1 G01 G11 G01 G11 G01 G11 G01 G11
+
+G01 G11
+
+G01 G11
+
+G01 G11
+
+G01 G11
+
+crease the width of data parallelism to maintainthe same global batch size, as shown in Fig- stage2stage3 G02 G12 G02 G12 G02 G12 G02 G12
+
+G02 G12
+
+G02 G12
+
+G02 G12
+
+G02 G12
+
+ure 6. As a result, the size of the micro-batch be
+G03 G13
+
+G03 G13
+
+G03 G13
+
+G03 G13
+
+comes smaller, and the Ca also decreases, while
+
+|Col1|G00|G10|Col4|G00|G10|Col7|G00|G10|Col10|G00|G10|Col13|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||G01|G11||G01|G11||G01|G11||G01|G11||
+||G02|G12||G02|G12||G02|G12||G02|G12||
+||G03|G13||G03|G13||G03|G13||G03|G13||
+||||||||||||||
+
+the number of accelerators and the global batch Model Parallelism Depth Data Parallelism Width
+size remain unchanged. Of course, we need
+to weigh the communication overhead between
+
+Figure 6: Layouts of model parallelism and data
+
+model parallelism (CWPipe) and data parallelism parallelism.
+(CDP) to choose the appropriate ratio of depth
+(d) and width (w). When CWPipe is greater than CDP, we reduce the value of d : w, d ∗ _w = NGP U_ .
+Otherwise, we increase the value of d : w.
+
+**Overlap of Computation and Communication & Heterogeneous Network Communication.**
+The former can almost offset the overhead of activation recomputation. The latter can effectively use
+heterogeneous networks to balance communication overhead. Please refer to the appendix for details.
+In addition, some communication compression techniques are also shown in the appendix.
+
+4 EXPERIMENTS
+
+WPipe is implemented with PyTorch-1.4 (Edward Z. Yang, 2021) and executes on two environments,
+i.e., a single machine with eight 16-GB V100 GPUs (Env-1) and a private cluster with 8 × 8V100
+GPUs (Env-2).
+
+4.1 QUALITY OF CONVERGENCE
+
+In this section, we compare the convergences of WPipe and PipeDream-2BW by comparing the
+accuracy when training the same model on the same dataset with the same hyperparameters.
+
+**Text Classification. We finetuned BERTBASE (Devlin et al., 2018) and BERTLARGE (Devlin et al.,**
+2018) for WPipe, PipeDream-2BW, and data parallelism on the QQP and MNLI tasks (Wang et al.,
+2018). We used respectively bert-base-uncase and bert-large-uncase pre-training
+weights from transformers-3.5.0 (Wolf et al., 2020). We used Adam optimizer, a learning
+rate of 8 × 10[−][5](ν = 8 × 10[−][5]) with 1000 steps warmup(ws = 1000) and a mini-batch size of
+256(b = 256) for BERTBASE and the same optimizer, ν = 4 × 10[−][5] with ws = 2000 and b = 128
+for BERTLARGE. From Table 2, WPipe, PipeDream-2BW, and data parallelism have similar final
+accuracy. For further analysis, we continue to perform image classification experiments.
+
+
+-----
+
+Table 2: The results of the convergence experiment of WPipe. We train the models three times with
+different seeds. Then, we calculated the means and standard deviations of the results. Where DP
+represents data parallelism and PD-2BW represents PipeDream-2BW.
+
+TASKS MODEL METRIC DP WPIPE PD-2BW
+
+ACC 87.66 0.06 **87.68** **0.06** 87.63 0.03
+BERTBASE _±_ _±_ _±_
+F1 **83.39** **0.02** 83.39 0.04 83.34 0.05
+QQP _±_ _±_ _±_
+
+ACC **87.63** **0.05** 87.59 0.07 87.38 0.02
+BERTLARGE _±_ _±_ _±_
+F1 **83.26± 0.08** 83.21± 0.11 82.96 ± 0.05
+
+ACC 82.81 0.01 **83.05** **0.19** 82.98 0.14
+BERTBASE _±_ _±_ _±_
+M-ACC **83.16** **0.03** 83.04 0.29 82.82 0.26
+MNLI _±_ _±_ _±_
+
+ACC 86.16 0.12 86.25 0.21 **86.29** **0.12**
+BERTLARGE _±_ _±_ _±_
+M-ACC 86.05±0.26 **86.15 ± 0.26** 86.08 ± 0.24
+
+OXFORD RESNEXT50 32X4D ACC **99.55** **0.14** 99.47 0.14 99.51 0.12
+_±_ _±_ _±_
+FLOWERS102 RESNEXT101 32X8D ACC **99.39 ± 0.21** 99.19± 0.19 99.19 ± 0.19
+
+RESNEXT50 32X4D ACC 97.15 0.10 **97.28** **0.20** 97.26 0.09
+CIFAR10 _±_ _±_ _±_
+RESNEXT101 32X8D ACC 98.15 ± 0.07 **98.18 ± 0.07** 98.15 ± 0.07
+
+RESNEXT50 32X4D ACC 85.67 0.12 85.62 0.09 **85.80** **0.21**
+CIFAR100 _±_ _±_ _±_
+RESNEXT101 32X8D ACC 87.90 ± 0.30 **88.00 ± 0.21** 87.93 ± 0.18
+
+
+**Image Classification. We finetuned, respectively, the ResNeXt50 (32x4d) (Xie et al., 2017) and**
+ResNeXt101 (32x8d) (Xie et al., 2017) for WPipe, PipeDream-2BW, and data parallelism on the
+three datasets of CIFAR-10 (Krizhevsky et al., 2009), CIFAR-100 (Krizhevsky et al., 2009), and
+Oxford 102 Flowers (Nilsback & Zisserman, 2008). We used the pre-training weights from the
+torchvision (Francisco Massa, 2021), SDG optimizer, ν = 1 × 10[−][2] with 0.05 warmup ratio
+and b = 256. From Table 2, there is still no obvious difference in their final accuracy. Thus, we
+continue to analyze the changes in loss of the three methods during training, while supplementing the
+training experiments from scratch.
+
+**Intermediate Metrics Analysis. As shown in Figures 7a-7c, although WPipe, PipeDream-2BW, and**
+data parallelism have similar final loss and accuracy, the curve of WPipe is closer to data parallelism.
+Among them, the loss of data parallelism drops the fastest, and its accuracy rises the fastest, and
+WPipe is second only to data parallelism, which benefits from the fact that the weight update delay of
+WPipe is reduced by half, compared to PipeDream-2BW. For more loss curves and accuracy curves,
+please refer to the appendix.
+
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+0.0
+
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+|Col1|Col2|Col3|Col4|Col5|PipeDre|eam-2BW|
+|---|---|---|---|---|---|---|
+||||||PipeDr WPipe|eam-2BW|
+||||||||
+||||||||
+
+|Col1|Col2|Col3|Col4|PipeDre|eam-2BW|
+|---|---|---|---|---|---|
+|||||PipeDr WPipe|eam-2BW|
+|||||||
+|||||||
+
+
+12 15
+
+
+12 15
+
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+
+Epochs
+
+
+Epochs
+
+
+0.9
+
+0.8
+
+0.7
+
+ACC0.6
+
+0.5
+
+0.4 WPipe
+
+0.3 PipeDream-2BW
+
+Data Parallelism
+
+0 5 10 15 20 25 30
+
+Epochs
+
+
+(a) QQP:BERTLARGE.
+
+
+(b) MNLI:BERTLARGE.
+
+
+(c) Cifar10:ResNeXt50.
+
+
+Figure 7: Part of the training loss from Table 2 and the accuracy when training ResNeXt50 from
+scratch with WPipe, PipeDream-2BW, and Data Parallelism (SGD with a fixed learning rate of 0.01).
+
+4.2 THROUGHPUT
+
+
+In this section, we measure the throughputs of WPipe through training the large-scale DNN models
+on Env-1 and Env-2 and compare them with other pipeline systems. The main factors that affect
+throughput are batch size (B), the ratio of model parallelism to data parallelism (d : w), and the
+possibility to recompute (Sa) as presented below:
+
+_T = max(Ts_ _Sa_ _Sd:w_ _SM ); B = b_ _M_ _w, M >= d; Sa =_ _True, False_ ;
+_∈_ _×_ _×_ _∗_ _∗_ _{_ _}_ (3)
+_Sd:w = {H(d : w)|d ∗_ _w = NGP U_ _}; SM = {d, d + 1, ...};_
+
+
+-----
+
+where T is the optimal result in an optimization space Sa _Sd:w_ _SM_ . H(d : w) represents all
+isomers in the same d : w. SM represents the gradient accumulation period. With regards to the × _×_
+optimal solution of T, the study in (Narayanan et al., 2021) gives a workable solution, we do not do
+further research. Note that since B directly affects the accuracy of the model, it is often a given value.
+
+4.2.1 COMPARISON WITH PIPELINED APPROACHES
+
+
+As shown in Figure 8, throughput experiments are carried out through training different layers of
+BERT and ResNeXt models on the Env-1 and Env-2. For more throughput experiment data, please
+refer to the appendix. In general, the communication overhead of data parallelism is larger for BERT,
+and model parallelism is larger for ResNeXt.
+
+**Comparison to PipeDream-2BW. In general, the suitable batch size is between 2[9]** and 2[11]. If it is too
+large or too small, it is not conducive to the convergence of the model. However, in most cases, when
+training large models, some methods cannot reach this batch size, as shown in Figure 8a. When in this
+range, as shown in Figure 8c, when batch = 2[9], WPipe is 1.4 times faster than PipeDream-2BW for
+Bert768 with 5.5 billion parameters. Compared to 2BW, WPipe not only reduces the cost of switching
+between weighted versions by half but also has a larger solution space when the batch is larger. As
+shown in Figure 8d, when batch = 2[9], WPipe can run in the configuration of d : w = 4 : 16 in
+Env-2, and 2BW due to memory limitations, the model-parallel depth is at least 8, that is, d >= 8, so
+in this case, the throughput of WPipe is higher (for convolutional networks, in general, Ca is larger
+and CDP is smaller, so d : w needs to be smaller to improve throughput). From Figures 8b and 8d, it
+can be concluded that after communication optimization, even on a convolutional network with a
+larger Ca, WPipe has a throughput not lower than PiprDream-2BW.
+
+**Comparison to GPipe. For GPipe, its biggest problem is that there are idle time blocks on its**
+execution timeline. In addition, its forward activations cannot be released in time. These factors
+directly or indirectly affect its throughput. Compared to GPipe, from Figure 8a- 8d, WPipe is 2.1×
+faster for Bert192 and 2.2× faster for ResNeXt302.
+
+**Comparison to PipeDream. Due to poor memory efficiency, the larger models cannot be trained**
+using PipeDream, such as Bert384 and Bert768. Practice shows that for ResNeXt200, ResNeXt302,
+ResNeXt500, and ResNeXt800, PipeDream cannot automatically split them. According to existing
+data, WPipe is 7.1× faster for Bert192.
+
+
+175
+
+150
+
+125
+
+100
+
+75
+
+50
+
+25
+
+
+100
+
+80
+
+60
+
+40
+
+20
+
+600
+
+500
+
+400
+
+300
+
+200
+
+100
+
+
+50
+
+40
+
+30
+
+20
+
+10
+
+WPipe
+2BW
+GPipe
+PipeDream
+
+
+400
+
+300
+
+200
+
+100
+
+|WPipe 2BW|Col2|Col3|Col4|
+|---|---|---|---|
+|2BW GPipe PipeDre|am|||
+|||||
+
+|WPipe 2BW|Col2|Col3|
+|---|---|---|
+|2BW GPipe|||
+||||
+||||
+
+|WPipe 2BW|Col2|Col3|
+|---|---|---|
+|2BW|||
+||||
+||||
+
+
+6 8 10
+
+WPipe
+2BW
+
+Global mini-batch size (ln2)
+
+(c) Bert768(64V100s).
+
+
+WPipe
+2BW
+GPipe
+
+
+Global mini-batch size (ln2)
+
+(a) Bert192(8V100s).
+
+
+Global mini-batch size (ln2)
+
+
+(b) ResNeXt302(8V100s).
+
+100
+
+50
+
+|WPipe 2BW|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+
+|WPipe WPipe-R|Col2|Col3|Col4|
+|---|---|---|---|
+|2BW 2BW-R||||
+|||||
+|||||
+
+|WPipe-R WPipe-R|(4:16) (8:8)|Col3|Col4|Col5|
+|---|---|---|---|---|
+|WPipe-R WPipe-R|(16:4) (32:2)||||
+|WPipe-R|(64:1)||||
+||||||
+||||||
+||||||
+
+
+0
+
+6 8 10
+
+WPipe
+2BW
+
+Global mini-batch size (ln2)
+
+(d) ResNeXt800(64V100s).
+
+
+6 8 10 12
+
+WPipe
+WPipe-R
+2BW
+2BW-R
+
+Global mini-batch size (ln2)
+
+(e) Bert384(16:4, 64V100s).
+
+
+6 8 10 12
+
+WPipe-R(4:16)
+WPipe-R(8:8)
+WPipe-R(16:4)
+WPipe-R(32:2)
+WPipe-R(64:1)
+
+Global mini-batch size (ln2)
+
+(f) ResNeXt500(64V100s).
+
+
+Figure 8: Optimal throughput for different batches in the Env-1 and Env-2. Where SM :N = {2 :
+4, 4 : 2, 8 : 1} in Env-1, SM :N = {4 : 16, 8 : 8, 16 : 4, 32 : 2, 64 : 1} in Env-2. 8e-8f show the
+throughput changes with different configurations.
+
+
+-----
+
+4.2.2 COMMUNICATION OPTIMIZATION ANALYSIS
+
+**Recomputation. The activation recomputation can greatly reduce memory footprint and expand**
+mini-batch size for pipeline systems. As shown in Figure 8e, PipeDream-2BW can expand the
+maximum mini-batch by 16 times, and WPipe can even expand by 44 times. WPipe has a more
+obvious memory advantage with activation recomputation. Although the batch size is not as large as
+possible, usually when training large models, the batch size must be within a certain range to have
+better convergence. In many cases, due to memory limitations, the effective range of the batch size
+cannot be reached. At this time the advantage of WPipe is crucial.
+
+
+**The Ratio between Model and Data parallelism. As shown**
+in Figure 8f, as M : N decreases, the corresponding throughput
+increases for ResNeXt500. This happens because the communication overhead of data parallelism is smaller than that of
+model parallelism in the convolutional network. In this case,
+_M : N can be adjusted more widely, which is more conducive_
+to improving throughput, e.g. batch = 2[11] in Figure 8f.
+
+
+Table 3: The impact of network
+communication on throughput.
+
+Env-2(4:16) ResNeXt500
+
+
+to improving throughput, e.g. batch = 2[11] in Figure 8f. WPipe-R(A) 607.8/3328
+
+WPipe-R(B) 497.3/3328
+
+**Heterogeneous Network Settings. We change the communi-**
+cation placement of model parallelism and data parallelism in
+the same M : N to achieve higher throughput. A means that data-parallel communication takes place
+between machines and model-parallel communication takes place inside machines, while B is the
+opposite. As shown in Table 3, in the case of A, the throughput of WPipe is higher, because the
+model-parallel communication is the bottleneck for ResNeXt. Compared with the inter-machine, the
+bandwidth inside the machine is higher and the communication speed is faster. The model-parallel
+communication bottleneck has been better alleviated.
+
+
+4.3 MEMORY OPTIMIZATION ANALYSIS
+
+In the throughput experiment, WPipe can execute on a larger batch, which also reflects the advantage of the lower memory footprint of WPipe. 1614
+Here, we conduct a more detailed analysis: (1) 12
+The results of experiments show that the mem- 108
+ory footprint of various pipeline-parallel meth- 6
+ods is significantly reduced with activations re-computation, especially for WPipe. As shown in Memory footprint(GB) 420 OOM OOM OOMOOMOOM OOM OOM OOM OOM OOM OOM OOM OOM OOM
+Figure 9, WPipe reduces the memory footprint Bert96(8) Bert96(64) ResNeXt200(32) ResNeXt200(64)
+by 65% for Bert96 on the per-GPU micro-batch DP GPipe GPipe-R
+of 64, and 56% for RestNeXt200 on the per- PipeDreamWPipe PipeDream-2BWWPipe-R PipeDream-2BW-R
+GPU micro-batch of 32. They are 47% and 29%
+respectively for PipeDream-2BW; (2) with the in
+Figure 9: The Bert96 and ResNeXt200 memory
+
+crease of batch size, the effect of recomputation
+
+footprint vary with batch size. We set M : N as 8 :
+
+on WPipe-R is more significant. From Figure 9,
+
+1 for Bert96 and M : N as 2 : 4 for ResNeXt200,
+
+for Bert96, WPipe-R is reduced by -14% com
+which is the fastest configuration. We measured
+
+pared to GPipe-R on the per-GPU micro-batch
+
+the average maximum memory footprint per GPU.
+
+of 8 (because GPipe has no weight buffer, and
+its initial memory footprint is lower), and on the per-GPU micro-batch of 64, it increases to 28%.
+Compared to PipeDream-2BW-R, under the same conditions, WPipe-R increases from 21% to 36%.
+
+
+5 CONCLUSIONS
+
+In this work, we proposed and implemented WPipe, a system for group-based interleaved pipelineparallel training. Compared to the state-of-the-art approach, PipeDream-2BW, WPipe achieves better
+memory efficiency, higher throughput, and fresher weight updates through the double-grouped
+weight updates. Specifically, (1) throughput: WPipe achieves 1.4× acceleration; (2) memory
+footprint: WPipe-R reduces the memory footprint by 36%; and (3) convergence: although WPipe and
+PipeDream-2BW have similar final accuracy when training, WPipe has a weight update semantics
+closer to data parallelism.
+
+
+-----
+
+ACKNOWLEDGMENTS
+
+This work is supported by the Computational Intelligence Department of Ant Group. We thank
+Jiyan Jiang for his helpful discussions. We would like to thank the Aliyun EFLOPS team for their
+substantial support in designing the industry-leading training platform to facilitate fast trials in this
+work. We also thank anonymous reviewers for their insightful and valuable comments.
+
+REFERENCES
+
+[Nvlink. URL https://www.nvidia.com/en-us/data-center/nvlink/.](https://www.nvidia.com/en-us/data-center/nvlink/)
+
+Tom B Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are
+few-shot learners. arXiv preprint arXiv:2005.14165, 2020.
+
+Chi-Chung Chen, Chia-Lin Yang, and Hsiang-Yun Cheng. Efficient and robust parallel dnn training
+through model parallelism on multi-gpu platform. arXiv preprint arXiv:1809.02839, 2018.
+
+Tianqi Chen, Bing Xu, Chiyuan Zhang, and Carlos Guestrin. Training deep nets with sublinear
+memory cost. arXiv preprint arXiv:1604.06174, 2016.
+
+Trishul Chilimbi, Yutaka Suzue, Johnson Apacible, and Karthik Kalyanaraman. Project adam:
+Building an efficient and scalable deep learning training system. In 11th {USENIX} Symposium
+_on Operating Systems Design and Implementation ({OSDI} 14), pp. 571–582, 2014._
+
+[Thor Johnsen. Christian Sarofeen. Nvidia/apex. https://github.com/NVIDIA/apex, 2021.](https://github.com/NVIDIA/apex)
+
+Jeffrey Dean, Greg S Corrado, Rajat Monga, Kai Chen, Matthieu Devin, Quoc V Le, Mark Z Mao,
+Marc’Aurelio Ranzato, Andrew Senior, Paul Tucker, et al. Large scale distributed deep networks.
+2012.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep
+bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805, 2018.
+
+Soumith Chintala. Edward Z. Yang. pytorch/pytorch. [https://github.com/pytorch/](https://github.com/pytorch/pytorch)
+[pytorch, 2021.](https://github.com/pytorch/pytorch)
+
+[NicolasHug. Francisco Massa. pytorch/vision. https://github.com/pytorch/vision,](https://github.com/pytorch/vision)
+2021.
+
+Aaron Harlap, Deepak Narayanan, Amar Phanishayee, Vivek Seshadri, Nikhil Devanur, Greg Ganger,
+and Phil Gibbons. Pipedream: Fast and efficient pipeline parallel dnn training. arXiv preprint
+_arXiv:1806.03377, 2018._
+
+Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJoong
+Lee, Jiquan Ngiam, Quoc V Le, Yonghui Wu, et al. Gpipe: Efficient training of giant neural
+networks using pipeline parallelism. In Advances in neural information processing systems, pp.
+103–112, 2019.
+
+Paras Jain, Ajay Jain, Aniruddha Nrusimha, Amir Gholami, Pieter Abbeel, Kurt Keutzer, Ion
+Stoica, and Joseph E Gonzalez. Checkmate: Breaking the memory wall with optimal tensor
+rematerialization. arXiv preprint arXiv:1910.02653, 2019.
+
+Zhihao Jia, Matei Zaharia, and Alex Aiken. Beyond data and model parallelism for deep neural
+networks. arXiv preprint arXiv:1807.05358, 2018.
+
+Alex Krizhevsky, Geoffrey Hinton, et al. Learning multiple layers of features from tiny images. 2009.
+
+Zhenzhong Lan, Mingda Chen, Sebastian Goodman, Kevin Gimpel, Piyush Sharma, and Radu
+Soricut. Albert: A lite bert for self-supervised learning of language representations. arXiv preprint
+_arXiv:1909.11942, 2019._
+
+
+-----
+
+Junyang Lin, Rui Men, An Yang, Chang Zhou, Ming Ding, Yichang Zhang, Peng Wang, Ang
+Wang, Le Jiang, Xianyan Jia, et al. M6: A chinese multimodal pretrainer. arXiv preprint
+_arXiv:2103.00823, 2021._
+
+Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Mandar Joshi, Danqi Chen, Omer Levy, Mike
+Lewis, Luke Zettlemoyer, and Veselin Stoyanov. Roberta: A robustly optimized bert pretraining
+approach. arXiv preprint arXiv:1907.11692, 2019.
+
+Deepak Narayanan, Amar Phanishayee, Kaiyu Shi, Xie Chen, and Matei Zaharia. Memory-efficient
+pipeline-parallel dnn training. In International Conference on Machine Learning, pp. 7937–7947.
+PMLR, 2021.
+
+M-E. Nilsback and A. Zisserman. Automated flower classification over a large number of classes. In
+_Proceedings of the Indian Conference on Computer Vision, Graphics and Image Processing, Dec_
+2008.
+
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi
+Zhou, Wei Li, and Peter J Liu. Exploring the limits of transfer learning with a unified text-to-text
+transformer. arXiv preprint arXiv:1910.10683, 2019.
+
+Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan
+Catanzaro. Megatron-lm: Training multi-billion parameter language models using gpu model
+parallelism. arXiv preprint arXiv:1909.08053, 2019.
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in neural information
+_processing systems, pp. 5998–6008, 2017._
+
+Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel R Bowman. Glue:
+A multi-task benchmark and analysis platform for natural language understanding. arXiv preprint
+_arXiv:1804.07461, 2018._
+
+Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi,
+Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von´
+Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama
+Drame, Quentin Lhoest, and Alexander M. Rush. Transformers: State-of-the-art natural language
+processing. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language Pro_cessing: System Demonstrations, pp. 38–45, Online, October 2020. Association for Computational_
+[Linguistics. URL https://www.aclweb.org/anthology/2020.emnlp-demos.6.](https://www.aclweb.org/anthology/2020.emnlp-demos.6)
+
+Saining Xie, Ross Girshick, Piotr Dollar, Zhuowen Tu, and Kaiming He. Aggregated residual´
+transformations for deep neural networks. In Proceedings of the IEEE conference on computer
+_vision and pattern recognition, pp. 1492–1500, 2017._
+
+Zhilin Yang, Zihang Dai, Yiming Yang, Jaime Carbonell, Ruslan Salakhutdinov, and Quoc V
+Le. Xlnet: Generalized autoregressive pretraining for language understanding. arXiv preprint
+_arXiv:1906.08237, 2019._
+
+
+-----
+
+A APPENDIX
+
+A.1 OTHER EXPERIMENTAL DATA OF CONVERGENCE.
+
+
+Figures 10a-10h show the training loss curves of the remaining experiment in Table 2. Figure 10i
+shows the F1 curve of BERTBASE when training from scratch. Analyzing the trend of the curve, we
+found that WPipe and data parallelism can converge normally, but PipeDream-2BW does not.
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+0.0
+
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+|Col1|D|ata Par|allelism|
+|---|---|---|---|
+||Pi|peDrea|m-2BW|
+||W|Pipe||
+|||||
+|||||
+|||||
+|||||
+
+|D|ata Par|allelism|
+|---|---|---|
+|Pi W|peDrea Pipe|m-2BW|
+||||
+||||
+||||
+
+
+12 15
+
+
+12 15
+
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+
+Epochs
+
+
+Epochs
+
+
+
+Data Parallelism
+
+4 PipeDream-2BW
+
+WPipe
+
+3
+
+Loss
+
+2
+
+1
+
+0
+
+0 23 47 71 95
+
+Epochs
+
+
+(a) QQP:BERTBASE.
+
+23 47 71 95
+
+|Col1|Col2|Data P|arallelism|
+|---|---|---|---|
+|||||
+|||PipeDr WPipe|eam-2BW|
+|||||
+|||||
+|||||
+|||||
+
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+Epochs
+
+
+(b) MNLI:BERTBASE.
+
+
+(c) Flowers102:ResNeXt50.
+
+
+0 8 17 26 35
+
+|Col1|Col2|
+|---|---|
+|Data P PipeDr WPipe|arallelism eam-2BW|
+|||
+|||
+|||
+
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+Epochs
+
+(e) Cifar10:ResNeXt50.
+
+
+2.0 Data Parallelism
+
+PipeDream-2BW
+
+1.5 WPipe
+
+Loss1.0
+
+0.5
+
+0 8 17 26 35
+
+Epochs
+
+
+(d) Flowers102:ResNeXt101.
+
+3
+
+2
+
+1
+
+|Col1|WPipe|Col3|
+|---|---|---|
+||||
+||||
+
+
+
+0 8 17 26 35
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+Epochs
+
+
+(f) Cifar10:ResNeXt101.
+
+0.750
+
+0.725
+
+0.700
+
+F10.675
+
+0.650
+
+0.625 WPipe
+
+0.600 PipeDream-2BW
+
+DataParallel
+
+0.575
+
+0 5 10 15 20 25 30
+
+Epochs
+
+
+(i) QQP:BERTBASE.
+
+
+|WPipe|Col2|
+|---|---|
+|||
+|||
+
+
+0 8 17 26 35
+
+Data Parallelism
+PipeDream-2BW
+WPipe
+
+Epochs
+
+(h) Cifar100:ResNeXt101.
+
+
+(g) Cifar100:ResNeXt50.
+
+
+Figure 10: The remaining part of the training loss from Table2 and the F1 when training BERTBASE
+from scratch with WPipe, PipeDream-2BW, and DataParallel (Adam with a fixed learning rate of
+5 × 10[−][6]).
+
+A.2 THROUGHPUT
+
+
+In the experiment, our settings of models are hidden size=768, num attention heads=12,
+seq len=128 of all Bert models, and groups=32, width per group=4 of all ResNeXt models. Regarding cluster configuration, there are 8 machines in our private cluster, and each machine
+has 8 GPUs with a memory size of 16G, Intel(R)Xeon(R) Platinum 8163 CPU, 512GB of RAM with
+a 25Gbps Ethernet interface, and 300GBps NVLink (nvl), which is 96 times the Ethernet bandwidth.
+In addition, the version of PyTorch we used was 1.4.
+
+As shown in Figure 11a-11d, we continue to train Bert96 and ResNeXt200 on a single machine with
+WPipe, PipeDream-2BW, PipeDream, and GPipe, and train Bert384 and ResNeXt500 on multiple
+machines with WPipe and PipeDream-2BW. The overall conclusion is the same as the above. WPipe
+has a more obvious acceleration effect on Transformer series networks (Bert, GDP, etc.), but has a
+slight acceleration on convolutional networks, compared to PipeDream-2BW.
+
+
+-----
+
+250
+
+200
+
+150
+
+100
+
+50
+
+
+200
+
+150
+
+100
+
+50
+
+100
+
+80
+
+60
+
+40
+
+20
+
+
+100
+
+80
+
+60
+
+40
+
+20
+
+600
+
+500
+
+400
+
+300
+
+200
+
+100
+
+|WPipe 2BW|Col2|Col3|Col4|
+|---|---|---|---|
+|2BW GPipe PipeDr|eam|||
+|||||
+|||||
+
+|WPipe 2BW|Col2|Col3|Col4|
+|---|---|---|---|
+|2BW GPipe||||
+|||||
+|||||
+
+|WPipe 2BW|Col2|Col3|Col4|
+|---|---|---|---|
+|2BW||||
+|||||
+
+
+6 8 10 12
+
+WPipe
+2BW
+
+Global mini-batch size (ln2)
+
+(c) Bert384(64V100s).
+
+
+WPipe
+2BW
+GPipe
+PipeDream
+
+
+WPipe
+2BW
+GPipe
+
+
+Global mini-batch size (ln2)
+
+(a) Bert96(8V100s).
+
+
+Global mini-batch size (ln2)
+
+
+(b) ResNeXt200(8V100s).
+
+200
+
+100
+
+|WPipe|Col2|Col3|Col4|
+|---|---|---|---|
+|WPipe 2BW||||
+|||||
+|||||
+
+|WPipe-R-AP WPipe-R-N PipeDream|C onAPC -2BW-R|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+
+|WPipe-R-A WPipe-R-N PipeDream|PC onAPC -2BW-R|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||||
+
+
+6 8 10 12
+
+WPipe
+2BW
+
+Global mini-batch size (ln2)
+
+(d) ResNeXt500(64V100s).
+
+
+6 8 10
+
+WPipe-R-APC
+WPipe-R-NonAPC
+PipeDream-2BW-R
+
+Global mini-batch size (ln2)
+
+(e) ResNeXt800(4:16, 64V100s).
+
+
+6 8 10 12
+
+WPipe-R-APC
+WPipe-R-NonAPC
+PipeDream-2BW-R
+
+Global mini-batch size (ln2)
+
+(f) Bert768(4:16, 64V100s).
+
+
+Figure 11: Optimal throughput for different batches in the Env-1 and Env-2. Where SM :N = {2 :
+4, 4 : 2, 8 : 1} in Env-1, SM :N = {4 : 16, 8 : 8, 16 : 4, 32 : 2, 64 : 1} in Env-2. Figures 11e-11f
+show the effect of compressed model-parallel communication on different models.
+
+A.3 COMMUNICATION OPTIMIZATION
+
+
+In this section, we use a specific example to analyze the effectiveness of the model-parallel communication compression. In addition, we add a detailed description of overlap and heterogeneous network
+communication.
+
+**Communication Compression. Referring to**
+the automatic mixed precision algorithm of
+the apex (Christian Sarofeen, 2021), we im- Activations/Gradients Activations/Gradients
+plemented the automatic precision compression Dynamic tensor_fp16,
+technique for intermediate activations/gradients, scaler Unscale
+which reduced the communication overhead by
+nearly half across the pipeline. This offsets the
+communication overhead introduced by further
+
+Activations/Gradients Activations/Gradients
+
+Dynamic tensor_fp16,
+
+scaler Unscale
+
+Scale
+
+Sender Receiver
+
+splitting model partitions. As shown in Fig
+Figure 12: The communication process of the inter
+ure 12, the sender divides the intermediate acti
+mediate activations and gradients using automatic
+
+vations/gradients by appropriate scalers (pow
+precision compression.
+
+ers of 2) and converts them into half-precision
+tensors. If the conversion succeeds, the sender will transmit the half-precision tensors together
+with the scalers to the receiver. After receiving the data, the receiver restores their original precision by the scaler. If the conversion fails, the sender will transmit the full precision tensors.
+
+**Automatic Precision Compression (APC). As shown in**
+Table 4, WPipe is 1.17× faster with APC when training Table 4: The impact of network commuResNeXt500 and the batch size equals 3328. The loss nication on throughput.
+(the negative value) of accuracy, which is brought by APC,
+does not exceed 0.1%, as shown in Table 5. However,
+when the communication overhead is not large, the use Env-2(4:16) ResNeXt500
+of APC will not speed up but will be slower. As shown WPipe-R-APC 732.6/3328
+in Figure 11f, when batch <= 2[11], Ca is small, and WPipe-R-NonAPC 607.8/3328
+the acceleration benefit cannot exceed the compression
+overhead. When batch > 2[11], there is positive feedback.
+For convolutional networks, Ca is large, and APC has always had a positive effect, but the effect
+is only obvious when the batch size is large enough, as shown in Figure 11e. In summary, when
+
+
+-----
+
+Table 5: The accuracy difference between using APC and not using APC with the same hyperparameters. We set ν = 8 × 10[−][5], b = 32 × 8, ws = 200, epoch = 1 for BERTBASE and ν = 4 × 10[−][5],
+_b = 16 × 8, ws = 100, epoch = 1 for BERTLARGE and ν = 0.01, b = 32 × 8, wr = 0.05 for_
+ResNeXt50 32x4d and ResNeXt101 32x8d.
+
+BERTBASE BERTLARGE
+
+▽ F1 -0.0003 ± 0.0011 0.0035 ± 0.0127
+
+RESNEXT50 RESNEXT101
+
+▽ ACC -0.0008±0.0014 0.0012± 0.0012
+
+the batch is large, we use the communication compression technique to have a positive benefit, but
+in many cases, we do not need to use such a large batch size to train the model, so in most cases,
+model-parallel communication will not be a bottleneck.
+
+**Overlap of Computation and Communication. As shown in Figure 13, the activations or gradients**
+communication can overlap with the forward pass, backward pass, and activation recomputation.
+Especially for activation recomputation, its time overhead can be offset mostly.
+
+Gradient Recv Activation Recv
+
+|Recompute Forward|Backward|
+|---|---|
+
+
+Gradient Recv
+
+Activation Recv
+
+Forward
+
+Recompute
+Backward
+
+Forward
+
+Forward
+
+
+Activation Gradient
+
+Send Send
+
+Activation
+
+Send
+
+Gradient
+
+Send
+
+
+Figure 13: The overlap of model execution and activations/gradients.
+
+**Heterogeneous Network Communication. Generally, the intra-machine bandwidth (NVLink) is**
+higher than the inter-machine bandwidth. In WPipe, the communication tasks mainly include
+model-parallel communication and data-parallel communication. Thus, WPipe allows tasks with
+large communication overhead to use the higher intra-machine bandwidth, and tasks with small
+communication overhead to use inter-machine bandwidth, to balance communication overhead.
+
+A.4 MODEL PARTITIONS GROUPING
+
+Model partitions P1 P2 P3 P4 G0 P1 P2 G1 P3 P4
+
+Stage0 P1 P3 P1
+
+Pipeline stages
+
+Stage1 P2 P4 P2
+
+
+Figure 14: The relationship between model partitions and pipeline stages.
+
+A.5 EXPANSION
+
+**GPipe Grouping. As shown in Figure 15, the pipeline grouping technique can also be applied to**
+GPipe, thereby reducing GPipe’s bubbles. In Figure 15, the two model partitions are further divided
+
+
+-----
+
+into four and divided into two groups. At this time, the bubble is reduced by half. For further
+discussion, when the number of groups is N, the bubble will be reduced to _N[1]_ [, but the model-parallel]
+
+communication overhead will increase by N times. However, if NVLink can be used, the impact of
+increased communication overhead will be greatly reduced.
+
+|F 10|Col2|F 11|Col4|Bubble|Col6|Col7|Col8|B 11|Col10|B 10|
+|---|---|---|---|---|---|---|---|---|---|---|
+|F F B B 20 21 21 20 F F F F Bubble B B B B 10 11 30 31 31 30 11 10||F 20||F 21||B 21||B 20|||
+|F 10|F 11|F 30|F 31|||B 31|B 30|B 11|B 10||
+||F 20|F 21|F 40|F 41|B 41|B 40|B 21|B 20|||
+
+
+
+Figure 15: The pipeline grouping is applied to GPipe.
+
+
+-----
+

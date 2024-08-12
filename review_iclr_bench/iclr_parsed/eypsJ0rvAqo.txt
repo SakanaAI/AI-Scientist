@@ -1,0 +1,2642 @@
+# 1-BIT LAMB: COMMUNICATION EFFICIENT LARGE- SCALE LARGE-BATCH TRAINING WITH LAMB’S CONVERGENCE SPEED
+
+**Anonymous authors**
+Paper under double-blind review
+
+ABSTRACT
+
+To train large models (like BERT and GPT-3) on hundreds of GPUs, communication
+has become a major bottleneck, especially on commodity systems with limitedbandwidth TCP network. On one side large batch-size optimization such as LAMB
+algorithm was proposed to reduce the frequency of communication. On the other
+side, communication compression algorithms such as 1-bit Adam help to reduce
+the volume of each communication. However, we find that simply using one of
+the techniques is not sufficient to solve the communication challenge, especially
+under low network bandwidth. Motivated by this we aim to combine the power of
+large-batch optimization and communication compression, but we find that existing
+compression strategies cannot be directly applied to LAMB due to its unique
+adaptive layerwise learning rates. To this end, we design a new communicationefficient algorithm, 1-bit LAMB, which introduces a novel way to support adaptive
+layerwise learning rates under compression. In addition, we introduce a new
+system implementation for compressed communication using the NCCL backend
+of PyTorch distributed, which improves both usability and performance. For BERTLarge pre-training task with batch sizes from 8K to 64K, our evaluations on up
+to 256 GPUs demonstrate that 1-bit LAMB with NCCL-based backend is able to
+achieve up to 4.6x communication volume reduction, up to 2.8x end-to-end timewise speedup, and the same sample-wise convergence speed (and same fine-tuning
+task accuracy) compared to uncompressed LAMB.
+
+1 INTRODUCTION
+
+Training large-scale deep learning models in a distributed fashion is computation-heavy and expensive (Brown et al., 2020). In addition to computation, communication overhead becomes a
+serious system challenge for such large models. A recent study of BERT pre-training with Adam
+demonstrates that the allreduce communication can take up to 94% and 75% of total training time per
+step on clusters with Ethernet and InfiniBand inter-node connections, respectively (Tang et al., 2021).
+
+To achieve communication efficient distributed training, there are two promising directions: large
+batch optimization and communication compression. LAMB optimizer, which can be viewed as
+Adam with adaptive layerwise learning rates, is an example of large batch optimization (You et al.,
+2020). LAMB can scale the batch size of BERT pre-training to 64K without losing accuracy, thereby
+greatly reducing the total training time as larger batch sizes leads to less frequent communication. On
+the other hand, recent works on communication compression such as 1-bit Adam demonstrate that
+it is possible to combine 1-bit compression with Adam’s convergence speed, thereby reduce BERT
+pre-training communication volume by 5x (Tang et al., 2021).
+
+Both LAMB and 1-bit Adam demonstrate great benefit for distributed training. Unfortunately, our
+studies show that simply using one of them is not sufficient to fully address the communication issue,
+especially under limited network bandwidth and large number of GPUs/machines (Section 3). We
+find that communication is still a non-trivial overhead when running large-scale distributed training
+with LAMB, even with the larger batch sizes. Previous study shows that Adam provides slower
+convergence speed compared to LAMB at batch sizes 16K or larger for BERT pre-training (You
+et al., 2020). Using the same methodology, our BERT experiments show that 1-bit Adam, similar
+
+
+-----
+
+to Adam, also has slower convergence speed compared to LAMB at batch size 16K. Even with the
+communication compression, this batch size limitation would hurt the communication efficiency
+when the number of GPUs/machines is large.
+
+LAMB and 1-bit Adam are two unique optimizers. However, the techniques behind them are
+complementary: large batch optimization reduces the frequency of communication, and compression
+reduces the volume of communication. Motivated by this we aim to combine LAMB’s large batch
+optimization algorithm with compression strategies behind 1-bit Adam. However, we find that they
+are not directly compatible due to LAMB’s unique layerwise learning rate update strategy, which
+requires information that are missing when communication and optimizer states are compressed
+(Section 3).
+
+The studies and challenges above motivate us to design a new algorithm called 1-bit LAMB (Section 4). Learning from the insights behind 1-bit Adam, 1-bit LAMB is a 2-stage algorithm which uses
+LAMB (warmup stage) to “pre-condition” a communication compressed momentum SGD algoirthm
+(compression stage). At compression stage where original LAMB algorithm cannot be used to
+update the layerwise learning rates, 1-bit LAMB employs a novel way to adaptively scale layerwise
+learning rates based on information from both warmup and compression stages. As a result, 1-bit
+LAMB is able to achieve large batch optimization (LAMB)’s convergence speed under compressed
+communication, which is impossible using existing approaches.
+
+In addition to the 1-bit LAMB algorithm, we propose a new NCCL-based compressed communication
+backend which provides better usability and performance than previous work (Section 5). This backend can be applied to 1-bit LAMB, 1-bit Adam, and other communication compression algorithms.
+We evaluate 1-bit LAMB using BERT pre-training and GLUE/SQuAD fine-tuning tasks (Section 6).
+Results show that under different batch sizes from 8K to 64K and with up to 256 GPUs, 1-bit LAMB
+with NCCL-based backend is able to achieve up to 4.6x communication volume reduction and up
+to 2.8x end-to-end time-wise speedup for BERT pre-training compared to uncompressed LAMB,
+together with the same sample-wise convergence speed and same GLUE/SQuAD fine-tuning task
+accuracy. The 1-bit LAMB optimizer as well as the NCCL-based communication backend has been
+open sourced in a deep learning optimization library (name hidden to maintain anonymity).
+
+2 RELATED WORK AND BACKGROUND
+
+To achieve communication efficient distributed training, techniques include decentralization (Lian
+et al., 2017; Koloskova* et al., 2020; Li et al., 2018), asynchronous communication (Zheng et al.,
+2016; Chaturapruek et al., 2015), and gradient compression/quantization which we focus on in
+this paper. Before communication, we could compress the original gradient g into _ω[g], where_
+_C_
+_ω[_ ] is the compress operator[1]. As a result the communication volume could be greatly reduced.
+_C_ _·_
+Compression can be achieved by quantization, sparsification, sketching, etc. (Ye & Abbe, 2018;
+Alistarh et al., 2017; Agarwal et al., 2018; Yu et al., 2019; Spring et al., 2019; Ivkin et al., 2019;
+Shi et al., 2021). Several works focus on unbiased compression methods (original and compressed
+tensors have the same expectation), such as centralized compressed parallel SGD (Alistarh et al.,
+2017) and many others (Wangni et al., 2018; Shen et al., 2018; Zhang et al., 2017; Wen et al.,
+2017; Jiang & Agrawal, 2018). On the other hand, recent works about biased compression methods
+demonstrate better compression rate and the same convergence rate by using an error compensation
+technique (Seide et al., 2014; Bernstein et al., 2019; Stich et al., 2018; Zheng et al., 2019; Phuong &
+Phong, 2020; Yu et al., 2019; Shi et al., 2019; Ivkin et al., 2019; Sun et al., 2019; Basu et al., 2019;
+Vogels et al., 2019; Tang et al., 2021).
+
+The error-compensated compression is proposed in the 1-bit SGD work (Seide et al., 2014): instead of
+compressing the gradient at each iteration directly, they compress the sum of the gradient and the last
+step’s compression error. By using error compensation the training can achieve promising convergence
+speed even with 1-bit compression (representing the gradient by ±1 signs and a scale). Recent works
+provide theoretical guarantee of this method (Bernstein et al., 2019), and also demonstrate that it
+admits the same asymptotic convergence rate as the uncompressed one (Stich et al., 2018). In addition,
+error compensation method enables almost any compression methods (Stich et al., 2018), either
+biased or unbiased, to converge as fast as the uncompressed case.
+
+1Cω[·] could also include randomness.
+
+
+-----
+
+**Adam (Kingma & Ba, 2015) can be viewed as SGD with momentum and adaptive learning rate**
+scaling on each coordinate of the gradient. It has demonstrated promising convergence speed and
+hyperparameter robustness on many deep learning tasks. Recently, Tang et al. (2021) proposed
+**1-bit Adam which combines the efficiency of error-compensated 1-bit compression with Adam’s**
+convergence speed. They show that error-compensated compression does not work for Adam directly,
+because Adam is non-linearly dependent on the gradient (the variance term). On the other hand, they
+find that Adam’s variance becomes stable at an early stage of training. To this end, they design a
+new 2-stage algorithm, 1-bit Adam: At warmup stage, vanilla Adam is used. At compression stage,
+they stop updating the variance and use it as a fixed precondition, and communicate based on the
+momentum applied with error-compensated 1-bit compression. Their experiments on up to 256 GPUs
+show that 1-bit Adam achieve the same convergence behaviour and final accuracy as Adam, together
+with up to 5x less communication volume and 3.3x faster end-to-end throughput.
+
+To further improve training efficiency at large scale, being able to support large minibatches while
+keeping the convergence speed is a critical factor. Recently You et al. (2020) find that it is difficult to
+keep Adam’s convergence speed at batch sizes 16K or larger for BERT pre-training. To this end they
+proposed LAMB which can be viewed as Adam with adaptive layerwise learning rates. By using
+LAMB, they are able to scale the batch size of BERT pre-training to 64K without losing accuracy,
+thereby, reducing the BERT training time from 3 days to around 76 minutes. The major idea of
+LAMB is that it utilizes a layerwise scaling coefficient to regulate the update of each layer, and the
+updating rule can be summarized as[2]:
+
+**_m[(]t[l][)]_** =β1m[(]t[l][)]1 [+ (1][ −] _[β][1][)][g]t[(][l][)][,][ v]t[(][l][)]_ = β2vt[(][l][)]1 [+ (1][ −] _[β][2][)(][g]t[(][l][)][)][2]_
+_−_ _−_
+
+**_u[(]t[l][)]_** = **_m[(]t[l][)]_** _, c[(]t[l][)]_ = clip _∥x[(]t−[l][)]1[∥]_ _, cmin, cmax_ (1)
+
+**_vt[(][l][)]_** + η _∥u[(]t[l][)][∥]_ !
+
+q
+
+**_x[(]t[l][)]_** =x[(]t[l][)]1 _t_ **_[u]t[(][l][)][.]_**
+_−_ _[−]_ _[γc][(][l][)]_
+
+Here gt[(][l][)] = ∇F (xt; ξt), m[(]t[l][)][,][ v]t[(][l][)][,][ x]t[(][l][)] denote the stochastic gradient, momentum, second moment
+(i.e., the variance), and the model parameters at the model’s l-th layer at step t; β1 and β2 are the
+decaying factor; γ is the learning rate; η is an additive constant to avoid division by 0; clip(x, a, b) :=
+min max _x, a_ _, b_ is the clipping operation[3]; c[(]t[l][)] is a layer-wise scaling factor that regulates the
+_{_ _{_ _}_ _}_
+update of x[(]t[l][)] into certain range. One thing to note is that within each layer, each tensor (e.g., weight
+and bias) will have its own scaling coefficient c[(]t[l][)][. The underlying intuition of LAMB’s scaling]
+coefficient is that when the update is relatively large compared to the parameter, we should apply a
+lower learning rate to that layer (and vice versa).
+
+3 MOTIVATION AND INSIGHTS
+
+3.1 1-BIT ADAM IS NOT SUFFICIENT FOR LARGE-BATCH DISTRIBUTED TRAINING
+
+1-bit Adam demonstrates the same convergence speed as Adam for BERT pre-training task with
+batch size 4K (Tang et al., 2021). On the other hand, the LAMB work shows that it is difficult
+to keep Adam’s convergence speed at batch sizes 16K or larger for BERT pre-training (You et al.,
+2020). To find out whether 1-bit Adam is sufficient for large-batch distributed training, we perform a
+similar experiment using BERT pre-training task at batch size 16K. Using You et al. (2020)’s training
+parameters and tuning procedure (details in Appendix A.1) for LAMB and Adam, we perform BERT
+pre-training with LAMB and 1-bit Adam, respectively. Then we use the two pre-trained BERT model
+to perform SQuAD 1.1 fine-tuning (details in Section 6). Results in Table 1 show that similar to
+Adam, 1-bit Adam has slower convergence speed compared to LAMB at larger batch size.
+
+2Here (x)2, **_x and xy_** [all denote element-wise operations. For simplicity weight decay is omitted.]
+
+3In the LAMB paper the clip function is only applied to[√] **_xt[(][l][)]1[∥]_** [without mentioning the exact clipping]
+_∥_ _−_
+function configurations, and our experiments show that **_x[(]t[l][)]1[∥]_** [varies a lot among different layers. Thus we]
+_∥_ _−_
+apply the clipping function to the whole ratio, which is more stable among different layers. With this clipping
+function we are able to achieve similar SQuAD accuracy compared to the original LAMB.
+
+
+-----
+
+Table 1: BERT-Large pre-training (batch size 16K) final validation loss, and SQuAD average/max
+dev set F1 scores over 32 runs using the pre-trained BERT models. The first two columns are from the
+original LAMB work. The last two columns are our experiments using the same training parameters.
+
+|BERT pre-training optimizer|LAMB (You et al., 2020) Adam (You et al., 2020) LAMB 1-bit Adam|
+|---|---|
+|BERT validation loss SQuAD Avg. F1 SQuAD Max F1|− − 1.362 1.504 − − 90.716 89.225 91.345 88.540 91.119 89.494|
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+0.0
+
+
+
+1K 2K 3K 4K 5K 6K
+
+|-attn LayerNorm.w QKV.b -attn LayerNorm.b Attn output|Col2|
+|---|---|
+|V.w Attn output||
+|||
+|||
+|||
+|||
+
+
+Pre-attn LayerNorm.w QKV.b
+Pre-attn LayerNorm.b Attn output.w
+QKV.w Attn output.b
+
+Steps
+
+(a) scaling coefficients
+
+|0 4|Col2|Col3|
+|---|---|---|
+|04 05 06 07 08 09 10|||
+||||
+||||
+||||
+||||
+|||Pre-attn LayerNorm.w QKV.b Pre-attn LayerNorm.b Attn output.w|
+|||QKV.w Attn output.b|
+
+
+1K 2K 3K 4K 5K 6K
+
+Pre-attn LayerNorm.w QKV.b
+Pre-attn LayerNorm.b Attn output.w
+QKV.w Attn output.b
+
+Steps
+
+(b) variance norms
+
+
+Figure 1: LAMB’s scaling coefficients (c[(]t[l][)] in (1)) and variance norms for different layers in the first
+BertLayer during BERT-Large pre-training seqlen 128 (5993 steps in total). We set the lower/upper
+bound of the scaling coefficient (cmin and cmax in (1)) at 0.01 and 0.3.
+
+3.2 COMMUNICATION IS STILL AN OVERHEAD FOR LARGE-BATCH DISTRIBUTED TRAINING
+
+
+Tang et al. (2021) demonstrate that when pre-training BERT with Adam at batch sizes 64 to 4K, the
+communication may take up to 94% and 75% of total training time per step on clusters with Ethernet
+and InfiniBand networks. To investigate whether the communication overhead still exists, we conduct
+a similar profiling experiments but with LAMB optimizer and batch sizes 8K to 64K. We evaluate two
+clusters: one with 4 NVIDIA V100 GPUs per node and 40 Gigabit Ethernet inter-node network (4.1
+Gbps effective bandwidth); the other one with 8 V100 GPUs per node and 100 Gigabit InfiniBand
+EDR inter-node network (close to theoretical peak effective bandwidth). Results show that even with
+larger batch sizes the communication still contributes up to 91% and 52% of the training time on two
+clusters (details in Appendix A.2), indicating the opportunities to improve large-batch distributed
+training efficiency by communication compression.
+
+3.3 INVESTIGATING BERT PRE-TRAINING WITH BASELINE LAMB
+
+
+Tang et al. (2021) find that Adam’s variance term becomes stable at an early stage of training (after
+around 15% of total training for BERT), which is why 1-bit Adam can “freeze” the variance after the
+warmup stage and use it as a fixed precondition during compression. LAMB also has the variance
+term as a non-linearly gradient dependency, and LAMB’s scaling coefficient (c[(]t[l][)] in (1)) depends
+on the variance. Thus we investigate how LAMB’s scaling coefficient and variance change during
+training using BERT pre-training task.
+
+Figure 1 presents LAMB’s scaling coefficients and variance norms for different layers in the first
+BertLayer (other layers in the model have similar patterns, details in Appendix A.3). Results
+demonstrate that the scaling coefficients keep increasing until reaching plateaus, because the update
+tends to become smaller compared to the parameter during training. In addition, many scaling
+coefficients become stable at an early stage. Results also demonstrate that LAMB provides adaptive
+learning rate in two folds: 1) different layers may reach scaling coefficient plateaus at different time;
+2) different layers may reach different scaling coefficient plateaus. We believe that this is one of
+the reasons why LAMB can provide better convergence (or reach the same convergence with less
+hyperparameter tuning) at larger batch sizes compared with Adam. On the other hand, LAMB’s
+varaince terms are less stable compared with Adam: many layers have their variance norms constantly
+decreasing during the whole training, up to two orders of magnitude difference. As we see in next
+section this makes 1-bit Adam’s strategy affect convergence when directly applied to LAMB.
+
+
+-----
+
+Table 2: BERT-Large pre-training (batch size 64K/32K at seqlen 128/512) final validation loss, and
+SQuAD average/max dev set F1 scores over 32 runs using the pre-trained models. “LAMB + basic
+1-bit” is the experimental algorithm described in Section 3.4. “ 1-bit LAMB” is the proposed work
+described in Section 4.
+
+BERT pre-training optimizer LAMB (You et al., 2020) LAMB (ours) LAMB + basic 1-bit 1-bit LAMB
+
+BERT validation loss _−_ 1.451 1.494 **1.443**
+SQuAD Avg. F1 _−_ 90.265 90.069 **90.524**
+SQuAD Max F1 90.584 90.555 90.409 **90.788**
+
+3.4 EXISTING COMPRESSION STRATEGY AFFECTS LAMB’S CONVERGENCE
+
+To combine 1-bit compression and large-batch training’s communication efficiency, first we attempt
+to directly apply 1-bit Adam’s strategy to LAMB. We design and evaluate an experimental two-stage
+algorithm “LAMB + basic 1-bit”: At the warmup stage we use vanilla LAMB. At the compression
+stage we stop updating the variance and LAMB’s scaling coefficient and use them as precondition,
+and communicate based on 1-bit compressed momentum (details about this algorithm design in
+Appendix A.4). For simplicity we only apply this experimental algorithm to BERT pre-training
+seqlen 128 phase, and still only use vanilla LAMB in seqlen 512 phase.
+
+Table 2 presents the BERT pre-training final validation loss when using vanilla LAMB, the experimental algorithm described in this section, and the proposed 1-bit LAMB algorithm (Section 4). We
+also use the pre-trained models to fine-tune SQuAD 1.1 and present the F1 scores. Results show that
+simply freezing both variance and LAMB’s scaling coefficient would affect the convergence speed
+and lead to lower SQuAD scores (and lower GLUE scores in Section 6). This is because LAMB’s
+variance term is less stable as demonstrated in our study. On the other hand, the proposed 1-bit
+LAMB is able to provide the same convergence speed as vanilla LAMB, and next we will describe its
+algorithm design.
+
+4 1-BIT LAMB ALGORITHM
+
+The proposed 1-bit LAMB optimizer introduces a novel way to update the adaptive layerwise learning
+rate during the compression stage. There are two major differences between 1-bit LAMB and the
+original LAMB: 1) During compression stage, 1-bit LAMB updates the layerwise learning rate
+based on a novel “reconstructed gradient” based on the compressed momentum. This makes 1-bit
+LAMB compatible with error compensation and be able to keep track of the training dynamic under
+compression. 2) 1-bit LAMB also introduces extra stabilized soft thresholds when updating layerwise
+learning rate at compression stage, which makes training more stable under compression.
+
+**Problem setting** In this paper, we focus on the following optimization task:
+
+_n_
+
+**_xmin_** _f_ (x) = n[1] Eξ(i)∼Di _F_ (x; ξ[(][i][)]), (2)
+_∈R[d]_ _i=1_
+
+X :=fi(x)
+
+where d is the dimension of the input model x, Di is the data distribution of individual data sample| {z }
+**_ξ[(][i][)]_** on the i-th worker, F (x; ξ) is the loss function.
+
+
+**Notations and definitions** Throughout this paper, we use the following notations:
+
+-  ∇f (·) denotes the gradient of a function f .
+
+-  fi(x) := Eξ _i_ _F_ (x; ξ).
+_∼D_
+
+-  ∥· ∥p denotes the lp-norm for vectors and matrices. Notice p = ∞ means the infinity norm.
+
+-  Cω( ) denotes the randomized compressing operator, where ω denotes the random variable.
+
+_·_
+One example is the randomized quantization operator, for example, Cω(0.7) = 1 with
+probability 0.7 and Cω(0.7) = 0 with probability 0.3.
+
+-  denotes the square root of the argument. In this paper if the argument is a vector, then it
+
+_[√]·_
+returns a vector taking the element-wise square root.
+
+-  (x)[2] denotes the element-wise square operation if x is a vector.
+
+
+-----
+
+-  **_ab_** [or][ a][/][b][ denotes the element-wise division operation if both][ a][ and][ b][ are vectors and their]
+dimension matches.
+
+**Algorithm 1 1-bit LAMB**
+
+1: Initialize: x[(]0[l][)][,][ m]0[(][l][)] = 0, v0[(][l][)] = 0, c[(]avg[l][)] [= 0][ for each layer. Learning rate][ γ][, initial error][ δ][ =][ 0][, number]
+of total iterations T, warm-up steps Tw, three decaying factor β1, β2, β3 for LAMB’s momentum, variance,
+and scaling coefficient. r[(][l][)] = 1, rmin, rmax, rthreshold for 1-bit LAMB. We use 1-bit compression as
+the compressing operator, which means Cω[x] = _∥Sign∥x(∥x)∥_ [Sign][(][x][)][ where][ Sign][(][x][)][ is the tensor that only]
+
+keeps the sign of each element in the original tensor x.
+
+2: Running the original LAMB in (1) for Tw steps, and at each step c[(]avg[l][)] [=][ β]3[c][(]avg[l][)] [+ (1][ −] _[β]3[)][c][(]t[l][)][.]_
+
+3: At the end of step Tw, for each layer store the variance term (defined as vt[(][l][)] in (1)) vTw[(][l][)] [while still keep]
+
+updating vt[(][l][)] in the future steps. Also stop updating c[(]avg[l][)] [.]
+
+4: for t = Tw, . . ., T do
+5: **(On i-th node)**
+
+6: Randomly sample ξt[(][i][)] and compute local stochastic gradient gt[(][i][)] := ∇Fi(x[(]t[i][)][,][ ξ]t[(][i][)][)][, and update the]
+local momentum mt[(][i][)] according to m[(]t[i][)] = β1m[(]t[i][)]1 [+ (1][ −] _[β][1][)][g]t[(][i][)][.]_
+_−_
+
+7: Compress the fused momentum m[(]t[i][)] into ˆm[(]t[i][)] = Cω **_m[(]t[i][)]_** + δt[(]−[i][)]1, and update the compression
+
+error by δt[(][i][)] = m[(]t[i][)] + δt[(][i][)]1 **_m[(]t[i][)][.]_** h i
+_−_ _[−]_ [ˆ]
+
+8: Send the ˆm[(]t[i][)] to the server.
+
+9: **(On server)**
+
+10: Take the average over all ˆm[(]t[i][)] it receives and compress it into mt = Cω _n1_ _nj=1_ **_m[ˆ]_** [(]t[i][)] + δt−1 _, and_
+
+_n_
+
+update the compression error accordingly by δt = _n[1]_ _j=1_ **_m[ˆ]_** [(]t[i][)] + δt−1h −Pmt. i
+
+11: Send mt to all the workers.
+
+P
+
+12: **(On j-th node)**
+
+13: Set mt = mt.
+
+14: **for the l-th layer do**
+
+15: Reconstruct global gradient gt[(][l][)] = (mt[(][l][)] _β1m[(]t[l][)]1[)][/][(1][ −]_ _[β][1][)][.]_
+
+2 _−_ _−_
+16: **_vt[(][l][)]_** = β2vt[(][l][)]1 [+ (1][ −] _[β][2][)]_ **_gt[(][l][)]_** .
+_−_
+
+17: _rt[(][l][)]_ = **_vTw[(][l][)]_** _[/][v]t[(][l][)]_  
+_∞[.]_
+
+18: _rt[(][l][)]_ = clip _rt[(][l][)][,][ (1][ −]_ _[r][threshold][)][ ×][ r]t[(][l][)]1[,][ (1 +][ r][threshold][)][ ×][ r]t[(][l][)]1_ .
+_−_ _−_
+
+19: _rt[(][l][)]_ = clip rt[(][l][)][, r][min][, r][max] . 
+
+20: _c[(]t[l][)]_ = rt[(][l][)][c]avg[(][l][)] [.] 
+
+21: Update model of the l-th layer xt[(][l][)] = x[(]t−[l][)]1 _[−]_ _[γc]t[(][l][)]_ **_mv[(]tTw[(][l][l][)][)]_** .
+r
+
+22: **end for**
+
+23: end for
+24: Output: x.
+
+
+We summarize 1-bit LAMB in Algorithm 1. During the compression stage, we freeze the variance in
+order to apply the error compensation mechanism correctly (Tang et al., 2021). However, this brings
+two challenges for LAMB’s case: 1) We cannot update LAMB’s scaling coefficients (c[(]t[l][)] in (1))
+during compression stage based on LAMB algorithm, because it requires uncompressed momentum
+and up-to-date variance; 2) In vanilla LAMB the scaling coefficients become stable during training.
+However, because LAMB’s variance term is not stable for some layers but we freeze them during
+compression, we need to adjust scaling coefficients during compression to compensate this.
+
+To this end, 1-bit LAMB uses a novel way to adaptively update LAMB scaling coefficients during
+the compression stage to compensate the difference between frozen and actual variance. During
+the warmup stage, we use vallia LAMB and keep track of the moving average of each layer’s
+scaling coefficient (used during the compression stage because the scaling coefficient is not stable
+at beginning). At the end of warmup, we stop updating the moving average, and store the frozen
+variance to be used during compression stage. On the other hand, we still keep updating another
+“fresh” variance by reconstructing the global gradient based on this and last step’s compressed
+momentum.
+
+
+-----
+
+To update LAMB scaling coefficient during compression stage, we compute a 1-bit LAMB scaling
+ratio which is the max element among the (frozen variance/fresh variance). We use the max element
+as the scaling ratio because it is effective and cheap to compute based on our experiments. To avoid
+extreme ratios and dramatic change between ratios, we use two kinds of clipping configurable by the
+user. (The clipping from vanilla LAMB algorithm are not used during the compression stage.) Then
+we compute this step’s LAMB scaling coefficient using the 1-bit LAMB scaling ratio and the moving
+average at the end of warmup, and use it to update the model. Our study shows that those layers with
+less stable variance tend to have more dynamic 1-bit LAMB scaling ratios, which demonstrate the
+desired adaptiveness (details in Appendix A.5). Appendix A.9 provides a theoretical analysis for
+1-bit LAMB.
+
+5 PROPOSED SYSTEM DESIGN
+
+To realize the compressed communication at system level, Tang et al. (2021) designed a custom
+collective primitive, called “compressed allreduce”, using Message Passing Interface (MPI). In
+addition to implementing 1-bit LAMB using this MPI-based backend, we introduce a new system
+implementation for compressed communication using the NCCL backend of PyTorch distributed,
+following the 3-phase design in the MPI-based backend: 1) The gather step, where each worker sends
+its i-th chunk to worker i, is implemented using NCCL’s Alltoall and AllGather. 2) The average step,
+where each worker averages all chunks it receives. Here each worker acts as the server defined in
+Algorithm 1. 3) The scatter step, where each worker receives the average of all i-th chunks from
+worker i, is implemented using NCCL’s AllGather. Compared to the MPI-based, this new NCCLbased implementation significantly improves the usability since NCCL is integrated with PyTorch
+distributed. In addition, evaluations show that the performance of the NCCL-based implementation
+is better than the MPI-based for Ethernet-based systems and on-par for InfiniBand-based systems.
+Thus we will mainly present the results with NCCL-based backend, but we also include a comparison
+between MPI and NCCL-based implementations in Appendix A.6.
+
+6 EVALUATION
+
+**Dataset and models** We evaluate the convergence and performance of 1-bit LAMB and uncompressed LAMB for BERT-Large (L = 24, H = 1024, A = 16, 340M params) pre-training task. We
+use the same dataset as Devlin et al. (2019), which is a concatenation of Wikipedia and BooksCorpus
+with 2.5B and 800M words respectively. Compared to the original BERT model, one notable change
+is that we applied PreLN instead of PostLN for better training stability (Zhang & He, 2020; Xiong
+et al., 2020). We use the GLUE fine-tuning benchmark (Wang et al., 2018) and SQuAD 1.1 fine-tuning
+task[4] to evaluate the convergence of the BERT models trained by LAMB and 1-bit LAMB.
+
+**Hardware** We use the two clusters described in Section 3.2. We use 8 to 256 GPUs for BERT
+pre-training tasks to measure 1-bit LAMB’s performance gain. For fine-tuning tasks we use 4 GPUs.
+One thing to note is that because 1-bit LAMB introduces additional memory overhead (one persistent
+copy of the fresh varaince and one temporary copy of last step’s momentum) and because the V100
+GPUs on the Ethernet cluster have 16GB memory instead of 32GB, we were not able to fit large
+batch sizes for BERT pre-training when the number of GPUs is small. For seqlen 128 and 512, we
+need to use at least 8 and 16 GPUs on the Ethernet cluster, respectively.
+
+**Training parameters** For BERT pre-training, we set the parameters in (1) as β1 = 0.9, β2 = 0.999,
+_cmin = 0.01 and cmax = 0.3 for LAMB and 1-bit LAMB. For 1-bit LAMB, we set β3 = 0.9,_
+_rmin = 0.5, rmax = 4.0, and rthreshold = 0.1 in Algorithm 1. For convergence analysis, we set_
+total batch size as 64K for seqlen 128 and 32K for seqlen 512. For performance analysis, we test
+different batch sizes from 8K to 64K.
+
+For BERT pre-training seqlen 128, the learning rate starts from 1 × 10[−][3], exponentially increases
+to 12 × 10[−][3] as a warmup in the first 450 steps, then decays into 0.9 of the original after every 250
+steps. The total number of steps is 5993. For 1-bit LAMB we use the first 1000 steps (16.7%) as
+the warmup stage. For BERT pre-training seqlen 512, the learning rate starts from 0, exponentially
+increases to 2 × 10[−][3] as a warmup in the first 150 steps, then decays into 0.9 of the original after
+
+4https://rajpurkar.github.io/SQuAD-explorer/
+
+
+-----
+
+12
+10
+
+
+LAMB seqlen 128
+
+
+0
+
+0 100M 200M 300M 400M
+
+|qlen 128 LAMB seqlen 512|Col2|
+|---|---|
+|B seqlen 128 1-bit LAMB seqlen 512||
+|||
+|||
+|||
+|||
+
+
+Samples
+
+Figure 2: Sample-wise convergence speed for BERT-Large pre-training with LAMB and 1-bit LAMB.
+
+
+Table 3: GLUE development set results using the pre-trained BERT-Large models. “Original” results
+are from Devlin et al. (2019) using BertAdam. “LAMB” results use the uncompressed LAMB for
+BERT pre-training. “LAMB + basic 1-bit” is the experimental algorithm described in Section 3.4. “
+1-bit LAMB” is the proposed work. The latter 3 cases use the same shared training parameters during
+pre-training and fine-tuning. Spearman correlations are reported for STS-B, and accuracy scores are
+reported for the other tasks. Each task’s scores are the median scores over 32 runs.
+
+MNLI-(m/mm) QQP QNLI SST-2 CoLA STS-B MRPC RTE **Average**
+
+Original 86.7/85.9 89.3 92.7 94.9 60.5 86.5 85.4 70.1 83.6
+LAMB 85.4/85.5 91.4 91.9 92.8 60.9 90.1 86.9 70.4 **83.9**
+LAMB + basic 1-bit 84.8/84.7 91.2 91.4 92.4 54.0 89.6 84.2 66.6 82.1
+1-bit LAMB 85.5/85.6 91.3 92.3 93.1 59.2 90.0 86.5 71.5 **83.9**
+
+every 150 steps. The total number of steps is 555. For 1-bit LAMB we use the first 107 steps (19.3%)
+as the warmup stage.
+
+For 1-bit LAMB’s hyperparameter tuning, we find that the only parameter that requires nontrivial
+tuning is the number of warmup steps, which depends on when do the LAMB’s scaling coefficients
+become stable as discussed in Section 3.3 thus could potentially be automated. For the other
+parameters (β3, rmin, rmax, and rthreshold in Algorithm 1) we find tuning them does not lead to very
+different convergence since they are just used to avoid extreme value/dramatic change of LAMB’s
+scaling coefficients. Similarly the clipping parameters cmin and cmax in (1) for LAMB and 1-bit
+LAMB do not require non-trivial tuning.
+
+For GLUE benchmarks we use Adam optimizer and perform single-task training on the dev set.
+Following the setup in the BERT paper (Devlin et al., 2019), we use a batch size of 32 and finetune for 3 epochs for all GLUE tasks. For each task, we select the best learning rate among
+_{2 × 10[−][5], 3 × 10[−][5], 4 × 10[−][5], 5 × 10[−][5]}. For SQuAD fine-tuning we use Adam optimizer and the_
+same parameters as published by HuggingFace (batch size = 24, learning rate = 3 × 10[−][5], dropout =
+0.1, 2 epochs).
+
+
+**Convergence analysis** Figure 2 presents the BERT pre-training sample-wise convergence results.
+For both seqlen 128 and 512, 1-bit LAMB provides the same convergence speed as LAMB, while it
+takes much less time to process each batch due to communication compression. We already presented
+the BERT pre-training validation loss and SQuAD fine-tuning results in Section 3.4 Table 2. And
+Table 3 presents the GLUE results. For both SQuAD and GLUE, results show that 1-bit LAMB
+provides the same fine-tuning task accuracy as LAMB, while simply freezing both the varaince and
+LAMB’s scaling coefficients would hurt the accuracy.
+
+**Performance analysis** Computed as 1/(warmup_ratio + (1 - warmup_ratio)/16) for FP16 training,
+1-bit LAMB offers 4.6× and 4.1× end-to-end communication volume reduction for BERT-Large
+seqlen 128 and 512, respectively. To measure the actual end-to-end performance gain, first we
+perform a throughput analysis where we run the warmup (i.e., baseline LAMB’s performance) and
+compression stage of 1-bit LAMB for 200 steps each, and measure the average throughput of the
+two stages. Figure 3 presents the results with NCCL-based compressed communication backend
+under different batch sizes and number of GPUs. For seqlen 128, 1-bit LAMB provides up to 4.5×
+speedup during the compression stage, which is equivalent to 2.8× end-to-end speedup (computed as
+1/(warmup_ratio + (1 - warmup_ratio)/compression_stage_speedup)). For seqlen 512, 1-bit LAMB
+provides up to 3.0× speedup during the compression stage, which is equivalent to 2.2× end-to-end
+speedup. This demonstrates 1-bit LAMB’s better scalability compared to LAMB. It is also worth
+mentioning that 1-bit LAMB on Ethernet (4.1 Gbps effective bandwidth, 4 GPUs per node) is able
+
+
+-----
+
+Table 4: Total runtime of BERT-Large pre-training with LAMB and 1-bit LAMB (256 GPUs with
+Ethernet connections. Batch sizes 64K/32K for seqlen 128/512.)
+
+Seqlen 128 Seqlen 512 Total
+
+LAMB 657 min 74 min 731 min
+1-bit LAMB 301 min (2.2x) 50 min (1.5x) 351 min (2.1x)
+
+
+
+30000
+
+25000
+
+2.4x
+
+20000
+
+15000
+
+10000
+
+Samples/second
+
+5000
+
+0 8 16 32 64 128 256
+
+Number of GPUs
+
+(d) seqlen 128, batch size
+64K
+
+
+12000
+
+10000
+
+8000
+
+6000
+
+4.5x
+
+Samples/second 4000
+
+2000
+
+0 8 16 32 64 128 256
+
+Number of GPUs
+
+
+18000
+
+16000
+
+14000
+
+12000
+
+10000 3.8x
+
+8000
+
+6000
+
+Samples/second
+
+4000
+
+2000
+
+0 8 16 32 64 128 256
+
+Number of GPUs
+
+
+20000
+
+15000
+
+3.2x
+
+10000
+
+Samples/second
+
+5000
+
+0 8 16 32 64 128 256
+
+Number of GPUs
+
+
+(a) seqlen 128, batch size
+8K
+
+
+(b) seqlen 128, batch size
+16K
+
+
+(c) seqlen 128, batch size
+32K
+
+8000
+
+7000
+
+6000
+
+2.3x 5000
+
+4000
+
+3000
+
+Samples/second2000
+
+1000
+
+
+0 8 16 32 64 128 256
+
+|LAMB, Ethernet 1-bit LAMB, Ethernet|Col2|
+|---|---|
+|LAMB, InfiniBand 1-bit LAMB, InfiniBand 1.7x||
+|||
+|||
+|||
+|||
+|||
+
+
+LAMB, Ethernet
+1-bit LAMB, Ethernet
+LAMB, InfiniBand
+1-bit LAMB, InfiniBand 1.7x
+
+Number of GPUs
+
+(g) seqlen 512, batch size
+32K
+
+
+5000
+
+4000
+
+3.0x
+
+3000
+
+2000
+
+Samples/second
+
+1000
+
+0 8 16 32 64 128 256
+
+Number of GPUs
+
+
+7000
+
+6000
+
+5000
+
+2.3x
+
+4000
+
+3000
+
+Samples/second2000
+
+1000
+
+0 8 16 32 64 128 256
+
+Number of GPUs
+
+
+(e) seqlen 512, batch size
+8K
+
+
+(f) seqlen 512, batch size
+16K
+
+
+Figure 3: Scalability of 1-bit LAMB with NCCL-based backend for BERT-Large pre-training on
+V100 GPUs. LAMB lines represent the throughput at 1-bit LAMB’s warmup stage (i.e., baseline
+LAMB). 1-bit LAMB lines represent the throughput at compression stage. Annotations represent
+the highest speedup achieved in each figure. Note that this is the speedup between warmup and
+compression stage. The end-to-end speedup also depends on the percentage of warmup. All figures
+share the same legend as 3(g).
+
+to achieve comparable throughput as LAMB on InfiniBand (near 100 Gbps effective bandwidth, 8
+GPUs per node), which demonstrates 1-bit LAMB’s efficiency considering the hardware differences.
+
+In addition to throughput analysis, we also measure the total runtime of pre-training at batch size
+64/32K for both 1-bit LAMB and LAMB. As shown in Table 4, overall 1-bit LAMB is able to
+provide 2.2× and 1.5× speedup for seqlen 128 and 512. These numbers are consistent with the endto-end speedup calculated in the throughput analysis (2.0× and 1.5× based on results in Figure 3(d)
+and 3(g)). For seqlen 128, the end-to-end speedup based on runtime is slightly higher than the speedup
+based on throughput. We find that it is because uncompressed LAMB’s larger communication volume
+makes it more sensitive to the occasional fluctuation of the actual network bandwidth.
+
+
+7 CONCLUSION
+
+To reduce both the frequency and volume of communications for large-scale training, we propose an
+error-compensated LAMB preconditioned momentum SGD algorithm, 1-bit LAMB, which combines
+the power of large batch optimization and communication compression by introducing an novel
+way to support adaptive layerwise learning rates during communication compression. We also
+introduce an easier-to-use and more efficient compressed communication backend system based
+on NCCL. Evaluations show that 1-bit LAMB with NCCL-based backend is able to achieve up to
+4.6× communication volume reduction and up to 2.8× end-to-end time-wise speedup for BERT
+pre-training compared to uncompressed LAMB, together with the same sample-wise convergence
+speed and fine-tuning task accuracy.
+
+
+-----
+
+REFERENCES
+
+Naman Agarwal, Ananda Theertha Suresh, Felix Xinnan X Yu, Sanjiv Kumar, and Brendan McMahan. cpSGD: Communication-efficient and differentially-private distributed SGD. In S Bengio,
+H Wallach, H Larochelle, K Grauman, N Cesa-Bianchi, and R Garnett (eds.), Advances in Neural
+_Information Processing Systems 31, pp. 7564–7575. Curran Associates, Inc., 2018._
+
+Dan Alistarh, Demjan Grubic, Jerry Li, Ryota Tomioka, and Milan Vojnovic. QSGD: CommunicationEfficient SGD via gradient quantization and encoding. In I Guyon, U V Luxburg, S Bengio,
+H Wallach, R Fergus, S Vishwanathan, and R Garnett (eds.), Advances in Neural Information
+_Processing Systems 30, pp. 1709–1720. Curran Associates, Inc., 2017._
+
+Debraj Basu, Deepesh Data, Can Karakus, and Suhas Diggavi. Qsparse-local-sgd: Distributed
+sgd with quantization, sparsification and local computations. In H. Wallach, H. Larochelle,
+A. Beygelzimer, F. d Alché-Buc, E. Fox, and R. Garnett (eds.), Advances in Neural Information
+_Processing Systems 32, pp. 14695–14706. Curran Associates, Inc., 2019._
+
+Jeremy Bernstein, Jiawei Zhao, Kamyar Azizzadenesheli, and Anima Anandkumar. signSGD with
+majority vote is communication efficient and fault tolerant. In International Conference on Learning
+_[Representations, 2019. URL https://openreview.net/forum?id=BJxhijAcY7.](https://openreview.net/forum?id=BJxhijAcY7)_
+
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel
+Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel Ziegler,
+Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and
+Dario Amodei. Language models are few-shot learners. In H. Larochelle, M. Ranzato, R. Hadsell,
+M. F. Balcan, and H. Lin (eds.), Advances in Neural Information Processing Systems, volume 33,
+[pp. 1877–1901. Curran Associates, Inc., 2020. URL https://proceedings.neurips.](https://proceedings.neurips.cc/paper/2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf)
+[cc/paper/2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf.](https://proceedings.neurips.cc/paper/2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf)
+
+Sorathan Chaturapruek, John C Duchi, and Christopher Ré. Asynchronous stochastic convex
+optimization: the noise is in the noise and sgd don t care. In C. Cortes, N. D. Lawrence, D. D. Lee,
+M. Sugiyama, and R. Garnett (eds.), Advances in Neural Information Processing Systems 28, pp.
+1531–1539. Curran Associates, Inc., 2015.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep
+bidirectional transformers for language understanding. In NAACL-HLT, 2019.
+
+Nikita Ivkin, Daniel Rothchild, Enayat Ullah, Vladimir braverman, Ion Stoica, and Raman Arora.
+Communication-efficient distributed sgd with sketching. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d Alché-Buc, E. Fox, and R. Garnett (eds.), Advances in Neural Information Processing
+_Systems 32, pp. 13144–13154. Curran Associates, Inc., 2019._
+
+Peng Jiang and Gagan Agrawal. A linear speedup analysis of distributed deep learning with sparse and
+quantized communication. In S. Bengio, H. Wallach, H. Larochelle, K. Grauman, N. Cesa-Bianchi,
+and R. Garnett (eds.), Advances in Neural Information Processing Systems 31, pp. 2530–2541.
+Curran Associates, Inc., 2018.
+
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. _CoRR,_
+abs/1412.6980, 2015.
+
+Anastasia Koloskova*, Tao Lin*, Sebastian U Stich, and Martin Jaggi. Decentralized deep learning
+with arbitrary communication compression. In International Conference on Learning Representa_[tions, 2020. URL https://openreview.net/forum?id=SkgGCkrKvH.](https://openreview.net/forum?id=SkgGCkrKvH)_
+
+Youjie Li, Mingchao Yu, Songze Li, Salman Avestimehr, Nam Sung Kim, and Alexander Schwing.
+Pipe-sgd: A decentralized pipelined sgd framework for distributed deep net training. In S. Bengio,
+H. Wallach, H. Larochelle, K. Grauman, N. Cesa-Bianchi, and R. Garnett (eds.), Advances in
+_Neural Information Processing Systems 31, pp. 8056–8067. Curran Associates, Inc., 2018._
+
+
+-----
+
+Xiangru Lian, Ce Zhang, Huan Zhang, Cho-Jui Hsieh, Wei Zhang, and Ji Liu. Can decentralized
+algorithms outperform centralized algorithms? a case study for decentralized parallel stochastic
+gradient descent. In I Guyon, U V Luxburg, S Bengio, H Wallach, R Fergus, S Vishwanathan, and
+R Garnett (eds.), Advances in Neural Information Processing Systems 30, pp. 5330–5340. Curran
+Associates, Inc., 2017.
+
+T. T. Phuong and L. T. Phong. Distributed sgd with flexible gradient compression. IEEE Access, 8:
+64707–64717, 2020.
+
+Frank Seide, Hao Fu, Jasha Droppo, Gang Li, and Dong Yu. 1-bit stochastic gradient descent and
+application to data-parallel distributed training of speech dnns. In Interspeech 2014, September
+2014.
+
+Zebang Shen, Aryan Mokhtari, Tengfei Zhou, Peilin Zhao, and Hui Qian. Towards more efficient
+stochastic decentralized learning: Faster convergence and sparse communication. In Jennifer Dy
+and Andreas Krause (eds.), Proceedings of the 35th International Conference on Machine Learning,
+volume 80 of Proceedings of Machine Learning Research, pp. 4624–4633, Stockholmsmässan,
+Stockholm Sweden, 10–15 Jul 2018. PMLR.
+
+S. Shi, Q. Wang, K. Zhao, Z. Tang, Y. Wang, X. Huang, and X. Chu. A distributed synchronous
+sgd algorithm with global top-k sparsification for low bandwidth networks. In 2019 IEEE 39th
+_International Conference on Distributed Computing Systems (ICDCS), pp. 2238–2247, 2019._
+
+Shaohuai Shi, Xianhao Zhou, Shutao Song, Xingyao Wang, Zilin Zhu, Xue Huang, Xinan Jiang,
+Feihu Zhou, Zhenyu Guo, Liqiang Xie, Rui Lan, Xianbin Ouyang, Yan Zhang, Jieqian Wei, Jing
+Gong, Weiliang Lin, Ping Gao, Peng Meng, Xiaomin Xu, Chenyang Guo, Bo Yang, Zhibo Chen,
+Yongjian Wu, and Xiaowen Chu. Towards scalable distributed training of deep learning on public
+cloud clusters. In Proceedings of Machine Learning and Systems, 2021.
+
+Ryan Spring, Anastasios Kyrillidis, Vijai Mohan, and Anshumali Shrivastava. Compressing gradient
+optimizers via Count-Sketches. Proceedings of the 36th International Conference on Machine
+_Learning, 97:5946–5955, 2019._
+
+Sebastian U Stich, Jean-Baptiste Cordonnier, and Martin Jaggi. Sparsified sgd with memory. In
+S. Bengio, H. Wallach, H. Larochelle, K. Grauman, N. Cesa-Bianchi, and R. Garnett (eds.),
+_Advances in Neural Information Processing Systems 31, pp. 4447–4458. Curran Associates, Inc.,_
+2018.
+
+Jun Sun, Tianyi Chen, Georgios Giannakis, and Zaiyue Yang. Communication-efficient distributed
+learning via lazily aggregated quantized gradients. In H. Wallach, H. Larochelle, A. Beygelzimer,
+F. d Alché-Buc, E. Fox, and R. Garnett (eds.), Advances in Neural Information Processing Systems
+_32, pp. 3370–3380. Curran Associates, Inc., 2019._
+
+Hanlin Tang, Chen Yu, Xiangru Lian, Tong Zhang, and Ji Liu. DoubleSqueeze: Parallel stochastic
+gradient descent with double-pass error-compensated compression. In Kamalika Chaudhuri and
+Ruslan Salakhutdinov (eds.), Proceedings of the 36th International Conference on Machine
+_Learning, volume 97 of Proceedings of Machine Learning Research, pp. 6155–6165, Long Beach,_
+California, USA, 09–15 Jun 2019. PMLR.
+
+Hanlin Tang, Shaoduo Gan, Ammar Ahmad Awan, Samyam Rajbhandari, Conglong Li, Xiangru
+Lian, Ji Liu, Ce Zhang, and Yuxiong He. 1-bit Adam: Communication Efficient Large-Scale
+Training with Adam’s Convergence Speed. In Proceedings of the 38th International Conference
+_on Machine Learning, pp. 10118–10129, 2021._
+
+Thijs Vogels, Sai Praneeth Karimireddy, and Martin Jaggi. Powersgd: Practical low-rank gradient
+compression for distributed optimization. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d AlchéBuc, E. Fox, and R. Garnett (eds.), Advances in Neural Information Processing Systems 32, pp.
+14259–14268. Curran Associates, Inc., 2019.
+
+Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel Bowman. GLUE:
+A multi-task benchmark and analysis platform for natural language understanding. In Proceedings
+_of the 2018 EMNLP Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP,_
+pp. 353–355, Brussels, Belgium, November 2018. Association for Computational Linguistics. doi:
+[10.18653/v1/W18-5446. URL https://www.aclweb.org/anthology/W18-5446.](https://www.aclweb.org/anthology/W18-5446)
+
+
+-----
+
+Jianqiao Wangni, Jialei Wang, Ji Liu, and Tong Zhang. Gradient sparsification for CommunicationEfficient distributed optimization. In S Bengio, H Wallach, H Larochelle, K Grauman, N CesaBianchi, and R Garnett (eds.), Advances in Neural Information Processing Systems 31, pp. 1299–
+1309. Curran Associates, Inc., 2018.
+
+Wei Wen, Cong Xu, Feng Yan, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Terngrad:
+Ternary gradients to reduce communication in distributed deep learning. In I. Guyon, U. V. Luxburg,
+S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (eds.), Advances in Neural
+_Information Processing Systems 30, pp. 1509–1519. Curran Associates, Inc., 2017._
+
+Ruibin Xiong, Yunchang Yang, Di He, Kai Zheng, Shuxin Zheng, Chen Xing, Huishuai Zhang,
+Yanyan Lan, Liwei Wang, and Tieyan Liu. On layer normalization in the transformer architecture. In
+Hal Daumé III and Aarti Singh (eds.), Proceedings of the 37th International Conference on Machine
+_Learning, volume 119 of Proceedings of Machine Learning Research, pp. 10524–10533. PMLR,_
+[13–18 Jul 2020. URL http://proceedings.mlr.press/v119/xiong20b.html.](http://proceedings.mlr.press/v119/xiong20b.html)
+
+Min Ye and Emmanuel Abbe. Communication-Computation efficient gradient coding. Proceedings
+_of the 35th International Conference on Machine Learning, 80:5610–5619, 2018._
+
+Yang You, Jing Li, Sashank Reddi, Jonathan Hseu, Sanjiv Kumar, Srinadh Bhojanapalli, Xiaodan
+Song, James Demmel, Kurt Keutzer, and Cho-Jui Hsieh. Large batch optimization for deep
+learning: Training bert in 76 minutes. In International Conference on Learning Representations,
+[2020. URL https://openreview.net/forum?id=Syx4wnEtvH.](https://openreview.net/forum?id=Syx4wnEtvH)
+
+Yue Yu, Jiaxiang Wu, and Longbo Huang. Double quantization for communication-efficient distributed optimization. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d Alché-Buc, E. Fox, and
+R. Garnett (eds.), Advances in Neural Information Processing Systems 32, pp. 4438–4449. Curran
+Associates, Inc., 2019.
+
+Hantian Zhang, Jerry Li, Kaan Kara, Dan Alistarh, Ji Liu, and Ce Zhang. ZipML: Training linear
+models with end-to-end low precision, and a little bit of deep learning. In Doina Precup and
+Yee Whye Teh (eds.), Proceedings of the 34th International Conference on Machine Learning,
+volume 70 of Proceedings of Machine Learning Research, pp. 4035–4043, International Convention
+Centre, Sydney, Australia, 06–11 Aug 2017. PMLR.
+
+Minjia Zhang and Yuxiong He. Accelerating training of transformer-based language models with
+progressive layer dropping. In H. Larochelle, M. Ranzato, R. Hadsell, M. F. Balcan, and H. Lin
+(eds.), Advances in Neural Information Processing Systems, volume 33, pp. 14011–14023. Cur[ran Associates, Inc., 2020. URL https://proceedings.neurips.cc/paper/2020/](https://proceedings.neurips.cc/paper/2020/file/a1140a3d0df1c81e24ae954d935e8926-Paper.pdf)
+[file/a1140a3d0df1c81e24ae954d935e8926-Paper.pdf.](https://proceedings.neurips.cc/paper/2020/file/a1140a3d0df1c81e24ae954d935e8926-Paper.pdf)
+
+Shuai Zheng, Ziyue Huang, and James Kwok. Communication-efficient distributed blockwise
+momentum sgd with error-feedback. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d AlchéBuc, E. Fox, and R. Garnett (eds.), Advances in Neural Information Processing Systems 32, pp.
+11450–11460. Curran Associates, Inc., 2019.
+
+Shuxin Zheng, Qi Meng, Taifeng Wang, Wei Chen, Nenghai Yu, Zhiming Ma, and Tie-Yan Liu.
+Asynchronous stochastic gradient descent with delay compensation for distributed deep learning.
+_CoRR, abs/1609.08326, 2016._
+
+
+-----
+
+Table 5: BERT-Large pre-training seqlen 128 profiling results.
+
+Cluster Num. Num. Batch Batch Grad Forward Backward Backward Step allreduce%
+Network node GPU size per size accum. (ms) allreduce everything (ms)
+Type GPU step (ms) else (ms)
+
+Ethernet 64 256 16 8K 2 55 3579 117 191 **91%**
+Ethernet 64 256 16 16K 4 111 3533 227 195 87%
+Ethernet 64 256 16 32K 8 224 3599 462 233 80%
+Ethernet 64 256 16 64K 16 445 3674 919 215 70%
+Ethernet 32 128 16 8K 4 112 3759 233 121 89%
+Ethernet 16 64 16 8K 8 223 3433 464 109 81%
+Ethernet 8 32 16 8K 16 445 3528 923 38 72%
+Ethernet 4 16 16 8K 32 881 3436 1827 33 56%
+Ethernet 2 8 16 8K 64 1773 2087 3696 31 28%
+Ethernet 1 4 16 8K 128 3532 234 7329 30 2%
+
+InfiniBand 16 128 64 8K 1 96 335 179 36 **52%**
+InfiniBand 16 128 64 16K 2 192 346 356 37 37%
+InfiniBand 16 128 64 32K 4 381 377 714 37 25%
+InfiniBand 16 128 64 64K 8 770 422 1422 32 16%
+InfiniBand 8 64 64 8K 2 192 332 352 34 36%
+InfiniBand 4 32 64 8K 4 384 339 711 31 23%
+InfiniBand 2 16 64 8K 8 768 270 1436 31 11%
+InfiniBand 1 8 64 8K 16 1534 167 2869 31 4%
+
+A APPENDIX
+
+A.1 TRAINING PARAMETERS FOR 1-BIT ADAM EXPERIMENTS IN SECTION 3.1
+
+For experiments in Section 3.1, for both LAMB and 1-bit Adam we use batch size = 16K, 28125/3125
+steps for seqlen 128/512, weight decay = 0.01, linear LR warmup and decay. For LAMB, we
+use learning rate = 3.54 × 10[−][3], 10% LR warmup, clipping configs (cmin and cmax in (1)) as 0.1
+and 1. For 1-bit Adam, we use learning rates ∈{1 × 10[−][4], 2 × 10[−][4], 3 × 10[−][4]}, LR warmup
+_∈{5%, 10%, 20%}. All of these training parameters (except LAMB clipping configs) are from the_
+LAMB paper. For 1-bit Adam, following the original work’s strategy we set the number of warmup
+steps as 4000 (out of total 28125 steps) for seqlen 128 and 475 (out of 3125) for seqlen 512.
+
+A.2 DETAILED RESULTS FOR PROFILING EXPERIMENTS IN SECTION 3.2
+
+Table 5 presents the detailed profiling results. Results show that even with larger batch sizes the
+allreduce communication still contributes to a great portion of the training time per step, up to 91%
+and 52% on two different kinds of clusters. And this overhead is larger when the number of nodes is
+larger, when the batch size is smaller, when the network bandwidth is lower.
+
+A.3 DETAILED RESULTS FOR LAMB EXPERIMENTS IN SECTION 3.3
+
+Figure 4 presents LAMB’s scaling coefficients for different layers during BERT pre-training sequence
+length 128 (sequence length 512 has similar patterns). Only the cls.seq_relationship.bias
+has a very unstable scaling coefficient. This is because this bias only has two elements, representing
+the two states of whether the two sequences are next to each other.
+
+Figure 5 presents LAMB’s variance norms for different layers during BERT pre-training sequence
+length 128 (sequence length 512 has similar patterns). We believe that there are two reasons why
+LAMB’s varaince terms are less stable: 1) LAMB has larger batch size, smaller number of steps, and
+layerwise adaptive learning rates compared to Adam. 2) Because LAMB requires the calculation of
+the scaling coefficient for each layer, we cannot fuse all the variance together as in Adam. And each
+separate variance could have less stable norm compared to a single fused variance.
+
+A.4 DESIGN OF THE EXPERIMENTAL ALGORITHM IN SECTION 3.4
+
+Because LAMB’s scaling coefficient is essentially part of the learning rate (and it’s just a scalar), updating this coefficient would not affect communication compression’s error compensation mechanism
+
+
+-----
+
+0.5
+
+Word embeddings LayerNorm.w
+Position embeddings LayerNorm.b
+
+0.4 Token type embeddings
+
+0.3
+
+0.2
+
+LAMB scaling coeff0.1
+
+0.00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+0.5
+
+Pre-attn LayerNorm.w QKV.b
+Pre-attn LayerNorm.b Attn output.w
+
+0.4 QKV.w Attn output.b
+
+0.3
+
+0.2
+
+LAMB scaling coeff0.1
+
+0.00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+0.5
+
+Post-attn LayerNorm.w Intermediate.b
+Post-attn LayerNorm.b Output.w
+
+0.4 Intermediate.w Output.b
+
+0.3
+
+0.2
+
+LAMB scaling coeff0.1
+
+0.00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+(a) BertEmbeddings
+
+
+(b) First BertLayer, part 1
+
+
+(c) First BertLayer, part 2
+
+
+0.5
+
+dense_act.w LayerNorm.b
+dense_act.b bias
+
+0.4 LayerNorm.w
+
+0.3
+
+0.2
+
+LAMB scaling coeff0.1
+
+0.00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+0.5
+
+seq_relationship.w
+seq_relationship.b
+
+0.4
+
+0.3
+
+0.2
+
+LAMB scaling coeff0.1
+
+0.00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+(d) BertLMPredictionHead
+
+
+(e) cls.seq_relationship
+
+
+Figure 4: LAMB’s scaling coefficients (c[(]t[l][)] in (1)) for different layers during BERT-Large pre-training
+seqlen 128 (5993 steps in total). Since all 24 BertLayer have similar patterns, we just present the first
+one. We set the lower/upper bound of the scaling coefficient (cmin and cmax in (1)) at 0.01 and 0.3.
+
+
+
+
+10 3
+
+10 4
+
+10 5
+
+10 6
+
+LAMB variance norm10 7 Word embeddingsPosition embeddings LayerNorm.wLayerNorm.b
+
+10 8 Token type embeddings
+
+0 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+10 4
+
+10 5
+
+10 6
+
+10 7
+
+10 8
+
+LAMB variance norm1010 109 Pre-attn LayerNorm.wPre-attn LayerNorm.bQKV.w QKV.bAttn output.wAttn output.b
+
+0 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+10 4
+
+10 5
+
+10 6
+
+10 7
+
+10 8
+
+10 9
+
+LAMB variance norm10 10 Post-attn LayerNorm.wPost-attn LayerNorm.b Intermediate.bOutput.w
+
+10 11 Intermediate.w Output.b
+
+0 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+(a) BertEmbeddings
+
+
+(b) First BertLayer, part 1
+
+
+(c) First BertLayer, part 2
+
+
+10 3
+
+10 4
+
+10 5
+
+10 6
+
+LAMB variance norm10 7 dense_act.wdense_act.b LayerNorm.bbias
+
+10 8 LayerNorm.w
+
+0 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+10 3
+
+10 4
+
+LAMB variance norm10 5 seq_relationship.w
+
+seq_relationship.b
+
+0 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+(d) BertLMPredictionHead
+
+
+(e) cls.seq_relationship
+
+
+Figure 5: LAMB’s variance norms for different layers during BERT-Large pre-training seqlen 128.
+Since all 24 BertLayer have similar patterns, we just present the first one. The y-axis is in log scale.
+
+as long as the change is small enough between two steps.[5] However, we find that it’s challenging to
+update this coefficient during compression stage because in LAMB’s algorithm, updating this scaling
+coefficient requires both momentum and variance term. However, the error compensation mechanism
+requires freezing the variance term at the beginning of the compression stage due to its nonlinear
+dependency to the gradient. In addition, we find that due to the error compensation mechanism, the
+norm of some layers’ momentum term could become larger/smaller compared to the uncompressed
+case. As a result, we find that updating LAMB’s scaling coefficients during compression stage based
+
+5In fact as described in Section 4, the proposed 1-bit LAMB algorithm does require updating LAMB’s
+scaling coefficient during compression stage, but in a way different from original LAMB algorithm.
+
+
+-----
+
+1K 2K 3K 4K 5K 6K
+
+|Col1|Post-attn LayerNorm.w Intermediate.b Post-attn LayerNorm.b Output.w|Col3|
+|---|---|---|
+|Intermediate.w Output.b|Intermediate.w Output.b||
+||||
+||||
+||||
+||||
+
+
+Post-attn LayerNorm.w Intermediate.b
+Post-attn LayerNorm.b Output.w
+Intermediate.w Output.b
+
+Steps
+
+(c) First BertLayer, part 2
+
+
+6
+
+Word embeddings LayerNorm.w
+
+5 Position embeddings LayerNorm.b
+
+Token type embeddings
+
+4
+
+3
+
+2
+
+1-bit LAMB scaling ratio1
+
+00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+6
+
+Pre-attn LayerNorm.w QKV.b
+
+5 Pre-attn LayerNorm.b Attn output.w
+
+QKV.w Attn output.b
+
+4
+
+3
+
+2
+
+1-bit LAMB scaling ratio1
+
+00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+(a) BertEmbeddings
+
+
+(b) First BertLayer, part 1
+
+
+6
+
+dense_act.w LayerNorm.b
+
+5 dense_act.b bias
+
+LayerNorm.w
+
+4
+
+3
+
+2
+
+1-bit LAMB scaling ratio1
+
+00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+6
+
+seq_relationship.w
+
+5 seq_relationship.b
+
+4
+
+3
+
+2
+
+1-bit LAMB scaling ratio1
+
+00 1K 2K 3K 4K 5K 6K
+
+Steps
+
+
+(d) BertLMPredictionHead
+
+
+(e) cls.seq_relationship
+
+
+Figure 6: 1-bit LAMB scaling ratios (rt[(][l][)] in Algorithm 1) for different layers during BERT pretraining sequence length 128. Since all 24 BertLayer have similar patterns, we just present the first
+one. The number of warmup steps is 1K out of 5993 total steps. We set the clipping configurations
+of the scaling ratio (rmin, rmax, rthreshold in Algorithm 1) at 0.5, 4.0, 0.1.
+
+on original LAMB algorithm would produce suboptimal results and slower convergence speed. Thus
+for Section 3.4’s experimental algorithm, we stop updating LAMB’s scaling coefficients during
+compression stage, and just use a calculated scaling coefficient moving average at the end of the
+warmup stage. For compression stage we also tried communicating based on 1-bit compressed
+gradient, but it leads to much slower convergence speed. We believe it’s because gradients are less
+stable, which could lead to higher compression error and slower convergence.
+
+
+A.5 1-BIT LAMB ALGORITHM DESIGN AND IMPLEMENTATION DETAILS
+
+Figure 6 presents 1-bit LAMB scaling ratios (rt[(][l][)] in Algorithm 1) for different layers during BERT
+pre-training sequence length 128 (sequence length 512 has similar patterns). When comparing with
+Figure 5, we find that for those layers with less stable varaince (e.g., 3 kinds of embeddings, weights
+in BertLayer), the corresponding 1-bit LAMB scaling ratios are also larger. As a result 1-bit LAMB is
+able to adaptively update LAMB scaling coefficients during compression according to the difference
+between the frozen and fresh variance.
+
+
+A.5.1 REDUCING NUMBER OF COMMUNICATIONS BY MOMENTUM FUSION
+
+Different from Adam, LAMB has the scaling coefficients that need to be updated separately for each
+layer. For the communication of the compressed momentum during 1-bit LAMB’s compression
+stage, if we also communicate separately for each layer, the number of communications (which is
+302 for BERT-Large model) will greatly affect the overall performance. Thus we fuse all layers’
+momentum into a contiguous 1D buffer and just do one communication over this fused momentum. This fused momentum is not a duplication, but a different “view” of all layers’ momentum.
+We implement this momentum fusion by torch._utils._flatten_dense_tensors and
+torch._utils._unflatten_dense_tensors.
+
+
+A.5.2 REDUCING COMPRESSION ERROR BY MOMENTUM SCALING
+
+We find that after momentum fusion, the compression error increase a lot for some layers which
+greatly increase the chance of divergence. This is because: 1) When communicating base on the
+fused momentum, all layers’ momentum will be compressed to the same scale due to the nature of
+
+
+-----
+
+30000
+
+25000
+
+20000
+
+15000
+
+10000
+
+5000
+
+
+30000
+
+25000
+
+20000
+
+15000
+
+10000
+
+5000
+
+
+0 8K 16K 32K 64K
+
+|LAMB|Col2|
+|---|---|
+|1-bit LAMB (MPI) 1-bit LAMB (NCCL)||
+|||
+|||
+|||
+|||
+
+
+LAMB
+1-bit LAMB (MPI)
+1-bit LAMB (NCCL)
+
+Batch size
+
+(a) 256 GPUs on Ethernet cluster
+
+
+0 8K 16K 32K 64K
+
+|LAMB|Col2|
+|---|---|
+|1-bit LAMB (MPI) 1-bit LAMB (NCCL)||
+|||
+|||
+|||
+|||
+
+
+LAMB
+1-bit LAMB (MPI)
+1-bit LAMB (NCCL)
+
+Batch size
+
+(b) 128 GPUs on InfiniBand cluster
+
+
+Figure 7: Comparing MPI and NCCL-based compressed communication backend implementations
+based on performance of BERT pre-training seqlen 128.
+
+1-bit compression (representing the tensor by ±1 signs and a single scale). Thus the layers with
+very small/large momentum scale will have larger compression error; 2) Due to LAMB’s layerwise
+adaptive learning rate, each layer is learning at different speed, which could further increase the
+variance of momentum scale among layers. We solve this issue by computing an average momentum
+scale at the end of warmup stage and using it to compute a momentum scale coefficient for each layer.
+During the compression stage, we multiply each layer’s local momentum by its scale coefficient,
+then do the compressed communication, then divide each layer’s global momentum by the same
+scale coefficient. By performing this momentum scaling, all layers’ momentum will have similar
+scales when passed to the compressed communication. Thus we are able to greatly reduce the
+compression error and chance of divergence. Since the momentum scale coefficients are fixed during
+the compression stage, it won’t affect 1-bit compression’s error compensation mechanism.
+
+
+A.6 COMPARING MPI AND NCCL-BASED COMMUNICATION BACKEND
+
+All of the results in main paper are evaluated with the NCCL-based compressed communication
+backend implementation. Figure 7 presents the performance comparison between MPI and NCCLbased implementations. Compared to the MPI-based implementation introduced in the 1-bit Adam
+work, our NCCL-based implementation is able to provide better performance on the Ethernet cluster
+(where OpenMPI library is used for MPI backend) and on par performance on the InfiniBand cluster
+(where MVAPICH2-GDR is used for MPI backend).
+
+
+A.7 ADDITIONAL CONVERGENCE ANALYSIS ABOUT NUMBER OF WORKERS AND BATCH SIZE
+
+This section provides additional convergence analysis on BERT pre-training and SQuAD fine-tuning.
+First we investigate whether the number of workers/GPUs affect the convergence of 1-bit LAMB.
+Table 6 presents the SQuAD average/max F1 scores using the BERT models pre-trained with LAMB
+and 1-bit LAMB optimizers, with different number of GPUs, and with the same training parameters
+described in Section 6. Results show that both LAMB and 1-bit LAMB achieve similar SQuAD F1
+scores under different number of workers, and 1-bit LAMB always provides better results.
+
+Next, we investigate whether the batch size affects the convergence of 1-bit LAMB. In main paper
+we compared LAMB and 1-bit LAMB when pre-training BERT with batch size 64K/32K at seqlen
+128/512. Here we compare them at batch size 16K and 4K. At batch size 16K, for LAMB we use
+the same training parameters described in Appendix A.1, and for 1-bit LAMB we set the number of
+warmup steps as 4000 (14%) for seqlen 128 and 475 (15%) for seqlen 512. At batch size 4K, for
+LAMB we follow the original work and use 112500/12500 steps for seqlen 128/512, weight decay =
+0.01, linear LR warmup and decay, learning rate = 1.77 × 10[−][3], 2.5% LR warmup, clipping configs
+(cmin and cmax in (1)) as 0.1 and 1. For 1-bit LAMB we set the number of warmup steps as 16000
+(14%) for seqlen 128 and 1900 (15%) for seqlen 512. For 1-bit LAMB’s other hyperparameters in
+Algorithm 1, we keep them the same under all batch sizes: β3 = 0.9, rmin = 0.5, rmax = 4.0, and
+_rthreshold = 0.1. As shown in Table 7, results show that 1-bit LAMB provides better SQuAD F1_
+scores than LAMB under all batch sizes.
+
+
+-----
+
+Table 6: SQuAD average/max dev set F1 scores over 32 runs using the BERT models pretrained (batch size 64K/32K at seqlen 128/512) with different optimizers and different number
+of GPUs/workers. The first column is from the original LAMB work. The last two columns are our
+experiments using the same training parameters.
+
+|SQuAD Avg./Max F1|LAMB (You et al., 2020) LAMB 1-bit LAMB|
+|---|---|
+|128 GPUs 64 GPUs (from Table 2) 32 GPUs|–/90.584 90.257/90.557 90.494/90.740 –/90.584 90.265/90.555 90.524/90.788 –/90.584 90.263/90.584 90.469/90.811|
+
+
+
+Table 7: SQuAD average/max dev set F1 scores over 32 runs using the BERT models pre-trained
+with different optimizers and different pre-training batch sizes. The first column is from the original
+LAMB work. The last two columns are our experiments using the same training parameters.
+
+|SQuAD Avg./Max F1|LAMB (You et al., 2020) LAMB 1-bit LAMB|
+|---|---|
+|Bsz 64K/32K for seqlen 128/512 (from Table 2) Bsz 16K/16K for seqlen 128/512 Bsz 4K/4K for seqlen 128/512|–/90.584 90.265/90.555 90.524/90.788 –/91.345 90.716/91.119 90.906/91.142 –/91.137 90.917/91.084 90.942/91.171|
+
+
+
+A.8 ADDITIONAL CONVERGENCE ANALYSIS: RESNET-50 ON CIFAR100
+
+This section provides additional analysis of training ResNet-50 on CIFAR100. Because ResNet-50
+is much smaller than BERT-Large and because we use 8 GPUs on a single node for the training,
+1-bit LAMB and LAMB have very similar throughput. Thus this experiment focus on whether 1-bit
+LAMB can achieve the same convergence as LAMB under the same training hyperparameters. For
+both LAMB and 1-bit LAMB, we use 250 epochs (about 12K steps), batch size 1K, learning rates
+_∈{0.005, 0.01, 0.02}, linear LR warmup in the first 1K steps, no LR decay, weight decay = 0.01. For_
+LAMB we set the clipping configs (cmin and cmax in (1)) as 0.01 and 0.3. For 1-bit LAMB we set
+the number of warmup steps as 1K (8%), and set other hyperparameters in Algorithm 1 as: β3 = 0.9,
+_rmin = 0.5, rmax = 2.0, and rthreshold = 0.1. Figure 8 presents the sample-wise training loss and_
+testing accuracy, and Table 8 presents the final testing accuracy. Results show that under all three
+learning rates, 1-bit LAMB provides on par or better convergence and final accuracy than LAMB.
+
+A.9 THEORETICAL ANALYSIS
+
+Notice that for 1-bit LAMB, we only use original LAMB at warm-up, and then we essentially run
+error-compensated momentum SGD with coordinate-dependent learning rate **_vγ_**
+_√_ _Tw . Therefore here_
+
+we consider the LAMB-based warm-up phase as a way to find a good precondition variance termto be used in the compression phase. Below we are going to introduce the convergence rate for the vTw
+compression phase after warm-up. We first introduce some necessary assumptions, then we present
+the theoretical guarantee of the convergence rate for 1-bit LAMB.
+**Assumption 1. We make the following assumptions:**
+
+_1. Lipschitzian gradient: f_ (·) is assumed to be with L-Lipschitzian gradients, which means
+
+_∥∇f_ (x) −∇f (y)∥≤ _L∥x −_ **_y∥,_** _∀x, ∀y,_
+
+_2. Bounded variance: The variance of the stochastic gradient is bounded_
+
+Eζ(i)∼Di _∥∇F_ (x; ζ[(][i][)]) −∇f (x)∥[2] _≤_ _σ[2],_ _∀x, ∀i._
+
+_3. Bounded magnitude of error for_ _ω[_ ]: The magnitude of worker’s local errors δt[(][i][)] _and_
+_C_ _·_
+_the server’s global error δt, are assumed to be bounded by a constant ϵ_
+
+
+_n_ _n_
+
+Eω **_δt[(][i][)]_** _≤_ 2[ϵ] _[,]_ Eω **_δt_** _≤_ 2[ϵ] _[,]_ _∀t, ∀i._
+_k=1_ _i=1_
+
+X X
+
+The most important reason we use the third assumption above is that for 1-bit compression, the
+signal-to-noise assumption does not hold if there is only one non-zero element in the tensor. In (Tang
+
+
+-----
+
+0.800
+
+0.775
+
+0.750
+
+0.725
+
+0.700
+
+0.675
+
+0.650
+
+0.625
+
+0.600
+
+
+|LAMB LR=0.005 1-bit LAMB LR=0.005|Col2|
+|---|---|
+|LAMB LR=0.01 1-bit LAMB LR=0.01||
+|LAMB LR=0.02 1-bit LAMB LR=0.02||
+|||
+|||
+|||
+|||
+|||
+|||
+|3M 6M Sam|9M 12M ples|
+
+
+LAMB LR=0.005 1-bit LAMB LR=0.005
+LAMB LR=0.01 1-bit LAMB LR=0.01
+LAMB LR=0.02 1-bit LAMB LR=0.02
+
+(b) Testing accuracy
+
+
+10[0]
+
+10 2
+
+10 4
+
+10 6
+
+Training loss LAMB LR=0.005 1-bit LAMB LR=0.005
+
+10 8 LAMB LR=0.01 1-bit LAMB LR=0.01
+
+LAMB LR=0.02 1-bit LAMB LR=0.02
+
+10 10
+
+0 3M 6M 9M 12M
+
+Samples
+
+
+(a) Training loss
+
+
+Figure 8: Sample-wise training loss and testing accuracy for ResNet-50 on CIFAR100.
+
+
+Table 8: Final testing accuracy for ResNet-50 on CIFAR100.
+
+Final testing accuracy LAMB 1-bit LAMB
+
+LR=0.005 0.68 0.68
+LR=0.01 0.68 0.73
+LR=0.02 0.66 0.69
+
+
+et al., 2019), authors proved that our assumption is equivalent to the signal-to-noise assumption when
+the gradient magnitude is upper bounded.
+
+Next we present the main theorem for 1-bit LAMB.
+**Theorem 1. Under Assumption 1, for 1-bit LAMB, we have the following convergence rate**
+
+_T_
+
+8γmax[3] _[L][2]_
+1 _γmaxLVmax_ E _f_ (xt)
+ _−_ _−_ (1 − _β)[2]γmin_  _t=0_ _∥∇_ _∥[2]_
+
+X
+
++ [24][γ]max[3] _[L][2][V][ 3]max[ϵ][2][T]_ + _[LV][max][γ]max[2]_ _[σ][2][T]_ + [8][γ]max[3] _[L][2][V][ 2]max[σ][2][T]_ _,_ (3)
+
+_≤_ [2][E][f] [(][x][1][)]γ[ −]min[2][E][f] [(][y][∗][)] (1 _β)[2]γmin_ _nγmin_ _n(1_ _β)[2]γmin_
+
+_−_ _−_
+
+
+_where V = diag_ 1/vT[(1)]w _[,][ 1][/][v]T[(2)]w_ _[,][ · · ·][,][ 1][/][v]T[(][d]w[)]_
+
+
+
+_is a diagonal matrix spanned by vTw ._
+
+
+Here 1/v is a moving sum over all history (∇f (x))[2], not ∥∇f (x)∥. Therefore it will not approach to
+0 for the following two reasons: i) We stop updating v after the warmup stage, which means ∇f (x)
+at this time will not approach 0 since it has not converged yet; ii) Since β2 = 0.999, this means v is
+heavily dependent to the history gradients, therefore even though ∇f (x) approaches to 0, v itself
+will still taking a time to decay to 0. Therefore it is reasonable for us to assume an upper bound for
+_Vmax_
+
+Given the generic result in Theorem 1, we obtain the convergence rate for 1-bit LAMB with appropriately chosen learning rate γ.
+**Corollary 1. Under Assumption 1, for 1-bit LAMB, choosing γ** = _γmax_ = _γmin_ =
+1−β 1 2
+
+16LVmax+σ[√] _Tn_ [+][T] 3 ϵ 3 _[,][ we have the following convergence rate]_
+
+
+_T −1_
+
+E∥∇f (xt)∥V[2] [≲]
+_t=0_
+
+X
+
+
+_Vmax_
+
+
+2
+
+_σ_ 3
+
++ _[ϵ]_ 2
+_nT_ _T_ 3 [+ 1]T [,]
+
+
+_where we treat f_ (x1) _f_ _, β and L as constants._
+_−_ _[∗]_
+
+This result suggests that: 1-bit LAMB essentially admits the same convergence rate as distributed
+SGD in the sense that both of them admit the asymptotical convergence rate O(1/√nT ), which
+
+means we can still achieve linear speedup w.r.t. the number of workers n.
+
+For theoretical analysis, we follow the framework of previous work (Tang et al., 2021). Below we
+first summarize the updating rule of 1-bit LAMB, followed by the proof of Theorem 1, then the proof
+of Corollary 1.
+
+
+-----
+
+A.9.1 PROOF TO THE UPDATING FORM
+
+Since our algorithm is equivalent to running a parameter-server prototype communication on each
+chunk of the gradient, so below we will assume a parameter-server model (which means the tensor
+is not required to be divided into n chunks) for simplicity. Although we use a layer-wise updating
+strategy in 1-bit LAMB, for the simplicity of theoretical analysis, we consider the case where we use
+the same updating rule for all the layer, but our results can be easily applied to this layer-wise case.
+
+According to the algorithm description in Algorithm 1, at iteration t + 1, the updating step of the
+momentum term mt+1 can be divided into two steps:
+
+1. Local Update and Compress: each worker locally update mt and use the error-compensate
+strategy for compressing.
+
+**_m[(]t[i][)]_** =βmt + (1 _β)gt[(][i][)]_
+_−_
+
+**_m[(]t+[i][)]_** 2[1] [=][C][ω] m[(]t[i][)] + _[c]c[t]t[−]−[2]1_ **_δt[(][i][)]_**
+
+**_δt[(]+1[i][)]_** [=][m]t[(][i][)] + δt[(][i][)] _−_ **_m[(]t+[i][)]_** 2[1] _[.]_
+
+
+2. All workers send its m[(]t+[i][)] [1]2 [to the server. The server takes the average over them and]
+
+compress it again using error-compensation.
+
+
+**_mt+ 12_** [= 1]n
+
+
+**_m[(]t+[i][)]_** 2[1]
+_i=1_
+
+X
+
+
+**_mt+1 =Cω_** mt+ 12 [+][ c]c[t]t[−]−[2]1 **_δt_**
+
+**_δt+1 =mt+ 12_** [+][ δ][t][ −] **_[m][t][+1][.]_**
+
+3. The server broadcast mt+1 to all workers, and all workers update the local model according
+to
+
+**_mt+1_**
+**_xt+1 = xt_** **_γct_** **1** _._
+**_−_**
+_−_ **_vT[2]w_**
+q
+
+
+Notice that here we do not include the updating rule for _ct_ because for the following part
+_{_ _}_
+we will only view it as a scaling factor.
+
+So actually the updating rule above can be summarized as
+
+
+**_mt+1 =Cω_** mt+ 12 [+][ c]c[t]t[−]−[2]1 **_δt_**
+
+=mt+ 12 [+][ c]ct[t][−]1[2] **_δt −_** **_δt+1_** (from the definition of δt+1)
+
+_−_
+
+_n_
+
+= n[1] _i=1_ _Cω_ m[(]t[i][)] + _[c]c[t]t[−]−[2]1_ **_δt[(][i][)]_** + _[c]c[t]t[−]−[2]1_ **_δt −_** **_δt+1_**
+
+Xn
+
+= [1] **_m[(]t[i][)]_** + _[c][t][−][2]_ **_δt[(][i][)]_** **_δt[(]+1[i][)]_** + _[c][t][−][2]_ **_δt_** **_δt+1_** (from the definition of δt[(]+1[i][)] [)]
+
+_n_ _i=1_  _ct−1_ _−_  _ct−1_ _−_
+
+X
+
+
+=βmt + [1][ −] _[β]_
+
+
+_n_
+
+**_gt[(][i][)]_** + _c[c]t[t][−]1[2]_
+_i=1_ _−_
+
+X
+
+**_gt = [1]_**
+
+_n_
+
+**_δt = [1]_**
+
+
+**_δt[(][i][)]_** + δt
+_i=1_
+
+X
+
+_n_
+
+**_gt[(][i][)]_**
+_i=1_
+
+Xn
+
+**_δt[(][i][)]_** + δt,
+_i=1_
+
+X
+
+
+**_δt[(]+1[i][)]_** [+][ δ][t][+1]
+_i=1_
+
+X
+
+
+Denote
+
+
+-----
+
+the update rule of mt can be summarized as
+
+
+**_mt = βmt_** 1 + (1 _β)gt +_ _[c][t][−][2]_ **_δt_** 1 **_δt,_**
+_−_ _−_ _ct_ 1 _−_ _−_
+
+_−_
+
+
+and
+
+**_xt+1 = xt_** _γV ct_ 1mt,
+_−_ _−_
+
+where V = diag(1/[√]v1, 1/[√]v2, _, 1/[√]vd) is the a diagonal matrix that spanned with vTw_ . In
+_· · ·_
+order to simlify the notation, we define γt := γct 1 as a time-varying learning rate, which reduces
+_−_
+the updating rule above into
+
+
+**_mt =βmt_** 1 + (1 _β)gt +_ _[γ][t][−][1]_ **_δt_** 1 **_δt,_**
+_−_ _−_ _γt_ _−_ _−_
+
+**_xt+1 =xt −_** _γtV mt._
+
+
+A.9.2 PROOF TO THEOREM 1
+
+Notice that in for 1-bit LAMB, the learning rate for each coordinate is different. In order to simplify
+our analysis, we instead consider another function that is defined as
+
+1
+_H(z) = F_ (V 2 z),
+
+also
+
+1
+_h(z) = f_ (V 2 z),
+
+where V is a diagonal matrix.
+
+In this case we have
+
+1 1
+_V_ 2 ∇f (V 2 z) = ∇h(z).
+
+Therefore the updating rule of 1-bit LAMB in the view of h(·) is
+
+1 1 1 1
+_V_ 2 zt+1 = V 2 zt − _γV_ 2 _V_ 2 mt _._
+ 
+
+It can be easily verified that
+
+
+_β[t][−][s]gs +_
+_s=0_
+
+X
+
+
+_s=0_ _β[t][−][s](δs−1 −_ **_δs)_**
+
+X
+
+
+**_mt =(1 −_** _β)_
+
+=(1 − _β)_
+
+
+_t_
+
+_β[t][−][s][ 1]_
+
+_n_
+
+_s=0_
+
+X
+
+
+1
+_∇F_ (V 2 zt; ξt[(][i][)][) +]
+_i=1_
+
+X
+
+
+_s=0_ _β[t][−][s](δs−1 −_ **_δs)_**
+
+X
+
+
+which means
+
+1
+_V_ 2 mt =(1 − _β)_
+
+=(1 − _β)_
+
+=(1 − _β)_
+
+
+_t_
+
+_β[t][−][s][ 1]_
+
+_n_
+
+_s=0_
+
+X
+
+_t_
+
+_β[t][−][s][ 1]_
+
+_n_
+
+_s=0_
+
+X
+
+
+1 1
+_V_ 2 ∇F (V 2 zt; ξt[(][i][)][) +]
+_i=1_
+
+X
+
+
+1
+_s=0_ _β[t][−][s]V_ 2 (δs−1 − **_δs)_**
+
+X
+
+
+1 1
+_H(V_ 2 zt; ξt[(][i][)][) +] _β[t][−][s]V_ 2 (δs 1 **_δs)_**
+_i=1_ _∇_ _s=0_ _−_ _−_
+
+X X
+
+
+_β[t][−][s]gs(z) +_
+_s=0_
+
+X
+
+
+1
+_s=0_ _β[t][−][s]V_ 2 (δs−1 − **_δs),_**
+
+X
+
+
+where gs(z) is the corresponding averaged stochastic gradient computed in the view of loss function
+_h(·)._
+
+1
+Then, if we define mt(z) = V 2 mt, the updating rule of mt(z) admits
+
+1 1
+**_mt(z) = βmt−1(z) + (1 −_** _β)gt(z) + V_ 2 δt−1 − _V_ 2 δt, (4)
+
+
+-----
+
+and
+
+1 1 1
+_V_ 2 zt+1 =V 2 zt − _γtV_ 2 mt(z)
+**_zt+1 =zt −_** _γtmt(z)._ (5)
+
+From (4) and (5) we shall see that using different learning rate for each coordinate is equivalent
+to optimizing a new loss function defined on scaling the original coordinate and using a uniform
+learning for all coordinates. Therefore below we first study the behavior of the error-compensated
+momentum SGD using a coordinate-independent time-varying learning rate.
+
+
+Below are some critical lemmas for the proof of Theorem 1.
+
+**Lemma 1. Given two non-negative sequences {at}t[∞]=1** _[and][ {][b][t][}]t[∞]=1_ _[that satisfying]_
+
+
+_ρ[t][−][s]bs,_ (6)
+_s=1_
+
+X
+
+
+_at =_
+
+
+_with ρ ∈_ [0, 1), we have
+
+_Dk :=_
+
+_Proof. From the definition, we have_
+
+
+_a[2]t_
+_t=1_ _[≤]_
+
+X
+
+
+_b[2]s[.]_
+_s=1_
+
+X
+
+
+(1 − _ρ)[2]_
+
+
+_k−s_
+
+_ρ[t]bs_
+_t=0_ _≤_
+
+X
+
+
+_bs_ (7)
+
+1 _ρ_ _[,]_
+_−_
+
+
+_ρ[t][−][s]bs =_
+_s=1_
+
+X
+
+
+_ρ[t][−][s]bs =_
+_t=s_
+
+X
+
+
+_Sk =_
+
+_Dk =_
+
+
+_t=1_
+
+_k_
+
+_t=1_
+
+X
+
+_k_
+
+_t=1_
+
+X
+
+_k_
+
+_t=1_
+
+X
+
+_k_
+
+_t=1_
+
+X
+
+
+_s=1_
+
+
+_s=1_
+
+
+_s=1_
+
+
+_ρ[t][−][s]bs_
+_s=1_
+
+X
+
+
+_ρ[t][−][r]br_
+_r=1_
+
+X
+
+
+_ρ[2][t][−][s][−][r]bsbr_
+
+_s=1_ _r=1_
+
+X X
+
+_t_ _t_
+
+_s_ [+][ b]r[2]
+_ρ[2][t][−][s][−][r][ b][2]_
+
+2
+
+_s=1_ _r=1_
+
+X X
+
+_t_ _t_
+
+_ρ[2][t][−][s][−][r]b[2]s_
+
+_s=1_ _r=1_
+
+X X
+
+
+_ρ[t][−][s]b[2]s_
+_s=1_
+
+X
+
+
+1 − _ρ_
+
+
+_t=1_
+
+
+_b[2]s[,]_ (due to (7))
+_s=1_
+
+X
+
+
+_≤_ (1 _ρ)[2]_
+
+_−_
+
+which completes the proof.
+
+
+**Lemma 2. Under Assumption 1, for any sequence that follows the updating rule of**
+
+
+**_xt+1 =xt −_** _γtmt_
+
+**_mt =βmt_** 1 + (1 _β)gt +_ _[γ][t][−][1]_ **_δt_** 1 **_δt,_**
+_−_ _−_ _γt_ _−_ _−_
+
+
+_if_
+
+
+Egt = ∇f (xt), E∥gt −∇f (xt)∥[2] _≤_ _[σ]n [2]_ _[,]_ E∥δt∥[2] _≤_ _ϵ[2],_ _∀t,_
+
+_∥∇f_ (x) −∇f (y)∥≤ _L∥x −_ **_y∥,_** _∀x, ∀y,_
+
+
+-----
+
+_then we can guarantee that_
+
+2γ[2]L[2]
+1 _γL_
+_−_ _−_ (1 _β)[2]_
+ _−_
+
+_≤_ [2][E][f] [(][x][1][)][ −]γ [2][E][f] [(][x][∗][)]
+
+
+E∥∇f (xt)∥[2]
+
+ _t=0_
+X
+
++ [6][γ][2][L][2][ϵ][2][T]
+
+(1 − _β)[2][ +][ Lγσ]n[2][T]_
+
+
++ [2][γ][2][L][2][σ][2][T]
+
+_n(1 −_ _β)[2]_
+
+
+_Proof. Instead of investigating xt directly, we introduce the following sequence_
+
+
+**_yt =xt_**
+_−_ _[γ][t][m][t]1[ +][ γ]β[t][−][1][δ][t]_
+
+_−_
+
+
+The updating rule of yt admits
+
+
+_γt_
+**_yt+1_** **_yt =xt+1_** **_xt_**
+_−_ _−_ _−_ 1 _β_ [(][m][t][+1][ −] **_[m][t][) +][ γ][t][δ][t][+1]1[ −]_** _β[γ][t][−][1][δ][t]_
+
+_−_ _−_
+
+_γt_
+= _γtmt_ **_δt) +_** _[γ][t][δ][t][+1][ −]_ _[γ][t][−][1][δ][t]_
+_−_ _−_ 1 _β_ [(][β][m][t][ + (1][ −] _[β][)][g][t][+1][ −]_ **_[δ][t][+1][ +][ γ]γ[t][−]t_** [1] 1 _β_
+
+_−_ _−_
+
+= _γtgt+1._
+_−_
+
+Since f (·) is with L-Lipschitzian, we have
+
+Ef (yt+1) − Ef (yt)
+
+E _f_ (yt), yt+1 **_yt_** + _[L]_
+_≤_ _⟨∇_ _−_ _⟩_ 2 [E][ ∥][y][t][+1][ −] **_[y][t][∥][2]_**
+
+= _γtE_ _f_ (yt), gt+1 + _[Lγ]t[2]_
+_−_ _⟨∇_ _⟩_ 2 [E][∥][g][t][+1][∥][2]
+
+= _γtE_ _f_ (yt), _f_ (xt+1) + _[Lγ]t[2]_
+_−_ _⟨∇_ _∇_ _⟩_ 2 [E][∥][g][t][+1][∥][2]
+
+= _t_
+_−_ _[γ]2[t]_ [E][∥∇][f] [(][x][t][+1][)][∥][2][ −] _[γ]2[t]_ [E][∥∇][f] [(][y][t][)][∥][2][ +][ γ]2[t] [E][∥∇][f] [(][x][t][+1][)][ −∇][f] [(][y][t][)][∥][2][ +][ Lγ]2 [2] [E][∥][g][t][+1][∥][2]
+
+_t_
+
+_≤−_ _[γ]2[t]_ [E][∥∇][f] [(][x][t][+1][)][∥][2][ +][ Lγ]2 _[t]_ [E][∥][x][t][+1][ −] **_[y][t][∥][2][ +][ Lγ]2_** [2] [E][∥][g][t][+1][∥][2]
+
+_t_ _[L][2]_ (2 _β)mt_ _γtγ−t_ 1 **_[δ][t][−][1]_** 2 _t_
+
+= E _−_ + + _[Lγ][2]_
+_−_ _[γ]2[t]_ [E][∥∇][f] [(][x][t][+1][)][∥][2][ +][ γ][3]2 1 _β_ 1 _β_ 2 [E][∥][g][t][+1][∥][2]
+
+_−_ _−_
+
+4γt[3][L][2] 4γt[3][L][2] _t_
+
+(rthreshold < 1)
+
+_≤−_ _[γ]2[t]_ [E][∥∇][f] [(][x][t][+1][)][∥][2][ +] (1 _β)[2][ E][∥][m][t][∥][2][ +]_ (1 _β)[2][ E][∥][δ][t][−][1][∥][2][ +][ Lγ]2_ [2] [E][∥][g][t][+1][∥][2]
+
+_−_ _−_
+
+4γt[3][L][2] 4γt[3][ϵ][2] _t_
+
+_≤−_ _[γ]2[t]_ [E][∥∇][f] [(][x][t][+1][)][∥][2][ +] (1 _β)[2][ E][∥][m][t][∥][2][ +]_ (1 _β)[2][ +][ Lγ]2_ [2] [E][∥][g][t][+1][∥][2]
+
+_−_ _−_
+
+4γt[3][L][2] 4γt[3][ϵ][2] _t_ _t_ _[σ][2]_
+
+_._
+
+_≤−_ _[γ]2[t]_ [E][∥∇][f] [(][x][t][+1][)][∥][2][ +] (1 _β)[2][ E][∥][m][t][∥][2][ +]_ (1 _β)[2][ +][ Lγ]2_ [2] [E][∥∇][f] [(][x][t][+1][)][∥][2][ +][ Lγ]2[2]n
+
+_−_ _−_
+
+Summing up the equation above from t = 0 to t = T we get
+
+
+_T_ _T_
+
+4γt[3][L][2] _t=0_ _[γ]t[3]_ _t=0_ _[γ]t[2]_
+
+Ef (yT +1) Ef (y0) E _f_ (xt) + + _[Lσ][2][ P][T]_
+_−_ _≤_ _−_ [(1][ −] _[γ]2[t][L][)][γ][t]_ _∥∇_ _∥[2]_ (1 _β)[2][ E][∥][m][t][∥][2][ + 4][L][2](1[ϵ][2][ P]β[T])[2]_ 2n
+
+_t=0_ _t=0_
+
+_−_ _−_
+
+X X
+
+Therefore if we γt < 21L [and it’s within certain range][ γ][t][ ∈] [[][γ][min][, γ][max][]][, the equation above leads to]
+
+
+E∥∇f (xt)∥[2]
+_t=0_
+
+X
+
+
+(1 _γmaxL)_
+_−_
+
+
+8γmax[3] _[L][2]_
++
+
+_≤_ [2][E][f] [(][y][0][)][ −]γmin[2][E][f] [(][y][T][ +1][)] (1 _β)[2]γmin_
+
+_−_
+
+
+_T_
+
+max[L][2][ϵ][2][T] max[σ][2][T]
+E **_mt_** + [8][γ][3] + _[Lγ][2]_ _._ (8)
+_∥_ _∥[2]_ (1 _β)[2]γmin_ _nγmin_
+_t=0_
+
+_−_
+
+X
+
+
+-----
+
+Notice that we have
+
+**_mt =(1 −_** _β)_
+
+which by using Lemma 1, we have
+
+
+_β[t][−][s]gs +_
+_s=0_
+
+X
+
+
+_s=0_ _β[t][−][s](δs−1 −_ **_δs)_**
+
+X
+
+
+_T_
+
+_f_ (xt) + _[σ][2][T]_
+_∥∇_ _∥[2]_ _n_
+_t=0_
+
+X
+
+
+2ϵ[2]T
+
+(9)
+(1 _β)[2][ .]_
+_−_
+
+
+2 _[T]_ 2ϵ
+
+**_mt_** **_gt_** + **_δt_** _f_ (xt) + _[σ]_ +
+_∥_ _∥[2]_ _≤_ _∥_ _∥[2]_ (1 _β)[2]_ _∥_ _∥[2]_ _≤_ _∥∇_ _∥[2]_ _n_ (1
+_t=0_ _t=0_ _t=0_ _t=0_
+
+_−_ _−_
+
+X X X X
+
+Combing (8) and (9) together we get
+
+_T_
+
+8γmax[3] _[L][2]_
+1 _γmaxL_ E _f_ (xt)
+_−_ _−_ (1 _β)[2]γmin_ _∥∇_ _∥[2]_
+ _−_  _t=0_
+
+X
+
++ [24][γ]max[3] _[L][2][ϵ][2][T]_ + _[Lγ]max[2]_ _[σ][2][T]_ + [8][γ]max[3] _[L][2][σ][2][T]_
+
+_≤_ [2][E][f] [(][y][0][)][ −]γmin[2][E][f] [(][y][T][ +1][)] (1 _β)[2]γmin_ _nγmin_ _n(1_ _β)[2]γmin_
+
+_−_ _−_
+
++ [24][γ]max[3] _[L][2][ϵ][2][T]_ + _[Lγ]max[2]_ _[σ][2][T]_ + [8][γ]max[3] _[L][2][σ][2][T]_ _._
+
+_≤_ [2][E][f] [(][x][1][)]γ[ −]min[2][E][f] [(][y][∗][)] (1 _β)[2]γmin_ _nγmin_ _n(1_ _β)[2]γmin_
+
+_−_ _−_
+
+
+**_mt_**
+_∥_ _∥[2]_ _≤_
+_t=0_
+
+X
+
+
+**_gt_** +
+_∥_ _∥[2]_
+_t=0_
+
+X
+
+
+**Proof to Theorem 1** Since using a per-coordinate learning rate for loss function f (·) is equivalent
+to use a constant learning for all coordinates but for loss function h(·), the only two thing that change
+are
+
+-  Different L-Lipschitzian coefficient: the L-Lipschitzian coefficient for h(·) is
+
+1 1 1 1 2
+_∥∇h(x) −∇h(y)∥[2]_ = _V_ 2 ∇f (V 2 x) − _V_ 2 ∇f (V 2 y)
+
+1 1 2
+= _f_ (V 2 x) _f_ (V 2 y)
+_∇_ _−∇_ _V_
+
+1 1 2
+_L[2]_ _V_ 2 x _V_ 2 y
+_≤_ _−_ _V_
+
+=L[2] **_x_** **_y_** _V_ [2]
+_∥_ _−_ _∥[2]_
+
+_≤L[2]Vmax[2]_ _[∥][x][ −]_ **_[y][∥][2][.]_**
+
+Therefore the effective L-Lipschitzian coefficient of h(x) is LVmax
+
+
+
+-  Different definition of δt: from (4) we shall see that actually the compression error in the
+1
+view of h( ) is V 2 δt, so in this case we have
+
+_·_
+
+1
+E∥V 2 δt∥[2] _≤_ _Vmaxϵ[2]_
+
+_Proof. From Lemma 2, we have_
+
+_T_
+
+8γmax[3] _[L][2]_
+1 _γmaxLVmax_ E _f_ (xt)
+ _−_ _−_ (1 − _β)[2]γmin_  _t=0_ _∥∇_ _∥[2]_
+
+X
+
++ [24][γ]max[3] _[L][2][V][ 3]max[ϵ][2][T]_ + _[LV][max][γ]max[2]_ _[σ][2][T]_ + [8][γ]max[3] _[L][2][V][ 2]max[σ][2][T]_ _._
+
+_≤_ [2][E][f] [(][x][1][)]γ[ −]min[2][E][f] [(][y][∗][)] (1 _β)[2]γmin_ _nγmin_ _n(1_ _β)[2]γmin_
+
+_−_ _−_
+
+
+A.9.3 PROOF TO COROLLARY 1
+
+_Proof. By choosing γmax = γmin =_ 1−β
+
+16LVmax+σ[√]
+
+
+1 2
+_Tn_ [+][T] 3 ϵ 3 [, we can guarantee that]
+
+
+1 _γL_ max
+_−_ _−_ [8][γ](1[2][L][2][V]β[ 2])[2] _≥_ 2[1] _[.]_
+
+_−_
+
+
+-----
+
+So (3) leads to
+
+_t=0T_ E∥∇f (xt)∥V[2] _[≤]_ [2 (][E][f] [(](1[y][0] −[)][ −]β)[f] [(][y][∗][))] 16LVmax + σr _Tn_ [+][ T] 31 ϵ 32 !
+
+X _σ_ 2 1
+
++ (1 _β)L√T + 2L[2]Vmax[2]_ _L[2]ϵ_ 3 T 3 Vmax[3]
+_−_ _√n + 32_
+
+1 _T_  16LVmax _σ_ _−_ 3[2] 23
+
+E _f_ (xt) _V_ + + T _ϵ_
+
+_T_ _t=0_ _∥∇_ _∥[2]_ _[≤]_ [2 (][E][f] [(](1[y][0] −[)][ −]β)[f] [(][y][∗][))]  _T_ _√nT_ 
+
+X
+
++ (1 − _β)L + [2][L]√[2][V]T[ 2]max_ _√σnT_ + 32L[2]ϵ 23 T _[−]_ 3[2] Vmax[3] _[.]_
+ 
+
+
+Treating f (y1) _f_, β and L as constants, from the inequality above we get
+_−_ _[∗]_
+
+
+_T_
+
+E∥∇f (xt)∥[2] ≲
+_t=0_
+
+X
+
+
+_σ_
+
++ _[ϵ]_
+_nT_ _T_
+
+
+2
+3
+
+2
+3 [+ 1]T [.]
+
+
+It completes the proof.
+
+
+-----
+

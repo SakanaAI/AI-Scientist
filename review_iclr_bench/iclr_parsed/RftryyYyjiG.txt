@@ -1,0 +1,1652 @@
+# EXPLORING EXTREME PARAMETER COMPRESSION
+## FOR PRE-TRAINED LANGUAGE MODELS
+
+
+**Benyou Wang[∗]**
+
+University of Padua
+wang@dei.unipd.it
+
+
+**Yuxin Ren[∗]**
+
+Tsinghua University
+ryx20@mails.tsinghua.edu.cn
+
+
+**Lifeng Shang[†], Xin Jiang, Qun Liu**
+Huawei Noah’s Ark Lab
+Shang.Lifeng,Jiang.Xin,qun.liu@huawei.com
+
+ABSTRACT
+
+Recent work explored the potential of large-scale Transformer-based pre-trained
+models, especially Pre-trained Language Models (PLMs) in natural language processing. This raises many concerns from various perspectives, e.g., financial costs
+and carbon emissions. Compressing PLMs like BERT with negligible performance
+loss for faster inference and cheaper deployment has attracted much attention. In
+this work, we aim to explore larger compression ratios for PLMs, among which
+tensor decomposition is a potential but under-investigated one. Two decomposition
+and reconstruction protocols are further proposed to improve the effectiveness and
+efficiency during compression. Our compressed BERT [1] with 1 7 parameters in
+Transformer layers performs on-par with, sometimes slightly better than the original BERT in GLUE benchmark. A tiny version achieves 96.7% performance of
+/
+BERT-base with 1 48 encoder parameters (i.e., less than 2M parameters excluding the embedding layer) and 2.7× faster on inference. To show that the proposed
+method is orthogonal to existing compression methods like knowledge distillation,
+/
+we also explore the benefit of the proposed method on a distilled BERT.
+
+1 INTRODUCTION
+
+Pre-trained Language Models such as BERT (Devlin et al., 2018) and ALBERT (Lan et al., 2019) have
+significantly improved various NLP tasks with significant improvement. Much recent work (Brown
+et al., 2020; Narayanan et al., 2021; Fedus et al., 2021) explores the potential of super large-scale
+PLMs. However, such large-scale PLMs are both economically and ecologically unfriendly (Bender
+et al., 2021; Patterson et al., 2021). Furthermore, deployment of large-scale PLMs is also challenging
+since (1) a model cannot be fully deployed or stored in a single GPU server, model parallelism would
+consume extra time for network communication among many servers; (2) edge devices may not have
+enough space for storing models; (3) the long inference time cannot support real-time feedback.
+
+Scaling down a model with negligible performance drop would facilitate the real-world applications
+of PLMs in a smaller size, faster inference time, and less network communication cost. For example,
+recent work explores quantization (Zhang et al., 2020; Bai et al., 2020), weights pruning (Hou et al.,
+2020), and knowledge distillation (Jiao et al., 2020; Sanh et al., 2020) for BERT (one of the most
+popular PLMs). We argue that existing methods cannot largely compress large-scale PLMs as stated
+in Sec. 2. In this paper, we aim to explore extreme parameter compression (i.e., bigger compression
+ratios) although they are by definition challenging.
+
+The parameter redundancy in PLMs was demonstrated by (Kovaleva et al., 2019; Michel et al.,
+2019; Voita et al., 2019; Cordonnier et al., 2021), for which we divide into two groups: intra_matrix redundancy and inter-matrix redundancy. The former happens in different heads that are_
+
+∗Benyou and Yuxin contributed to this work equally.
+†Lifeng is the corresponding author.
+[1https://github.com/twinkle0331/Xcompression](https://github.com/twinkle0331/Xcompression)
+
+
+-----
+
+calculated separately, e.g., attentions among heads act on a similar subspace and are therefore lowrank (Cordonnier et al., 2021) – we relate this phenomenon to the so-called ‘decomposability’ defined
+in this paper. Like self-attention layers, decomposability also holds in FFN layers – each FFN layer
+could be decomposed to many independent sub-FFNs (as explained in Appendix B). One example of
+_inter-matrix redundancy happens across different layers, e.g., attention maps among layers might be_
+similar (Clark et al., 2019; Vig, 2019; Rogers et al., 2020).
+
+Exploration of main weight matrices in Transformer layers finds that these weight matrices are
+possible to be approximated in a low-rank manner – evidencing the possible intra-matrix redundancy
+and inter-matrix redundancy. We comprehensively analyze and compare different decomposition
+methods for parameter compression including matrix decomposition (denoted as II), tensor train
+decomposition (Oseledets, 2011) (denoted as III) and Tucker decomposition (De Lathauwer et al.,
+2000) (denoted as IV). The fundamental difference between them is as below. II conducts matrix
+factorization (e.g., SVD) for each weight matrix thanks to intra-matrix redundancy. Regarding inter_matrix redundancy, III shares the head and tail matrices while keeping the core matrix individual; IV_
+introduces ‘matrix bank’ to make parameter scale being nearly constant w.r.t. the number of layers.
+It is concluded that Tucker decomposition (IV) is more parameter-efficient than others in terms of
+compression ratios. ALBERT (Lan et al., 2019) and III can be considered as special cases of IV.
+
+The practical challenges of matrix/tensor decomposition for compression are twofold. First, the
+decomposition may result in a discrepancy between the raw weights and approximated weights, and
+exact decomposition is impossible with large compression ratios. Instead, Knowledge Distillation
+(KD) is used on the compressed model to simulate the predictions of the raw model in a loss-aware
+manner. Second, reconstruction may lead to additional computation costs. An efficient reconstruction
+_protocol is implemented by reordering multiplication operations that also preserve the same results._
+
+The contributions of this work are (1) we propose a formal framework with standardized terminology
+to comprehensively discuss matrix/tensor decomposition methods to compress Transformer-based
+language models; (2) we adopt tensor decomposition for compressing PLMs which is also faster,
+while existing work (Ma et al., 2019; Liu et al., 2021) did not show the potential for speedup in PLMs;
+(3) our compressed BERT with 1 7 parameters in Transformer layers performs on-par with the
+original BERT in GLUE benchmark. Also, a tiny version achieves 96.7% performance of BERT-base
+with only 1 48 parameters in Transformer layers and 2.7× faster on inference. We directly use the
+/
+proposed methods on TinyBERT (Jiao et al., 2020) that is purely based on KD, since our work is
+**complementary to existing compression methods like KD.**
+/
+
+2 RELATED WORK
+
+**Compressing PLMs** Although various work was proposed to design a new efficient Transformer (Tay et al., 2020), e.g., (Ma et al., 2019; Choromanski et al., 2020; Wang et al., 2020;
+Kitaev et al., 2020; Zaheer et al., 2020; Cao et al., 2020), in this paper, we are focusing on the
+compression of Transformer-based pre-trained language models. The difference is that the latter
+expects to reuse well-trained models, e.g., BERT and GPT (and even GPT3 (Radford et al., 2019) and
+PanGu-α (Zeng et al., 2021)) with manageable computing resources, which typically does not change
+the original Transformer architecture. Taking BERT, one of the most commonly-used pre-trained
+language models, as an example. Existing work explored quantization (Zhang et al., 2020; Bai et al.,
+2020), weights pruning (Lagunas et al., 2021), knowledge distillation (Jiao et al., 2020; Sanh et al.,
+2020), progressive module replacing (Xu et al., 2020), neural architecture search (Xu et al., 2021;
+Yin et al., 2021) and matrix decomposition (Noach & Goldberg, 2020).
+
+We argue that existing compression methods (see Tab. 1) may be inadequate for extreme parameter
+compression, which is under-investigated. The reasons are manifold, first, the knowledge distillationbased method generally learns a new student model from scratch, which cannot inherit too much
+knowledge from the teacher model before distillation. Second, some methods have upper bounds of
+compression ratio. For example, layer-sharing ALBERT (Lan et al., 2019) shares parameters in L
+layers with maximum L times compression. Quantization replaces existing 32-bit parameters with
+binary parameters with a maximum of 32 times reduction. Moreover, quantization needs further
+hardware support, which is usually ad hoc to specific platforms. Weight pruning arguably cannot
+achieve a big compression ratio (McCarley et al., 2019; Michel et al., 2019).
+
+
+-----
+
+Table 1: The comparison between compression methods for BERT. L is the number of layers and D
+is the dimension of hidden states. In the ‘Compressing ratio’ column in Quantization, ‘32’ refers to
+that one usually uses 32-bit floating precision for a real number.
+
+Hardware Compressing
+Methods Examples
+support ratio
+
+Knowledge distillation (Sun et al., 2019; Jiao et al., 2020; Sanh et al., 2020)  O _[LD]ld_
+
+Parameter sharing (Lan et al., 2019)  _L as upper bound_
+QuantizationWeight pruning (Hou et al., 2020)(Zhang et al., 2020; Bai et al., 2020)  32 as upper bound- ( [)]
+Matrix decomposition (Lan et al., 2019; Noach & Goldberg, 2020)  O _[D]d_
+
+Tensor (Tucker/TT) decomposition -   O _[LD]ld[2][2][ )]_
+
+( [)]
+
+(
+
+**Matrix/tensor decomposition for compression** Tensor/matrix decomposition aims to approximate a given tensor using a set of smaller tensors/matrices. It has been investigated to compress and
+speed up CNNs, RNNs, and Transformers for many years (Lebedev et al., 2014; Yang et al., 2017; Ye
+et al., 2018; Denton et al., 2014; Winata et al., 2019). Matrix decomposition (e.g., ALBERT (Lan
+et al., 2019) in the embedding layer and (Noach & Goldberg, 2020)) could decrease parameter scale
+with a linear factor depending on the selected rank. More advanced tensor decomposition approaches
+can be implemented by tensor network, which has recently been used to compress general neural
+networks (Gao et al., 2020; Novikov et al., 2015), compress embedding layer (Khrulkov et al., 2019;
+Hrinchuk et al., 2020; Panahi et al., 2019).
+
+Recently, Ma et al. (2019) redesigned a new ‘Self-Attention Network’ (SAN) in Transformer architecture inspired by block-term tensor decomposition. The compression ratio is limited since the majority
+of parameters in Transformer comes from another module called ‘Feed-Forward Network’ (FFN)
+instead of SAN; moreover, the model does not have the potential for speedup regardless of compression ratios since the time complexity is closed to vanilla Transformer. Noach & Goldberg (2020)
+reparameterized each weight matrix using matrix decomposition and further distill the compressed
+models, which nearly achieves a compression ratio of 1.7. Liu et al. (2021) adopted matrix product
+operators to reparameterize each group of weight matrices in embedding, SAN, and FFN, and only a
+small part of tensors of MPO (called ‘auxiliary tensors’) are fine-tuned in downstream tasks. The
+compression ratio of the total parameter is negligible and the inference might be slow. Those works
+inspire us to explore in depth extreme parameter compression for large-scale PLMs.
+
+We argue that compression ratio of existing work using matrix/tensor decomposition (Ma et al., 2019;
+Liu et al., 2021; Noach & Goldberg, 2020) for PLMs is relatively-small; most of them do not have
+speedup effect, limiting their applications in large-scale PLMs. The potential to compress PLMs with
+matrix/tensor decomposition is under-investigated. In this work, we adopt tensor decomposition, to
+cubically compress the parameters of PLMs.
+
+3 MOTIVATIONS FOR PARAMETER COMPRESSION
+
+Pre-trained language models are typically a stack of multiple Transformer (Vaswani et al., 2017) layers
+that consist of a Self-Attention Network (SAN) module and a Feed-Forward Network (FFN) module,
+see App. A for Transformer. Sec. 3.1 will introduce an important property called ‘decomposability’
+for SAN and FFN, which indicates each sub-component in SAN or FFN is independently calculated
+without interactions between sub-components and they may therefore be redundant.
+
+3.1 DECOMPOSABILITY IN TRANSFORMER
+
+A computing module f is decomposable if its sub-components _g1, g2, ⋯gH_ could be independently calculated without interactions: f _x_ = δ _g1_ _x_ _, g2_ _x_ _, ⋯, gH_ _x_ . Usually, δ is a simple
+operation that has negligible computing cost compared to _gh_ . Especially, backpropagation between
+{ }
+sub-components is independent if δ is concatenation or addition. Sub-components in f could be
+( ) ( ( ) ( ) ( ))
+calculated in parallel without interactions. We will examine if SAN and FFN are decomposable.
+{ }
+
+**Decomposability in SAN** Following (Hou et al., 2020), SAN could be decomposed as a sum
+of the output of every head. For the query/key/value/output transformations parameterized by
+
+
+-----
+
+1.0
+
+average
+
+0.9
+
+0.5
+
+captured variance
+
+0.0
+
+0 64 128 256 384 768
+
+PCA components
+
+
+(a) PCA for each single weight matrix (b) PCA for a pair of matrices along columns
+
+Figure 1: PCA for existing weight block matrices in BERT-base. We got nearly similar results in
+Fig. 5 for paired matrices along rows and columns, as shown in App. C.
+
+**_W_** _[Q]_ **_W_** _[K]_ **_W_** _[V]_ **_W_** _[O], we divide them as Nh heads:_ **_WhQ_** _h_ _h_ _h_
+A single head is calculated as
+/ / / _Q_ {K _T_ _T[}][N][h]_ _[,][ {]V[W][ K]O[}]T[N][h]_ _[,][ {][W][ V]_ [}][N][h] _[,][ {][W][ O][}][N][h][.]_
+
+Atth **X** = Softmax [1] **XWh** **_[W]h_** **X** **XWh** **_[W]h_** (1)
+
+_d_
+
+_Nh_ ( ) ( √ )
+Then SAN **X** = ∑h=1 [Att][h][(][X][)][, indicating SAN is decomposable. Cordonnier et al. (2021) argued]
+that the attentions among heads learn redundant key/query projections due to independent calculation.
+( )
+
+**Decomposability in FFN** The two weight matrices in FFN, denoted as W _[In]_ and W _[Out]._
+
+4D
+
+FFN **X** = GeLU **XW⋅In,h** [+][ b]Inh _h,Out⋅_ + bOut (2)
+
+∑
+
+_h=1_
+
+( ) ( [)][W]
+
+As Geva et al. (2020) points out, FFN also operates as a key-value mechanism similar to SAN: one
+can consider the input of FFN as a query vector, and two linear layers of FFN as keys and values,
+respectively. There may exist some similar key-value pairs that may introduce redundancy.
+
+**Remarks on decomposability Decomposability does not necessarily make sub-components being**
+complementary, especially without orthogonality-like constraints between them. Sub-components
+may learn similar patterns, leading to some redundancy (Michel et al., 2019). For example, Hou et al.
+(2020) demonstrated that BERT could be pruned in both width and height without performance drop.
+
+Moreover, BERT is over-parameterized in the sense that the number of training examples in downstream tasks is much fewer (393k training examples for the biggest task in GLUE, i.e., MNLI)
+comparing to the enormous number of parameters (110M parameters for BERT-base) – this was
+thought problematic according to the traditional machine learning theory (Vapnik, 2013). We believe
+that the pre-trained language models in downstream tasks could be compressed.
+
+3.2 EXPLORATION OF AN PRE-TRAINED TRANSFORMER
+
+Beyond the decomposability of Transformer, we conduct exploration on a widely-used Transformerbased PLM, i.e., BERT (Devlin et al., 2018). Technically, we calculate the captured variance ratio by
+Principal Component Analysis (PCA), as an indicator to measure the parameter redundancy.
+
+The main weight matrices of Transformer layers are **_W_** _[Q], W_ _[K], W_ _[V]_ _, W_ _[O], W_ _[In], W_ _[Out]_ [2]. Sec.
+2 and Appendix B show that FFN could be separately calculated in a multi-head fashion. We
+could sequentially split both **_W_** _[In]_ and **_W_** _[Out]_ into four groups like { **_Wh[In]_** _h}_
+
+2We exclude embedding layer for compression, as (Ben Noach & Goldberg, 2020) did. Note that the lookup
+operation in embedding layers is fast; therefore, decomposing embedding will be more time-consuming since it { } { } { [}][h][=][4][ and][ {][W][ Out]}[h][=][4]
+involves additional computationally-expensive matrix multiplication. Moreover, this paper focuses on the core
+components in Transformer, namely SAN and FFN, which are the majority parameters that also increase linearly
+with network depth; while the parameter scale in embedding layer is constant w.r.t. network depth.
+
+
+-----
+
+dimensions could capture nearly 80% variance, which suggests some possibility to compress inter
+Figure 2: The three methods for parameter compression. To compress the raw weights W[I], II
+decomposes each matrix in W[I] into small matrices, i.e., two ‘narrow’ matrices and a small square
+matrix. III further shares the two ‘narrow’ matrices for all weights. IV introduces a matrix bank for
+these small square matrices, making parameter scale nearly constant w.r.t. the number of layers.
+
+respectively. By doing so, we could reconcile all weight matrices to be of same shape (i.e. D × D).
+Here, we could get 12 D × D weight blocks for each Transformer layer, 4 for SAN, and 8 for FFN.
+
+In Fig. 1 we could find the intra-matrix and inter-matrix redundancy: Figure 1a shows that half
+dimensions could capture more than 90% variance of all weight matrices, this confirms our statement
+in Sec. 3.1. Furthermore, we also study the redundancy between two matrices by conducting
+PCA on the concatenated matrix between two arbitrarily paired weight matrices. See Fig. 1b, half
+
+**matrix redundancy. This inter-matrix redundancy may be twofold: (1) subFFNs are decomposable;**
+(2) calculations (e.g., attention maps) in different layers may be similar. Regarding the latter,
+some existing works like RNNs (Goyal & Bengio, 2020), Neural Ordinary Differential Equations
+(ODE) (Chen et al., 2018), and cross-layer sharing ALBERT (Lan et al., 2019) show that it could
+work even with the parameter equivalence hypothesis among layers.
+
+4 A GENERAL FRAMEWORK FOR PARAMETER COMPRESSION
+
+The observation that the main weight blocks in BERT could be approximated in a low-rank manner
+(thanks to the intra-matrix and inter-matrix redundancy) inspires us to use decomposition. Here we
+introduce and compare some standard decomposition methods (see App. D) in compressing PLMs.
+
+4.1 EXPLORING PARAMETER COMPRESSION
+
+In principle, SANs and FFNs could be separately compressed; in this work, we additionally explore
+stacking SAN weights and FFN weights together as a unified protocol since each weight block has an
+identical shape (i.e., D × D). The main weight matrices in the j-th Transformer layer are
+
+**W** _j_ = **_W_** _Q, W_ _K_ _, W_ _V, W_ _O_ ⊕ **_WhIn_** _h=4 ⊕_ **_WhOut_** _h=4_ _j ∈_ R12×D×D. (3)
+
+Weights of a L-layers Transformer are stacked as a 3-rd order tensor in( ) [{ } { [}] { } ] R[12][L][×][D][×][D]. The original
+
+non-decomposed weights is called I: W[I] = **W[(][j][)]** _j=1_ [∈] [R][12][LD][2] . Each weight matrix in W[I] is W[I]i [=]
+**Wi ∈** R[D][×][D]. Here, we explore standard decomposition methods including matrix decomposition,
+tensor train decomposition (Oseledets, 2011) and Tucker decomposition (De Lathauwer et al., 2000). { }[L]
+
+**II: matrix decomposition** Motivated by intra-matrix redundancy, one can adopt Matrix decom_position to factorize/approximate a matrix into some smaller ones. A typical example is singular_
+value decomposition (SVD), called ‘II-α’, for each D × D matrix Wi ∈ **W[I],**
+
+**Wi ≈** **W[II]i** [=][ U]i[Σ]i[V]i [∈] [R][D][×][D] (4)
+
+One can also drop the diagonal Σi by decomposing it into two parts that are multiplied to Ui and Vi
+3 _D×d_ _d×D_
+, namely Wi ≈ **UiVi, denoted as ‘II-β’. Ui ∈** R and Vi ∈ R and usually d < D. Since the
+compression ratio is _D[2]_
+
+2Dd [with reducing the rank from][ D][ to][ d][, the preserved rank of the approximated]
+matrix linearly decreases with the compressing rates.
+
+3
+By decomposing Σi into two diagonal matrices, each of which has diagonal elements that are the square
+root of Σi. By multiplying these two diagonal matrices to Ui and Vi. Wi ≈ **UiVi ∈** R[D][×][D].
+
+
+-----
+
+Table 2: Overview of methods. The most expensive term in space complexity is in bold.
+
+-  Methods Space complexity Difference Reference
+
+I -  **12LD[2]** raw (Devlin et al., 2018)
+II-α Matrix decomposition **24LDd + 12Ld[2]** w/ low-rank approximation - 
+II-β Matrix decomposition **24LDd** w/t diagonal matrices (Ben Noach & Goldberg, 2020)
+III Tensor-train decomposition **12Ld[2]** + 2Dd w/ parameter sharing - 
+IV Tucker decomposition **ld[2]** + 12Ll + 2Dd w/ matrix bank - 
+
+**III: tensor train decomposition** Inspired by the inter-matrix redundancy, one could expect to
+share weights among matrices. The biggest terms in Eq. 4 are Ui and Vi while **Σi** is relatively
+small since Σi ∈ R[d][×][d] and d is relatively small compared to D. We could share **Ui** and **Vi**
+among matrices to save parameters. This results in { }
+{ } { }
+
+**Wi ≈** **W[III]i** [=][ U] **[Σ]i[V][ ∈]** [R][D][×][D] (5)
+
+Here, **Σi** are not necessarily diagonal. This results in a tensor-train (TT) decomposition (Oseledets,
+2011) [4]. One can also consider higher-order TT decomposition (i.e., a longer chain for tensor
+multiplications) which could be more parameter-efficient; this often needs to reshape the raw tensor { }
+into a higher-order tensor with heuristics. However, it is more time-consuming and costs more GPU
+memory during training, which we leave as future work.
+
+**IV: Tucker decomposition** In Eq. 5, the biggest term is the **Σi** ∈ R[12][L][×][d][2], especially the
+number of layers may be large in practice (e.g., L = 24 for BERT-large). To this end, we propose
+a fixed-sized matrix bank such that a weight matrix is considered as a linear combination of these
+{ }
+matrices inside the bank, making the parameter scale become nearly a constant with respect to the
+number of layers. Namely,
+**Wi ≈** **W[IV]i** [=][ U] [(][P]i[C][)][V][ ∈] [R][D][×][D] (6)
+
+where C ∈ R[l][×][d][2] is a matrix bank with a size of l, each matrix is assigned with a weight vector
+**_Pi ∈_** R[1][×][l]. ALBERT (Lan et al., 2019) could be considered as a special case of IV, see App. G.
+
+4.2 COMPARISON BETWEEN I,II, III, AND IV
+
+The comparison in parameter scale between these decomposition methods is in Tab. 2. Since D > d
+and L > l, we could generally conclude that the parameter scales decrease from I, II, III to IV. We
+can observe that marginal parameter cost to add a new layer in IV is nearly 12l, which is negligible
+compared to the other parameters. During the inference phase, the terms that do not involve batch
+size b or sequence length n could be calculated in an offline way only once before starting inference,
+which costs more storage but gets slightly acceleration – since the main purpose of this work is to
+compress models, we ignore it in this work but encourage doing it in speed-sensitive scenarios.
+
+5 EXTREMELY COMPRESSING BERT USING TENSOR DECOMPOSITION
+
+5.1 DECOMPOSITION PROTOCOL
+
+IV reduces space complexity from O 12LD[2] to O _ld[2]_ + 12Ll + 2Dd where d < D and l < 12L.
+_l determines to which degree we want to share Transformer parameters among all modules, a flexible_
+factor to smoothly transform vanilla BERT to layer-shared BERT (or called ‘ALBERT’ (Lan et al.,
+( ) ( )
+2019)). d determines the expressive power (rank) of each linear transformation (originally D × D).
+
+The decomposition protocol does not change the raw architecture of BERT, alternatively, it introduces
+a new reparameterization of the existing weights. However, the approximated weights W[IV] usually
+
+4A tensor-train decomposition is to approximate a high-order tensor with a product of many smaller threeorder tensors – except for the first and last ones being matrices. Here, for a three-order tensor W ∈ R[12][L][×][D][×][D],
+it is approximated by W ≈ **_U_** **GV and shape transpose, where U ∈** R[D][×][r][1], G ∈ R[r][1][×][12][L][×][r][2], and V ∈ R[r][2][×][D].
+For a specific slice of W, Wi ≈ **_U_** **G⋅,i,⋅V . r1 and r2 are the ‘TT ranks’.**
+
+
+-----
+
+Table 3: Computational complexity with different order of matrix multiplication
+
+-  Multiplication order Computing complexity
+
+IV-1 **X** **_U_** **_PiC_** **_V_** _O_ _bnD[2]_ + Dd[2] + D[2]d + ld[2]
+IV-2 **XU** **_PiC_** **_V_** _O_ 2bnDd + bnd[2] + ld[2]
+IV-3 **X(U** ( **_PiC)_** **_V )_** _O(2bnDd + Dd[2]_ + ld[2] )
+( )( ) ( )
+( )(( ) ) ( )
+
+are not exactly equal to the raw weights W[I]. Moreover, the tiny decomposition discrepancy of
+weight matrices in low-layer may lead to an accumulated difference in the final output due to the
+multiple-layer neural network architecture [5]. In this work, we propose to use knowledge distillation
+to simulate the final output of raw models.
+
+_fW[I]_ _x_ ≈ _fW[IV]_ _x_ (7)
+
+_fW[I]_ is the raw BERT model and fW[IV] is the compressed one. We argue that approximation in
+
+( ) ( )
+
+prediction (like knowledge distillation in Eq. 7) is more important than approximation in weights.
+Such a loss-aware strategy in compression could be found in quantization (Hou et al., 2018).
+
+5.2 RECONSTRUCTION PROTOCOL
+
+A slice of D × D parameter block is represented as matrix product, W[IV]i ≈ **_U_** **_PiC_** **_V ∈_** R[D][×][D].
+For an input X ∈ R[b][×][n][×][D] where b is the batch size and n is the sequence length, an output of linear
+transformation between X and a D × D parameter block will be Y = XWi;; = X(U **_P)iC_** **_V . Since_**
+matrix multiplication is associative [6], different multiplication order will not affect the final result but
+their computational complexity may be different [7]. One can see the computational complexity for( )
+multiplication order in Tab. 3. In practice, the batch size b will be set as big as possible to increase
+data throughput and make training more stable, we could conclude that IV-3 is more efficient than
+IV-2. IV-3 is more efficient than IV-1 when D > 2d; in practice, D is typically much bigger than d
+and D > 2d. In conclusion, setting IV-3 is most efficient in this scenario.
+
+6 EXPERIMENTS
+
+6.1 SETTINGS
+
+**Decomposition** For BERT-base (L = 12, D = 768, ), W[I] ∈ R[144][D][2] is decomposed into a core
+tensor and three factor matrices (see Fig. 2), its reconstruction could be seen in Sec. 5.2.
+
+**Knowledge distillation** As (Jiao et al., 2020; Zhang et al., 2020; Bai et al., 2020) did, we use
+_two-stage knowledge distillation for the compressed model. At General Distillation (GD) stage,_
+we adopt Knowledge Distillation (KD) for the compressed model to simulate the last-layer hidden
+states and last-layer attention maps of the general teacher model (BERT-base). At the second stage,
+we adopt Task-specific Distillation (TD) to simulate the logits of a task-specific BERT model (e.g.,
+fine-tuned on MNLI task). In GD, compressed models are trained with two epochs. In TD, we also
+augment training data by randomly replacing a random word with a similar word according to either
+word vector similarity using Glove (Pennington et al., 2014) or the predicted logistics of BERT when
+masking the target word, see more details in (Jiao et al., 2020).
+
+**GLUE evaluation** GLUE (Wang et al., 2018) (see App. I for more details) includes datasets for
+single document classification and sentence pair classification. Fine-tuning and evaluation on GLUE
+follows the settings from Huggingface (Wolf et al., 2019). The best-performed model is selected
+according to the dev set, where we select the learning rate in 1e-5, 2e-5] and batch size in 16, 32 .
+
+5Our experiments also show that a direct decomposition results in very low performance, see Tab. 6.
+6 [ [ ]
+For a sequence of matrices (e.g., **_A, B, C]), matrix multiplication with different calculation orders results_**
+in a identical result, i.e., **_AB_** **_C = A_** **_BC_**
+7In this paper, we define the computational complexity of a matrix multiplication between a [ _n × m matrix_
+and a m × p matrix as ( _nmp)_, corresponding to the number of performed multiplication operations.( )
+_O_
+( )
+
+
+-----
+
+Table 4: Experimental results on test set in GLUE. ‘Para.’ counts the parameters in encoder layers,
+excluding the embedding layer and prediction layer; Note the compression ratios will become smaller
+when considering parameters in the embedding layer. Requests Per Second (RPS) is Throughput
+calculated by a single Nvidia V100 GPU (16G) using full GPU memory, see App. J for actual
+inference time. The single numeric suffix in BERT-III is the dimension rank d; the two numeric
+suffixes in BERT-IV correspond to the layer rank l and dimension rank d in IV respectively. The
+evaluation metrics follow the official GLUE benchmark (Wang et al., 2018). The best performance of
+each task is bold. See App. L for the tailored comparison with (Ben Noach & Goldberg, 2020) since
+(Ben Noach & Goldberg, 2020) used nonstandard evaluation metrics in GLUE. (Lan et al., 2019)
+and (Mao et al., 2020) did not use all tasks in GLUE, we use ♠, ♥, and ♣ to calculate the average
+for their selected tasks. ‘[†]’ means that these methods have a same architecture that has identical
+parameters, FLOPS, and RPS.
+
+|Model (our models in bold)|Para. FLOPS RPS|SST-2 MNLI MRPC QNLI QQP RTE STS-B acc acc F1 acc F1 acc spear.|Avg all ♠ ♥ ♣|
+|---|---|---|---|
+|BERT-base (Devlin et al., 2018) ( BERT-I )|86.0M 22.5B 420.1|93.4 83.9/83.4 87.5 90.9 71.1 66.4 85.2|82.7 88.7 83.5 84.5|
+|BERT-III -384 BERT-III -64 BERT-IV -72-384 BERT-IV -36-256 BERT-IV -36-128|23.0M 22.5B 452.2 1.8M 4.3B 1143.6 12.3M 22.5B 452.3 3.9M 15.2B 596.9 1.9M 8.0B 863.0|93.4 84.6/83.7 88.1 90.5 71.9 68.1 83.9 91.9 80.1/79.6 85.5 87.7 70.7 63.3 80.7 93.1 83.9/83.2 87.5 90.2 71.6 67.3 83.6 92.7 82.5/81.8 87.1 88.9 71.4 65.2 81.8 92.4 81.1/80.2 86.5 88.3 71.9 64.4 81.4|83.2 89.0 84.0 84.8 80.0 86.0 81.0 82.0 82.6 88.5 83.5 84.4 81.4 87.6 82.3 83.5 80.8 86.8 81.7 82.8|
+|ALBERT (Lan et al., 2019) ♠ matrix decomposition (Noach & Goldberg, 2020) ( BERT-II) ♥ matrix decomposition-1 (Mao et al., 2020) ♣ matrix decomposition-2 (Mao et al., 2020) ♣|7.6M 22.5B 434.0 41.8M 14.6B 656.8 34.5M - - 17.3M - -|90.6 82.0/- - - - - - 92.9 - - 90.8 - 67.8 - 87.6 77.7/ 77.4 - 84.3 65.7 - - 82.8 71.8/ 71.8 - 75.4 60.3 - -|- 86.4 - - 83.8 - - - - 78.5 - - - 72.4|
+|TernaryBERT (Zhang et al., 2020) BinaryBERT (Bai et al., 2020) BERT- 6layer† Vanilla KD (Hinton et al., 2015)† BERT-PKD (Sun et al., 2019)† BERT-of-Theseus (Xu et al., 2020)†|86.0M - - 86.0M - - 43.5M 11.3B 837.2 43.5M 11.3B 837.2 43.5M 11.3B 837.2 43.5M 11.3B 837.2|93.4 83.1/82.5 86.9 90.2 71.0 68.9 83.1 91.9 84.1/83.5 85.9 89.8 71.6 67.3 82.3 90.7 80.4 / 79.7 85.9 86.7 69.2 63.6 80.0 91.5 80.2 / 79.8 86.2 88.3 70.1 64.7 80.3 92.0 81.5 / 81.0 85.0 89.0 70.7 65.5 81.6 92.2 82.4 / 82.1 87.6 89.6 71.6 66.2 84.1|82.4 82.0 79.6 80.1 80.8 82.0|
+
+
+
+Table 5: GLUE results on test set TinyBERT-IV and comparison with KD based methods.
+
+|Model (our models in bold)|Para. FLOPS RPS - -|SST-2 MNLI MRPC QNLI QQP RTE STS-B acc acc F1 acc F1 acc spear.|Avg|
+|---|---|---|---|
+|TinyBERT-6layer|43.5M 11.3B 837.2|93.1 84.6/83.2 87.3 90.4 71.6 70.0 83.7|83.0|
+|TinyBERT-IV-72-384 TinyBERT-IV-72-256|12.3M 11.3B 899.9 6.2M 7.6B 1188.4|92.0 83.1/82.2 87.7 89.1 71.7 65.3 81.6 92.0 82.7/81.9 86.7 87.9 70.9 65.5 81.0|81.6 81.1|
+
+
+
+6.2 RESULTS
+
+As shown in Tab. 4, our decomposed BERT with layer rank 144 and dimension rank 384, called ‘
+BERT-III-384’, outperforms the BERT-base, with only 1 7 parameters in Transformer layers and
+slightly bigger throughout. BERT-IV-72-384 performs on-par with raw BERT, which is slightly
+worse than BERT-III-384 due to the smaller size. Observe that a bigger rank (both for layer mode
+/
+and dimension mode) usually consistently leads to better performance. BERT-III-64 achieves 96.7%
+performance (82.7 vs. 80.0) with only 1 48 parameters of Transformer layers and 2.7× speedup.
+
+Tab. 4 shows BERT-IVs are smaller than existing parameter sharing method (Lan et al., 2019) and
+decomposition method (Noach & Goldberg, 2020; Mao et al., 2020). BERT-III -384/ BERT-IV/
+-72-384 achieve comparable or even slightly better results than (Noach & Goldberg, 2020). BERT-IV
+outperforms (Mao et al., 2020) with a large margin. BERT-IV outperforms ALBERT – the latter
+needs training from scratch (1M training steps) while the former does not (less than 0.2M steps).
+
+Observe that BERT-III-384 outperforms BERT-IV-72-384 since the former has more parameters
+and therefore is more expressive. Note that BERT-III-384 and BERT-IV-d-384 have nearly identical
+RPS and inference latency. Note, we take BERT-IV-36-128 as an example to compare with matrix
+decomposition (a.k.a, II, which is implemented by Noach & Goldberg (2020) with a rank of 245,
+denoted as BERT-IV-245), BERT-IV-36-128 is faster (see RPS in Table 4 and inference time in 8),
+smaller, and better-performed (see Table 10 for full performance comparison) than BERT-IV-245,
+evidencing the advantage of BERT-IV over matrix decomposition for compression.
+
+To contextualize BERT-III/BERT-IV with other compression methods like knowledge distillation,
+Tab. 4 shows that BERT-III/BERT-IV achieves comparable performance with knowledge distillation
+methods (Sun et al., 2019; Xu et al., 2020; Jiao et al., 2020) while with fewer parameters. Our results
+
+
+-----
+
+Table 6: Ablation experiments of knowledge distillation (KD) (including GD and TD). The test set of
+GLUE with the setting 72-384 is reported. The best performance of each task is bold.
+
+|Setting|SST-2 MNLI MRPC QNLI QQP RTE STS-B acc acc F1 acc F1 acc spear.|Avg|
+|---|---|---|
+|GD + TD GD + finetune fine-training w/o KD|93.1 83.9/83.2 87.5 90.2 71.6 67.3 83.6 90.9 81.7/80.8 83.8 88.8 69.9 63.6 80.7 49.9 35.6/36.5 79.9 50.5 55.0 49.7 11.3|82.6 80.0 47.3|
+
+
+
+Table 7: Experiment results on test of GLUE with SAN and FFN.
+
+|Model|Para. FLOPS RPS|SST-2 MNLI MRPC QNLI QQP RTE STS-B acc acc F1 acc F1 acc spear.|Avg|
+|---|---|---|---|
+
+
+|BERT-base ( BERT-I)|86.0M 22.5B 420.1|93.4 83.9/83.4 87.5 90.9 71.1 66.4 85.2|82.7|
+|---|---|---|---|
+|BERT-IV -72-384|12.3M 22.5B 452.3|93.1 83.9/83.2 87.5 90.2 71.6 67.3 83.6|82.6|
+|BERT-IV-FFN-48-384 BERT-IV-SAN-24-384|37.1 M 22.5B 463.7 61.9M 22.5B 419.2|93.1 84.5/84.1 88.0 90.7 71.9 69.3 83.1 92.9 84.5/83.7 86.0 90.8 71.8 66.9 82.5|83.1 82.4|
+
+
+
+is also comparable to quantization methods Zhang et al. (2020); Bai et al. (2020) that use 2-bit or
+3-bit weights, and pruning Lagunas et al. (2021) (see Tab. 11 in App.L).
+
+To show the proposed method is orthogonal to existing compression methods like pure knowl_edge distillation, we further explore the proposed method in TinyBERT (Jiao et al., 2020), called_
+‘TinyBERT-IV’. Tab. 5 shows performance loss to compress TinyBERT (degrading from 83.0 to 81.6
+in TinyBERT-IV-72-384) is bigger than compressing raw BERT (degrading from 82.7 to 82.6 in
+BERT-IV -72-384). This is probably due to smaller redundancy in TinyBERT compared to BERT.
+
+6.3 ANALYSIS
+
+**Ablation on the necessity of knowledge distillation** Tab. 6 shows that both GD and TD are
+essential for an effective decomposed BERT. In particular, the overall performance decreases from
+82.6 to 80.0 by removing TD. Note that the model will collapse if we directly take decomposed
+BERT for fine-tuning without knowledge distillation.
+
+**Decomposition on FFNs or SANs** For FFNs and SANs, we use the half size of matrix bank (i.e.,
+24 for SANs and 48 for FFNs) and half dimension rank (i.e., 384) respectively. The two settings are
+called ‘BERT-IV-FFN-48-384’ and ‘BERT-IV-SAN-24-384’. Tab. 7 shows that solely compressing
+SANs or FFNs could nearly achieve on par with the raw model since smaller compression ratios are
+achieved. In detail, FFNs are slightly easier to be compressed even with a big compression ratio
+comparing to SANs. It is intriguing to notice that BERT-IV-72-384 outperforms BERT-IV-SAN-24384, although the former additionally compresses FFNs and has much fewer parameters. The reason
+may be that the size of the matrix bank in BERT-IV-72-384 (i.e., 72), which is shared between FFNs
+and SANs, is bigger than its counterpart in BERT-IV-SAN-24-384 (i.e., 24). This can shed some
+light on the benefit to stacking FFNs and SANs together, see more discussions in App F.
+
+7 CONCLUSION AND FUTURE WORK
+
+To largely compress PLMs, we also comprehensively compare many matrix/tensor decomposition
+methods and conclude tensor decomposition has the potential for extreme parameter compression.
+We therefore efficiently implemented tensor decomposition inspired compression for BERT, thanks
+to an efficient reconstruction protocol. To compensate for the decomposition discrepancy, knowledge
+distillation is used to simulate the output of raw BERT, which is demonstrated to be essential in
+ablation study. Our method with 1 7 parameters could achieve comparable with the original model,
+with slight speedup. A tiny version achieves more than 96.7% performance of BERT-base with 1 48
+parameters in Transformer layers and 2.7× faster on inference. In the future, we expect compression
+/
+of PLMs to shift purely encoder-based language models (e.g., BERT) to decoder language models,
+/
+since the latter has been designed as big as we could afford, e.g. GPT3 (Radford et al., 2019). The
+potential of the proposed methods for compressing larger model is discussed in App. N. Furthermore,
+hybrid methods by mixing knowledge distillation, quantization, parameter sharing, weight pruning,
+and matrix/tensor decomposition together are potential in practice.
+
+
+-----
+
+REFERENCES
+
+Abien Fred Agarap. Deep learning using rectified linear units (relu). arXiv preprint arXiv:1803.08375,
+2018.
+
+Haoli Bai, Wei Zhang, Lu Hou, Lifeng Shang, Jing Jin, Xin Jiang, Qun Liu, Michael Lyu, and Irwin
+King. Binarybert: Pushing the limit of bert quantization, 2020.
+
+Matan Ben Noach and Yoav Goldberg. Compressing pre-trained language models by matrix decomposition. In Proceedings of the 1st Conference of the Asia-Pacific Chapter of the Association for
+_Computational Linguistics and the 10th International Joint Conference on Natural Language Pro-_
+_cessing, pp. 884–889, Suzhou, China, December 2020. Association for Computational Linguistics._
+[URL https://aclanthology.org/2020.aacl-main.88.](https://aclanthology.org/2020.aacl-main.88)
+
+Emily M. Bender, Timnit Gebru, Angelina McMillan-Major, and Shmargaret Shmitchell. On the
+dangers of stochastic parrots: Can language models be too big? In Proceedings of the 2021
+_ACM Conference on Fairness, Accountability, and Transparency, FAccT ’21, pp. 610–623, New_
+York, NY, USA, 2021. Association for Computing Machinery. ISBN 9781450383097. doi:
+[10.1145/3442188.3445922. URL https://doi.org/10.1145/3442188.3445922.](https://doi.org/10.1145/3442188.3445922)
+
+Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel
+Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M. Ziegler,
+Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott
+Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya
+Sutskever, and Dario Amodei. Language models are few-shot learners. CoRR, abs/2005.14165,
+[2020. URL https://arxiv.org/abs/2005.14165.](https://arxiv.org/abs/2005.14165)
+
+Qingqing Cao, Harsh Trivedi, Aruna Balasubramanian, and Niranjan Balasubramanian. Deformer:
+Decomposing pre-trained transformers for faster question answering. CoRR, abs/2005.00697,
+[2020. URL https://arxiv.org/abs/2005.00697.](https://arxiv.org/abs/2005.00697)
+
+J Douglas Carroll and Jih-Jie Chang. Analysis of individual differences in multidimensional scaling
+via an n-way generalization of “eckart-young” decomposition. Psychometrika, 35(3):283–319,
+1970.
+
+Tian Qi Chen, Yulia Rubanova, Jesse Bettencourt, and David K Duvenaud. Neural ordinary differential equations. In NeurIPS, 2018.
+
+Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamas
+Sarlos, Peter Hawkins, Jared Davis, David Belanger, Lucy Colwell, et al. Masked language modeling for proteins via linearly scalable long-context transformers. arXiv preprint arXiv:2006.03555,
+2020.
+
+Kevin Clark, Urvashi Khandelwal, Omer Levy, and Christopher D Manning. What does bert look at?
+an analysis of bert’s attention. arXiv preprint arXiv:1906.04341, 2019.
+
+Jean-Baptiste Cordonnier, Andreas Loukas, and Martin Jaggi. Multi-head attention: Collaborate instead of concatenate, 2021. [URL https://openreview.net/forum?id=](https://openreview.net/forum?id=bK-rJMKrOsm)
+[bK-rJMKrOsm.](https://openreview.net/forum?id=bK-rJMKrOsm)
+
+Lieven De Lathauwer, Moor Bart De, and Vandewalle Joos. A multilinear singular value decomposition. SIAM journal on Matrix Analysis and Applications, 2000.
+
+Emily Denton, Wojciech Zaremba, Joan Bruna, Yann LeCun, and Rob Fergus. Exploiting linear
+structure within convolutional networks for efficient evaluation. arXiv preprint arXiv:1404.0736,
+2014.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep
+bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805, 2018.
+
+Yihe Dong, Jean-Baptiste Cordonnier, and Andreas Loukas. Attention is not all you need: Pure
+attention loses rank doubly exponentially with depth. arXiv preprint arXiv:2103.03404, 2021.
+
+10
+
+
+-----
+
+William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter
+models with simple and efficient sparsity. arXiv preprint arXiv:2101.03961, 2021.
+
+Ze-Feng Gao, Song Cheng, Rong-Qiang He, Z. Y. Xie, Hui-Hai Zhao, Zhong-Yi Lu, and Tao Xiang.
+Compressing deep neural networks by matrix product operators. Phys. Rev. Research, 2:023300,
+[Jun 2020. doi: 10.1103/PhysRevResearch.2.023300. URL https://link.aps.org/doi/](https://link.aps.org/doi/10.1103/PhysRevResearch.2.023300)
+[10.1103/PhysRevResearch.2.023300.](https://link.aps.org/doi/10.1103/PhysRevResearch.2.023300)
+
+Mor Geva, Roei Schuster, Jonathan Berant, and Omer Levy. Transformer feed-forward layers are
+key-value memories. arXiv preprint arXiv:2012.14913, 2020.
+
+Anirudh Goyal and Yoshua Bengio. Inductive biases for deep learning of higher-level cognition.
+_arXiv preprint arXiv:2011.15091, 2020._
+
+Richard A Harshman. Determination and proof of minimum uniqueness conditions for parafac1.
+_UCLA working papers in phonetics, 22(111-117):3, 1972._
+
+Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus). _arXiv preprint_
+_arXiv:1606.08415, 2016._
+
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowledge in a neural network, 2015.
+
+Lu Hou, Quanming Yao, and James T Kwok. Loss-aware weight quantization of deep networks. In
+_ICLR, 02 2018._
+
+Lu Hou, Zhiqi Huang, Lifeng Shang, Xin Jiang, Xiao Chen, and Qun Liu. Dynabert: Dynamic bert
+with adaptive width and depth, 2020.
+
+Oleksii Hrinchuk, Valentin Khrulkov, Leyla Mirvakhabova, Elena Orlova, and Ivan Oseledets.
+Tensorized embedding layers. In Proceedings of the 2020 Conference on Empirical Methods in
+_Natural Language Processing: Findings, pp. 4847–4860, 2020._
+
+Xiaoqi Jiao, Yichun Yin, Lifeng Shang, Xin Jiang, Xiao Chen, Linlin Li, Fang Wang, and Qun Liu.
+Tinybert: Distilling bert for natural language understanding, 2020.
+
+Valentin Khrulkov, Oleksii Hrinchuk, Leyla Mirvakhabova, and Ivan Oseledets. Tensorized embedding layers for efficient model compression. arXiv preprint arXiv:1901.10787, 2019.
+
+Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. arXiv
+_preprint arXiv:2001.04451, 2020._
+
+Olga Kovaleva, Alexey Romanov, Anna Rogers, and Anna Rumshisky. Revealing the dark secrets of
+bert. arXiv preprint arXiv:1908.08593, 2019.
+
+Franc¸ois Lagunas, Ella Charlaix, Victor Sanh, and Alexander M Rush. Block pruning for faster
+transformers. In Proceedings of the 2021 Conference on Empirical Methods in Natural Language
+_Processing, pp. 10619–10629, 2021._
+
+Zhenzhong Lan, Mingda Chen, Sebastian Goodman, Kevin Gimpel, Piyush Sharma, and Radu
+Soricut. Albert: A lite bert for self-supervised learning of language representations. arXiv preprint
+_arXiv:1909.11942, 2019._
+
+Vadim Lebedev, Yaroslav Ganin, Maksim Rakhuba, Ivan Oseledets, and Victor Lempitsky.
+Speeding-up convolutional neural networks using fine-tuned cp-decomposition. arXiv preprint
+_arXiv:1412.6553, 2014._
+
+Peiyu Liu, Ze-Feng Gao, Wayne Xin Zhao, ZY Xie, Zhong-Yi Lu, and Ji-Rong Wen. Enabling
+lightweight fine-tuning for pre-trained language model compression based on matrix product
+operators. arXiv preprint arXiv:2106.02205, 2021.
+
+Xindian Ma, Peng Zhang, Shuai Zhang, Nan Duan, Yuexian Hou, Ming Zhou, and Dawei Song.
+A tensorized transformer for language modeling. Advances in Neural Information Processing
+_Systems, 32:2232–2242, 2019._
+
+11
+
+
+-----
+
+Yihuan Mao, Yujing Wang, Chufan Wu, Chen Zhang, Yang Wang, Yaming Yang, Quanlu Zhang,
+Yunhai Tong, and Jing Bai. Ladabert: Lightweight adaptation of bert through hybrid model
+compression. arXiv preprint arXiv:2004.04124, 2020.
+
+JS McCarley, Rishav Chakravarti, and Avirup Sil. Structured pruning of a bert-based question
+answering model. arXiv preprint arXiv:1910.06360, 2019.
+
+Paul Michel, Omer Levy, and Graham Neubig. Are sixteen heads really better than one? Advances in
+_Neural Information Processing Systems, 32:14014–14024, 2019._
+
+Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGresley, Mostofa Patwary, Vijay
+Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, et al.
+Efficient large-scale language model training on gpu clusters. arXiv preprint arXiv:2104.04473,
+2021.
+
+Matan Ben Noach and Yoav Goldberg. Compressing pre-trained language models by matrix decomposition. In Proceedings of the 1st Conference of the Asia-Pacific Chapter of the Association
+_for Computational Linguistics and the 10th International Joint Conference on Natural Language_
+_Processing, pp. 884–889, 2020._
+
+Alexander Novikov, Dmitry Podoprikhin, Anton Osokin, and Dmitry Vetrov. Tensorizing neural
+networks. arXiv preprint arXiv:1509.06569, 2015.
+
+Ivan V Oseledets. Tensor-train decomposition. SIAM Journal on Scientific Computing, 33(5):
+2295–2317, 2011.
+
+Aliakbar Panahi, Seyran Saeedi, and Tom Arodz. word2ket: space-efficient word embeddings inspired
+by quantum entanglement. arXiv preprint arXiv:1911.04975, 2019.
+
+David Patterson, Joseph Gonzalez, Quoc Le, Chen Liang, Lluis-Miquel Munguia, Daniel Rothchild,
+David So, Maud Texier, and Jeff Dean. Carbon emissions and large neural network training. arXiv
+_preprint arXiv:2104.10350, 2021._
+
+Jeffrey Pennington, Richard Socher, and Christopher D Manning. Glove: Global vectors for word
+representation. In Proceedings of the 2014 conference on empirical methods in natural language
+_processing (EMNLP), pp. 1532–1543, 2014._
+
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. Language
+models are unsupervised multitask learners. OpenAI blog, 1(8):9, 2019.
+
+Anna Rogers, Olga Kovaleva, and Anna Rumshisky. A primer in bertology: What we know about
+how bert works. arXiv preprint arXiv:2002.12327, 2020.
+
+Victor Sanh, Lysandre Debut, Julien Chaumond, and Thomas Wolf. Distilbert, a distilled version of
+bert: smaller, faster, cheaper and lighter, 2020.
+
+Siqi Sun, Yu Cheng, Zhe Gan, and Jingjing Liu. Patient knowledge distillation for bert model
+compression. arXiv preprint arXiv:1908.09355, 2019.
+
+Yi Tay, Mostafa Dehghani, Dara Bahri, and Donald Metzler. Efficient transformers: A survey. arXiv
+_preprint arXiv:2009.06732, 2020._
+
+Ledyard R Tucker. Implications of factor analysis of three-way matrices for measurement of change.
+_Problems in measuring change, 15:122–137, 1963._
+
+Vladimir Vapnik. The nature of statistical learning theory. Springer science & business media, 2013.
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in neural information
+_processing systems, pp. 5998–6008, 2017._
+
+Jesse Vig. A multiscale visualization of attention in the transformer model. _arXiv preprint_
+_arXiv:1906.05714, 2019._
+
+12
+
+
+-----
+
+Elena Voita, David Talbot, Fedor Moiseev, Rico Sennrich, and Ivan Titov. Analyzing multi-head
+self-attention: Specialized heads do the heavy lifting, the rest can be pruned. arXiv preprint
+_arXiv:1905.09418, 2019._
+
+Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel R Bowman. Glue:
+A multi-task benchmark and analysis platform for natural language understanding. arXiv preprint
+_arXiv:1804.07461, 2018._
+
+Sinong Wang, Belinda Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-attention with
+linear complexity. arXiv preprint arXiv:2006.04768, 2020.
+
+Genta Indra Winata, Andrea Madotto, Jamin Shin, Elham J Barezi, and Pascale Fung. On the
+effectiveness of low-rank matrix factorization for lstm model compression. _arXiv preprint_
+_arXiv:1908.09982, 2019._
+
+Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi,
+Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von´
+Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama
+Drame, Quentin Lhoest, and Alexander M. Rush. Huggingface’s transformers: State-of-the-art
+natural language processing. ArXiv, abs/1910.03771, 2019.
+
+Canwen Xu, Wangchunshu Zhou, Tao Ge, Furu Wei, and Ming Zhou. Bert-of-theseus: Compressing
+bert by progressive module replacing. arXiv preprint arXiv:2002.02925, 2020.
+
+Jin Xu, Xu Tan, Renqian Luo, Kaitao Song, Jian Li, Tao Qin, and Tie-Yan Liu. Nas-bert: Taskagnostic and adaptive-size bert compression with neural architecture search. arXiv preprint
+_arXiv:2105.14444, 2021._
+
+Yinchong Yang, Denis Krompass, and Volker Tresp. Tensor-train recurrent neural networks for video
+classification. In International Conference on Machine Learning, pp. 3891–3900. PMLR, 2017.
+
+Jinmian Ye, Linnan Wang, Guangxi Li, Di Chen, Shandian Zhe, Xinqi Chu, and Zenglin Xu. Learning
+compact recurrent neural networks with block-term tensor decomposition. In Proceedings of the
+_IEEE Conference on Computer Vision and Pattern Recognition, pp. 9378–9387, 2018._
+
+Yichun Yin, Cheng Chen, Lifeng Shang, Xin Jiang, Xiao Chen, and Qun Liu. Autotinybert: Automatic
+hyper-parameter optimization for efficient pre-trained language models. In Proceedings of the 59th
+_Annual Meeting of the Association for Computational Linguistics and the 11th International Joint_
+_Conference on Natural Language Processing (Volume 1: Long Papers), pp. 5146–5157, 2021._
+
+Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon,
+Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, et al. Big bird: Transformers for longer
+sequences. arXiv preprint arXiv:2007.14062, 2020.
+
+Wei Zeng, Xiaozhe Ren, Teng Su, Hui Wang, Yi Liao, Zhiwei Wang, Xin Jiang, ZhenZhang Yang,
+Kaisheng Wang, Xiaoda Zhang, Chen Li, Ziyan Gong, Yifan Yao, Xinjing Huang, Jun Wang,
+Jianfeng Yu, Qi Guo, Yue Yu, Yan Zhang, Jin Wang, Hengtao Tao, Dasen Yan, Zexuan Yi, Fang
+Peng, Fangqing Jiang, Han Zhang, Lingfeng Deng, Yehong Zhang, Zhe Lin, Chao Zhang, Shaojie
+Zhang, Mingyue Guo, Shanzhi Gu, Gaojun Fan, Yaowei Wang, Xuefeng Jin, Qun Liu, and
+Yonghong Tian. Pangu-α: Large-scale autoregressive pretrained chinese language models with
+auto-parallel computation, 2021.
+
+Wei Zhang, Lu Hou, Yichun Yin, Lifeng Shang, Xiao Chen, Xin Jiang, and Qun Liu. Ternarybert:
+Distillation-aware ultra-low bit bert, 2020.
+
+A BACKGROUND OF TRANSFORMER AND BERT
+
+A.1 TRANSFORMER
+
+A Transformer layer (see Fig. 3) consists of a self-attention (SAN) module and a feed-forward
+network (FFN) module. An input X for SAN will be linearly transformed into query, key, value, and
+
+13
+
+
+-----
+
+Figure 3: Transformer architecture.
+
+
+output space _Q, K, V_ as below [8]:
+{ }
+
+
+**_W_** _[Q]_
+
+**_W_** _[K]_
+
+**_W_** _[V]_
+
+
+= X ×
+
+
+(8)
+
+
+The self-attention mechanism (a.k.a Scaled Dot-Product Attention) is calculated as
+
+Attention(Q,K,V) = softmax _V_ (9)
+
+_dk_
+
+( √[QK] )
+
+For a multi-head version of the self-attention mechanism, it linearly projects Q, K, V with h times
+using individual linear projections to smaller dimensions (e.g. dk = _[d][model]h_ [), instead of performing]
+
+a single attention function with dmodel-dimensional keys, values and queries. Finally, the output of
+SAN is
+SAN _X_ = head1; ⋯; headh **_W_** _[O]_
+
+(10)
+headi = Attention _Qi, Ki, Vi_ _,_
+
+where _Q =_ _Q1; ⋯Qh_, K = _K1(; ⋯)Kh [, and V =_ _V1; ⋯]_ _Vh_ . The individual attention heads
+are independently calculated, Cordonnier et al. (2021) claims that there is some redundancy in( )
+multi-head attention.
+[ ] [ ] [ ]
+
+Since the output of SAN is a linear transformation (using W _[O]) of V, which is a weighted sum of_
+_V . A stack of many purely SAN layers is not expressive (Dong et al., 2021), since it is equivalent_
+to a single linear transformation. To this end, a feed-forward network with non-linear activation is
+alternately used with each SAN layer,
+
+FFN _X_ = δ _XW_ [in] **_W_** [out]. (11)
+
+Since some neurons after the activation function (e.g., δ is ReLU or GELU (Hendrycks & Gimpel,
+
+( ) ( )
+
+2016)) become inactivated (zero), din is usually bigger than dmodel to avoid the low-rank bottleneck,
+typically, din = 4 × dmodel = dout. Other tricks, such as layer normalization, residual connection,
+dropout, and weight decay are also adopted to relieve the optimization and overfitting problems when
+it goes deeper.
+
+A.2 BERT
+
+BERT is a Transformer architecture-based pre-trained language model trained on plain corpora by
+using a masked language model pre-training objective, thanks to the capacity and scalability of the
+
+8For all linear transformation in this paper, the bias term is in default omitted
+
+14
+
+
+-----
+
+Transformer (Devlin et al., 2018). BERT significantly improved the SOTA performance of many
+downstream tasks, including classification benchmark GLUE (Wang et al., 2018). Note that the
+parameters of SAN and FAN linearly increase with the number of layers while the embedding layers
+keeps constant with respect to the layer number.
+
+B ‘MULT-HEAD’ FEED FORWARD NEURAL NETWORK
+
+(a) FFN (b) ‘multi-head’ FFN
+
+Figure 4: Fig. 4a and Fig. 4b are equivalent. Note that FFN could be a sum of 4 independent
+sub-FFNs; each of them conducts a full-rank D × D transformation.
+
+In the multi-head attention mechanism, individual attention heads are separately calculated, however
+the calculation is low-rank due to the redundancy among heads (Cordonnier et al., 2021). In
+this paper, we argue that such redundancy may also appear in the feed-forward neural networks.
+In the feed-forward neural networks, element-wise activation functions are usually adopted, e.g.,
+GELU (Hendrycks & Gimpel, 2016) and Relu (Agarap, 2018); that is, each activation can be
+independently calculated.
+
+By partitioning the original W [in] into H column groups and W [out] into H row groups, one can revise
+a feed-forward neural layer (i.e. FFN _X_ = δ _XW_ [in] **_W_** [out]) as a sum of H independent ‘thin’
+sub-FFNs with a dimension of DH = 4D _H as below:_
+( ) ( )
+
+_H_
+
+/
+
+FFN _X_ = _δ_ _XWh[in]_ _h_ (12)
+
+∑
+
+_h=1_
+
+( ) ( [)][W][ out]
+
+Where Wh[in] [∈] [R][D][×][D][h][ and][ W][ out]h ∈ R[D][h][×][D], W [in] = **_W1[in]_** [⊕⋯⊕] **_[W]H[ in][]][ ∈]_** [R][D][×][4][D][ and][ W][ out][ =]
+**_W1[out]_** ⊕⋯⊕ **_WH[out]_** _h_ _[,][ W]h[ out]_ ∈ R[D][×][D] and each
+transformation in sub-FFNs layer are full-rank transformations. See Fig 4 for graphical illustration. [
+One can refer to block partitioned matrix multiplication to understand the equivalence between Fig.
+
+[ []][ ∈] [R][4][D][×][D][. In this paper, we set][ H][ =][ 4][, since][ W][ in]
+4a and 4b.
+
+C CONCATENATION OVER ROWS OR COLUMNS
+
+PCA on columnly-stacked and rowly-stacked matrices are shown in Fig. 5a and Fig. 5b. Observe
+that there is no too much difference between them.
+
+15
+
+
+-----
+
+(a) PCA for a pair of matrices along columns (b) PCA for a pair of matrices along rows
+
+Figure 5: PCA for existing weight block matrices in BERT-base
+
+D MATRIX AND TENSOR DECOMPOSITION
+
+Tensor is a generalized ‘matrix’ with typically a dimension of 3 or more; sometimes, one can also
+call a matrix as a bi-dimensional ‘tensor’ and a vector as a one-dimensional ‘tensor’. Formally, an
+_n-dimensional tensor is an array with n indexes as_
+
+**X ∈** R[I][1][,][⋯][,I][n] (13)
+
+An entry in X is accessed by selecting n ordered index _i1, ⋯, in_, and 0 ≤ _ik < In, ik ∈_ N . In
+this section, we mainly discuss order-3 tensors for simplicity while higher-order tensors also hold.
+
+Typical tensor decomposition includes Canonical Polyadic (CP) decomposition (Carroll & Chang, ( ) { }
+1970; Harshman, 1972) and Tucker decomposition (Tucker, 1963). CP decomposition approximates
+a high-dimension tensor with as a sum of many rank-one tensors. In the case of three-dimensional
+tensor decomposition,
+
+
+**Xˆ =**
+
+
+**_Ar ⊗_** **_Br ⊗_** **_Cr_** (14)
+
+∑
+
+_r=1_
+
+
+Where Ar ∈ R[I][1], Br ∈ R[I][2], Cr ∈ R[I][3] and A ∈ R[R][×][I][1], B ∈ R[R][×][I][2] and C ∈ R[R][×][I][3]. ⊗ is the
+tensor product [9].
+
+Tucker decomposition decomposes a tensor into a set of factor matrices and one small low-rank core
+tensor,
+**Xˆ = G ×1 A ×2 B ×3 C** (15)
+
+where A ∈ R[R][1][×][I][1] _, B ∈_ R[R][2][×][I][2] _, C ∈_ R[R][3][×][I][3] and G ∈ R[R][1][×][R][2][×][R][3]. ×1, ×2, and ×3 are mode-k
+products [10]. _R1, R2, R3_ is sometimes called Tucker ranks. An entry with index _i1, i2, i3_ is
+calculated as
+{ } ( )
+
+_R1_ _R2_ _R3_
+
+**Xˆ** _i1,i2,i3 =_ ∑ ∑ ∑ **Ga,b,cAa,i1** **_Bb,i2_** **_Cc,i3_** (16)
+
+_a=1_ _b=1_ _c=1_
+
+9 2
+Here we give an example to calculate the tensor product of three 2-dimensional vectors, x, y, z ∈ R,
+resulting in a tensor of R[2][×][2][×][2]. R is the CP rank shared in all modes.
+
+_[x][1][y][1][z][1]_
+
+**x ⊗** **y ⊗** **z =** _[x]x[1]2_ _y2_ _z2_ _x2_ _y2z1_ _yy12zz22_ ⎡ _x1y1z2_ _x1y2z2_ ⎤
+
+10Given a tensor [ **G[]] ∈[ ⊗]** R[[][ y]R1[1]×R[]]2[ ⊗]⋯R[[]k[ z]⋯R[1]n and a matrix[]][ =][ [][ x][1] []][ ⊗] M[[][ y] ∈[1]R[z][1]Rk×r, a mode-[]][ =] ⎢⎢⎢⎢⎢⎢⎢⎢⎢⎢⎢⎣k between[[ _[x]x[2]2[y]y[1]1[z]z G[1]2_ [] [][] [] and[ x][ x]x M2[2][1]y[y][y] results in2[2][2]z[z][z]2[1][1] []][]] ⎥⎥⎥⎥⎥⎥⎥⎥⎥⎥⎥⎦
+**G ×m M ∈** R[R][1][×][R][2][⋯][R][k][−][1][×][r][×][R][k][+][1][,][⋯][,R][n] .
+
+16
+
+
+-----
+
+Tucker decomposition will degrade to CP decomposition,where the core tensor G is constrained to be
+super-diagonal [11] and R = R1 = R2 = R3.
+
+A k-slice in the first mode, i.e., a matrix with a size of I2 × I3, would be
+
+_R1_ _R2_ _R3_
+
+**Xˆ** _k =_ ∑ ∑ ∑ **Gi1,i2,i3** **_Ai1,k_** **_Bi2 ⊗_** **_Ci3_** _,_ **Xˆ** _k ∈_ RI2×I3 (17)
+
+_i1=1_ _i1=1_ _i3=1_
+
+( )
+
+All slices in a specific mode share factor matrices (i.e., B, C) in other modes.Therefore, there exists
+inter-correlation between these slices. These shared factor matrices not only make the compression
+ratio of tensor decomposition being much bigger than multiple independent matrix decomposi_tion (Noach & Goldberg, 2020), but also can be beneficial especially when there is redundancy among_
+these parameter matrices and factor matrices can be utilized common features.
+
+
+∑R1
+
+_i1=1_
+
+
+∑R2
+
+_i1=1_
+
+
+E DIFFERENCE WITH EXISTING WORK
+
+E.1 DIFFERENCE WITH TENSOR DECOMPOSITION USED FOR COMPRESSING CNNS, RNNS
+AND EMBEDDINGS
+
+Compressing pre-training models is a new scenario. We believe that exploring tensor decomposition
+in pre-trained language models is non-trivial. In the pre-trained language models, we could test tensor
+decomposition in very deep and wide networks like GPT 3 (96 layers and a hidden dimension of
+12288), while this work is the first step.
+
+Existing work Ma et al. (2019); Liu et al. (2021); Gao et al. (2020); Khrulkov et al. (2019); Hrinchuk
+et al. (2020); Panahi et al. (2019) which use tensor network for compressing neural networks do
+not have the potential for acceleration. The bottleneck in speed limits the application of tensor
+decomposition in real-world applications: compressing models but consuming longer inference time
+seems be useful in very rare scenarios. We argue that it is nontrivial to compress neural networks
+using tensor decomposition with acceleration effects, as this work did.
+
+Work mechanisms for compression are totally different, previous works compress each weight matrix
+(W _[Q], W_ _[K], W_ _[V]_ _, W_ _[O], W_ _[in], W_ _[out]_ in each layer) individually using matrix/tensor decomposition.
+They are making use of local redundancy inside each matrix. While in big models (PLMs), we
+believe that making use of cross-matrix/cross-layer redundancy is also, sometimes more, beneficial.
+We believe that using tensor decomposition for cross-matrix/cross-layer redundancy is a significant
+difference.
+
+E.2 DIFFERENCE WITH CORDONNIER ET AL. (2021)
+
+(Cordonnier et al., 2021) is quite impressive and inspiring. It does inspire this paper, however, we
+want to highlight the difference with (Cordonnier et al., 2021).
+
+**Motivation** The motivation is different, (Cordonnier et al., 2021) found the redundancy in different
+heads. We make use of redundancy of both intra-matrix redundancy and inter-matrix redundancy
+(including cross-layer redundancy).
+
+**Method** The architecture in (Cordonnier et al., 2021) is slightly different from Transformer (or
+BERT) since it redesigns the self-attention network with collaborated attention. While our architecture
+is nearly the same as the raw model, we simulate each matrix multiplication of BERT with a product
+of many smaller matrices.
+
+**Goal** Our work aims to extremely compress neural networks, which cannot be achieved by (Cordonnier et al., 2021). (Cordonnier et al., 2021) is to explore the possibility to share key/query projection
+in SANs. Note that SAN only has 1/3 parameters in Transformer, this proportion even becomes
+smaller when considering the embedding layer. By compressing only SANs with 1/3 parameters, its
+overall compression ratio is limited.
+
+11
+Namely, Gi1,i2,i3 equals 1 if i1 = i2 = i3, and 0 otherwise
+
+17
+
+
+-----
+
+**Potential for efficiency** (Cordonnier et al., 2021) is faster than the raw model only if Dk is
+small. The smallest setting with Dk = 64 has 20% FLOPs reduction. This shows its potential for
+acceleration is limited. A similar setting with Dk = 64, we have nearly 80% reduction in terms of
+FLOPs.
+
+**Potential for compression ratios** The smallest model for BERT-base (110M) in (Cordonnier et al.,
+2021) has 96.6M when Dk = 128; its best compression ratio is 1.14. While in our model, the smallest
+model has a much bigger compression ratio, while being faster and performing better.
+
+**Potential for effectiveness** The model in Cordonnier et al. (2021) (96.6M parameters) achieves
+**93.5% (77.6/83.0) performance with BERT base, while our smallest model with 25M parameters**
+(plus parameters in the embedding layer) achieves 97.7% performance (80.8/82.7) of BERT base. A
+slight difference is that we test our model on the test dataset through GLUE online benchmark while
+Cordonnier et al. (2021) test their model on offline dev dataset through average results for three runs,
+so we use the relative performance w.r.t. the original BERT-base.
+
+F MORE DISCUSSIONS TO COMPRESS WEIGHTS MATRICES IN SANS AND
+FFNS TOGETHER
+
+F.1 SHARING LEADS TO A BIGGER MATRIX BANK
+
+If we separately compress SANs and FFNs, we would have two matrix banks: one for SANs and one
+FFNs: P _[F F N]_ **C[F F N]** and P _[SAN]_ **C[SAN]** . Each weight matrix in FFN(or SAN) is specific to a matrix
+bank C[F F N] for FFN (or C[SAN] for SAN) and its weight vector over the bank Pi[F F N] (or Pi[SAN] ).
+Note that the two matrix banks have the most parameters since it is three-order tensor while others
+(U _, V, P ) are matrices._
+
+Note that matrices in two matrix banks have the same shape, one could merge (share) the two matrix
+banks (a m-size d × d matrix bank and a n-size m-size d × d matrix bank) to get a single bigger
+( _m + n_ -size) matrix bank, this could boost the expressive power for both FFNs and SANs due to
+the bigger matrix bank (denoted as **C[F F N]** ; C[SAN] ).
+( )
+
+The unmerged one is a special case of the merged one. Let us define a new P [′], each element in which
+
+[ ]
+
+is defined as below:
+
+_n_
+
+**_Pi;_** 0, 0, ⋯0 for SANs
+
+**_Pi[′]_** [=] ⎧⎪⎪⎪⎪⎪⎪⎪⎪[ 0, 0 [m,ÌÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÐÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÎ ⋯0 ; P]]i for FFNs
+
+⎨
+
+**_Pi[′]_** [is the new weight vector over the shared]⎪⎪⎪⎪⎪⎪⎪⎪[[ÌÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÐÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÒÎ[ (][m][ +]][ n][)][-size matrix bank.]]
+
+⎩
+
+Without losing any generality, we could relieve the zero-constrains in P [′] to get a general form that
+each element in P [′] is not forced to be zero. This could make FFNs and SANs share more matrix
+bases and therefore get better capacity.
+
+The benefit could be empirically evidenced in Table 7: solely compressing SANs (without compressing FFNs) underperforms both compressing FFNs and SANs; although the former has much more
+parameters. Since in the shared setting, the shared matrix bank could compensate the counterpart of
+SANs. Another na¨ıve motivation is to design a unified protocol for both SANs and FFNs.
+
+F.2 DISCUSSIONS ON THE SCALE DIFFERENCE BETWEEN WEIGHTS MATRICES IN SANS AND
+FFNS
+
+We want to clarify that we do not intend to approximate the raw weights (and their norm/scale).
+Previously, we tried to add a regularizer in the training loss function to force the reconstructed weights
+using decomposition to be as close as the raw weights.
+
+18
+
+
+-----
+
+40
+
+35
+
+30
+
+25
+
+20
+
+15
+
+0
+
+|Col1|Col2|Col3|Col4|Col5|Col6|Col7|Col8|Col9|Col10|Col11|Col12|Col13|Col14|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||||||||||||||WQ WK WV Wo WIn WOut|
+
+
+1 2 3 4 5 6 7 8 9 10 11 12
+
+Figure 6: L2 norms of raw weights in BERT
+
+_L = Ltraining + λ_ **W[IV]** − **W[I]** 2
+∣ ∣
+
+This does not improve the performance, but worsen the performance. The reason may be as below.
+Since we cannot perfectly approximate the raw weights with a decent compression ratio, there always
+exists some difference between the raw weights and the reconstructed weights using decomposition.
+However, even a slight difference might lead to a big difference in output. Plus, we also observe that
+the finally learned W[IV] has a big difference with W[I] . So we give up our efforts to approximate the
+raw weights.
+
+For example, we found that even randomly initializing the compressed BERT nearly achieves identical
+performance, compared to decomposition from a given model. This also shows that approximating
+raw weights is not beneficial. Instead, we use knowledge distillation to simulate the input-output
+mapping from the original model and tolerate the difference between raw weights and reconstructed
+weights. We believe that the former makes more sense than the latter. Empirical results show the
+former performs well.
+
+**Norm difference in decomposition** Decomposition is to approximate a three-order tensor with
+three factor tensors and a core tensor.
+
+**Wi =** **CPi** ×2 U ×3 V
+( )
+
+Each matrix has its specific factor vector Pi, which does not have any constraints. The flexibility of
+norms in Pi could compensate the norm difference for the original matrices.
+
+In case the readers may be curious, we show the norms in Figure 6. The norms in different matrices
+do have some differences. We also compare the norms between the raw weight matrices and the
+reconstructed weights matrices in Figure 7. It shows that the norms of reconstructed weights also
+have a big difference compared to that of corresponding original weight matrices. We argue that the
+knowledge distillation does not aim to approximate the raw weight matrices but only approximate its
+input-output mapping functions.
+
+19
+
+
+-----
+
+40
+
+35
+
+30
+
+25
+
+20
+
+15
+
+10
+
+|Col1|WQ WK WV WO WIn WOut WQ-IV WK-IV WV-IV WO-IV WIn-IV WOut-IV|
+|---|---|
+
+
+1 2 3 4 5 6 7 8 9 10 11 12
+
+Figure 7: L2 norms of raw weights in BERT and reconstructed BERT-IV.
+
+G LINKING IV TO ALBERT
+
+For IV, we have W[IV] = U **_P C_** **_V . Considering a specific case when U = V = I_** _D_, l = 12 (i.e.,
+
+**_I_** 12
+
+( )
+
+**C ∈** R[12][×][D][2] ) and P = **_I⋯((12)_** )∈ R[12][L][×][12]. Where I _i_ is an i × i identity matrix. Namely
+
+⎡ ⎤
+⎢⎢⎢⎢⎢⎢⎢⎢⎢⎢⎣I((12))⎥⎥⎥⎥⎥⎥⎥⎥⎥⎥⎦ 10 01 ⋯⋯ ( )00
+
+**_I_** _i_ = ⋯ ∈ R[i][×][i]. (18)
+
+⎡ ⎤
+
+Then ( ) ⎢⎢⎢⎢⎢⎢⎢⎢⎢⎢ 0 0 ⋯ 1⎥⎥⎥⎥⎥⎥⎥⎥⎥⎥
+
+⎣ ⎦
+
+**_W_** [IV] = U **_PiC_** **_V_**
+= P C
+( )
+
+**C** (19)
+**C**
+
+= ⋯ ∈ R[12][LD][2]
+
+⎡ ⎤
+
+Eq. 19 results in a layer-shared BERT like ALBERT (Lan et al., 2019). (Lan et al., 2019) additionally⎢⎢⎢⎢⎢⎢⎢⎢⎢⎢ **C** ⎥⎥⎥⎥⎥⎥⎥⎥⎥⎥
+compresses the embedding layer using matrix factorization.⎣ ⎦
+
+H HOW IV GENERALIZES III
+
+_III (tensor train decomposition) is a special case of IV (tucker decomposition) in this paper. Note that,_
+we are not stating the correspondence between tensor train decomposition and tucker decomposition
+in general case, but a three-order tensor train decomposition is a special case of tucker decomposition.
+
+Let us recall their definition:
+
+_III = U_ **ΣiV**
+**WiIV = U** _PiC_ _V_
+Or in another format:
+{[W][i] ( )
+
+**W[IV]** = _P_ **C** ×2 U ×3 V
+{[W][III][ =][ Σ][ ×][2][ U][ ×][3][ V]
+
+×2 and ×3 are the mode-2 and mode-3 multiplication. The only difference ( ) Σ ∈ R[12][L][×][d][×][d] vs.
+_P_ **C** ∈ R[12][L][×][d][×][d]. In the latter, P ∈ R[12][L][×][l] and C ∈ R[l][×][d][×][d]. In a special case of tucker
+( )
+
+20
+
+
+-----
+
+Table 8: Task descriptions and statistics in GLUE (Wang et al., 2018). NLI is for ‘Natural Language
+Inference’ and QA is for ‘Question Answering’. SST-2, MNLI, QNLI, QQP are considered as
+relatively-big dataset according to the scale of their train set.
+
+|Col1|CoLA SST-2 MNLI MRPC QNLI QQP RTE STS-B|
+|---|---|
+
+
+|task train test|classification classification NLI paraphrase QA/NLI paraphrase NLI similarity 8.5 k 67k 393k 3.7k 105k 364k 2.5k 7k 1k 1.8k 20k 1.7k 5.4k 391k 3k 1.4k|
+|---|---|
+
+
+0.8
+
+
+0.6
+
+0.4
+
+
+0.2
+
+0.0
+
+|BERT ALBERT BERT-II-2 BERT-III-3|Col2|45 84|Col4|Col5|
+|---|---|---|---|---|
+||BERT ALBERT BERT-II-2 BERT-III-3|45 84|||
+|BERT-III-6 BERT-IV-7 BERT-IV-3 BERT-IV-3|BERT-III-6 BERT-IV-7 BERT-IV-3 BERT-IV-3|4 2-384 6-128 6-256|||
+||||||
+||||||
+
+
+BERT
+ALBERT
+BERT-II-245
+BERT-III-384
+BERT-III-64
+BERT-IV-72-384
+BERT-IV-36-128
+BERT-IV-36-256
+
+
+0 64 128 256 320
+
+Batch size
+
+Figure 8: Inference time. Inference time in Y-axis (in a Nvidia V100 16G GPU) increases when
+batchsizes (in X-axis) become bigger. BERT-III/BERT-IV with d < 384 are faster than raw BERT.
+
+
+decomposition when 1) 12L = l and 2) P = I12L, it is equivalent to the 3-order tensor train
+decomposition (III). I12L is a (square) identity matrix with a size of 12L × 12L, in which the diagonal
+element equals one and 0 elsewhere.
+
+In our experiments, there existed two settings which set 12L = l = 144 that satisfied 1). In such
+settings, the rigorous difference with BERT-III and BERT-IV is that we do not force P to be equal
+to an identity matrix, instead, P is flexible to be trained. We argue that adding such a flexible P
+could enable crossing layer sharing and enhance the capacity of III. Interestingly, once we finish
+training BERT-IV-144-384 and BERT-IV-144-64, before starting inference, one could merge P and
+
+and C as a single matrix: R[12][L][×][12][L] × R[12][L][×][d][2] → R[12][L][×][d][2], which does not affect the model but
+slightly improve inference speed. By doing so, it is rigorously equivalent to III. Thus, we rename
+BERT-IV-144-384/BERT-IV-144-64 as BERT-III-384 and BERT-III-384.
+
+I GLUE BENCHMARK
+
+
+The data statistics in GLUE is shown in Tab. 8.
+
+J INFERENCE TIME
+
+
+As shown in Fig. 8, the raw BERT base is the slowest one. BERT-III/BERT-IV with dimension rank
+_d = 384 is slight faster than raw BERT. The inference time consistently decreases when d becomes_
+smaller. Especially, BERT-III-64 is 2.6 × faster than BERT, which is consistent to RPS shown in Tab.
+4.
+
+21
+
+
+-----
+
+Note that BERT-III -384 and BERT-IV -72-384 are faster than BERT in terms of inference time and
+RPS (see RPS in Tab. 4), although they have the identical FLOPS. A similar observation could be
+found in ALBERT (Lan et al., 2019) – layer-shared BERT has the same FLOPS with the raw BERT
+while the former is faster than the latter. The better inference time and RPS with the same FLOPS may
+be due to that the relatively smaller model consumes less memory and bandwidth inside GPU, see
+[https://openreview.net/forum?id=H1eA7AEtvS. This speedup effect in this matter](https://openreview.net/forum?id=H1eA7AEtvS)
+depends on specific platforms and hardware.
+
+BERT-II implemented by Noach & Goldberg (2020) has a rank for hidden dimension of 245, there we
+called ‘BERT-II-245’. It inference time is close to our BERT-IV-36-256, this is because the inference
+time is mainly related to the dimension rank d.
+
+K ON THE COMPRESSION OF THE EMBEDDING LAYER
+
+In this work, we did not compress the embedding layer. The reasons to not compress the embedding
+layer are manyfold. First, compressing the embedding layer will definitely increase training/inference
+time, since a single embedding lookup is fast enough.
+
+Secondly, the embedding layer does not increase the total parameters when BERT has more transformer layers in the encoder. Since the parameters in the embedding layer are constant with respect to
+network depth. Table 9 shows the parameter numbers when compressing main weight matrices with
+a half dimension rank (when the hidden dimension is 768, its half is 384 as the rank d, meanwhile
+keeping layer rank unchanged). Here, we also consider embedding layer for a fair comparison as
+suggested.
+
+
+models # Paras. # layers (L) D V BERT-IV- [12][L]
+
+2
+
+
+− _[D]_
+
+
+compression ratios
+
+
+BERT-base-uncased 110M 12 768 30522 35.7M 3.1
+BERT-large-uncased 340M 24 1024 30522 75.8M 4.5
+GPT-3 Small 125M 12 768 50257 50.7M 2.5
+GPT-3 Medium 350M 24 1024 50257 85.8M 4.1
+GPT-3 Large 760M 24 1536 50257 165.5M 4.6
+GPT-3 XL 1.3B 24 2048 50257 243.0M 5.3
+GPT-3 2.7B 2.7B 32 2560 50257 498.0M 5.4
+GPT-3 6.7B 6.7B 32 4096 50257 1.1B 6.3
+GPT-3 13B 13.0B 40 5140 50257 1.9B 6.8
+GPT-3 175B 175.0B 96 12288 50257 22.8B 7.7
+
+Table 9: Compression ratios with increasing models when consider parameters in the embedding
+layer. The bigger the model, the closer it is to the theoretical upper bound of compression ratios (i.e.,
+8).
+
+Note that the parameters of embedding becomes more negligible when PLMs have more layers and
+bigger hidden dimension, in which case the compression ratio will approximate an ideal upper bound
+(8 = 2 × 2[2], which is linear to the deduction times of layer rank and quadratic to the deduction
+times of dimension rank; in practice, we could use bigger deduction in both ranks, as we did in the
+experiments).
+
+Plus, the shape of an embedding layer (V D) is related to the size of vocabulary, which is heterogeneous to other weight matrices in Self-attention network and Feed-forward network (D[2] or 4D[2]).
+Therefore it is incompatible with the current compression protocol. To additionally compress the
+embedding layer, we might have to design a totally different compression protocol for the embedding
+layer, which makes this work more complicated.
+
+Finally, the embedding layer is relatively easy to compress, see tensorized embedding (Hrinchuk
+et al., 2020) and word2ket (Panahi et al., 2019) which compress embedding with maximum 307 and
+93,675 times respectively with a slight performance drop. We believe that it is trivial to additionally
+compress the embedding layer. Thus, we leave compressing the embedding layer as future work.
+
+22
+
+
+-----
+
+Table 10: Experimental comparisons between the proposed work and (Noach & Goldberg, 2020). &
+indicates the reported number is an average between these metrics. Metrics are Accuracy (MNLI
+(average of MNLI match and MNLI mis-match), QNLI, RTE, SST-2), Avg of Accuracy and F1
+(MRPC, QQP), Matthew’s correlation (CoLA), Avg of Pearson and Spearman correlations (STS-B).
+
+|Model|Para. FLOPS RPS|SST-2 MNLI MRPC QNLI QQP RTE STS-B acc acc (m&mm) acc&F1 acc acc (m&mm) acc spear.&pears.|Avg|
+|---|---|---|---|
+
+
+|BERT-base|86.0M 22.5B 420.1|93.4 83.1 85.6 90.9 80.2 66.4 86.5|83.9|
+|---|---|---|---|
+|BERT-III -384 BERT-III-64 BERT-IV-72-384 BERT-IV-36-256 BERT-IV-36-128|23.0M 22.5B 452.2 1.8M 4.3B 1088.6 12.3M 22.5B 452.3 3.9M 15.2B 596.9 1.9M 8.0B 863.0|93.4 84.2 86.2 90.5 80.5 68.1 86.1 91.9 79.9 85.5 82.3 79.8 63.3 81.3 93.1 83.6 86.0 90.2 80.4 67.3 85.6 92.7 82.2 84.4 88.9 80.2 65.2 82.4 92.4 80.7 86.5 83.2 80.6 64.4 82.0|84.0 80.6 83.7 82.3 81.4|
+|matrix decomposition (Noach & Goldberg, 2020) ( BERT-II-245)|41.8M 14.6B 656.8|91.9 79.9 85.5 82.3 79.8 63.3 81.3|80.6|
+
+
+
+Table 11: Experimental comparisons between the proposed work and (Lagunas et al., 2021).
+
+|Model|Para. FLOPS RPS|SST-2 MNLI QQP Avg acc acc (m&mm) f1|
+|---|---|---|
+
+
+|Model|Para. FLOPS RPS|SST-2 MNLI QQP Avg acc acc (m&mm) f1|
+|---|---|---|
+|BERT-base|86.0M 22.5B 420.1|92.5 84.5/84.9 87.7 87.4|
+|BERT-III -384 BERT-III-64 BERT-IV-72-384 BERT-IV-36-256 BERT-IV-36-128|23.0M 22.5B 452.2 1.8M 4.3B 1088.6 12.3M 22.5B 452.3 3.9M 15.2B 596.9 1.9M 8.0B 863.0|92.6 86.7/86.7 88.0 88.5 91.4 80.7/80.8 87.2 85.0 92.5 85.6/85.6 87.7 87.9 92.2 83.4/83.8 88.0 86.9 91.6 82.7/82.6 87.5 86.1|
+|Sparsified BERT (Lagunas et al., 2021)|20M - -|91.2 83.2/83.6 87.9 86.5|
+
+
+
+L COMPARISON TO METHODS THAT USES NON-STANDARD METRICS IN GLUE
+
+(Noach & Goldberg, 2020) uses non-standard setting for GLUE tasks. Metrics in (Noach & Goldberg,
+2020) are Accuracy (MNLI (average of MNLI match and MNLI mis-match), QNLI, RTE, SST2), Avg of Accuracy and F1 (MRPC, QQP), Matthew’s correlation (CoLA), Avg of Pearson and
+Spearman correlations (STS-B). Tab. 10 tailored our result in their evaluation protocol. In this
+work, we do not include CoLA dataset since training samples in CoLA are too few to have stable
+evaluations.
+
+M ANALYSIS OF THE LEARNED MODEL
+
+Observing that in IV, each matrix is parameterized as W[IV]i = U **_PiC_** **_V . With shared U and V,_**
+each matrix has a specific parameter Pi (called ‘factor vectors’ later), we analyze **_Pi_** to shed some
+light on understanding what BERT-IV learns.
+( )
+
+In BERT-IV-72-384, we calculate the cosine distances between any two factor vectors. { } _d_ **_Pi, Pj_** =
+1 − cos **_Pi, Pj_**, lead to a 144 × 144 matrix. We could observe that there is a cross-layer pattern that
+**_W_** _[In]_ (the weight matrices in the layer of FFNs) among layers are relatively close. This pattern( )
+becomes weaker in deep (top) layers, this might suggest that top layers may learn more diverse( )
+feature projections. The reason for this pattern needs further investigation.
+{ }
+
+We also visualize the in-matrix pattern in each layer (e.g. in the 1st, 4-th, 8-th, and 12-th layer) in
+Figure 10. It shows that a pair between Wh[In] and Wh[Out] is relatively close, e.g., W1[In] and W1[Out],
+**_W2[In]_** and W2[Out], etc.
+
+N POTENTIAL OF COMPRESSION IN LAGER MODELS
+
+In this section, we compare various compression ratios of II, III, and IV, see the parameters and their
+compression ratios (this additionally considers parameters in the embedding layer) in Table 12. It
+shows that III and IV could achieve much bigger compression ratios than II when using the same rank
+for hidden dimension (i.e., 2048). We claim that the proposed model has better potential to compress
+bigger models.
+
+23
+
+
+-----
+
+order is listed as **_W_** _[Q], W_ _[K], W_ _[V]_ _, W_ _[O], W1[In][,][ W]2[ In][,][ W][ In]3_ _[,][ W][ In]4_ _[,][ W]1[ Out], W2[Out], W3[Out], W4[Out]_
+
+1.2
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+Figure 9: Distances between the factor vectors among 144 matrices in a trained BERT-IV-72-384. The
+
+from the first layer to last layer.
+[ ]
+
+
+(c) The 8-th layer later.
+
+
+(d) The 12-th layer later.
+
+
+(a) The first layer
+
+
+(b) The 4-th layer later
+
+
+Q 1.0 Q 1.0 Q 1.0 Q
+
+K K K K 1.0
+
+V 0.8 V 0.8 V 0.8 V
+
+O O O O 0.8
+
+WW12[In][In] 0.6 WW12[In][In] 0.6 WW12[In][In] 0.6 WW12[In][In] 0.6
+
+WW33[In][In] 0.4 WW33[In][In] 0.4 WW33[In][In] 0.4 WW33[In][In] 0.4
+
+W1[Out] W1[Out] W1[Out] W1[Out]
+
+W2[Out] 0.2 W2[Out] 0.2 W2[Out] 0.2 W2[Out] 0.2
+
+W3[Out] W3[Out] W3[Out] W3[Out]
+
+W4[Out] Q K V O W1[In] W2[In] W3[In] W3[In] W1[Out] W2[Out] W3[Out] W4[Out] 0.0 W4[Out] Q K V O W1[In] W2[In] W3[In] W3[In] W1[Out] W2[Out] W3[Out] W4[Out] 0.0 W4[Out] Q K V O W1[In] W2[In] W3[In] W3[In] W1[Out] W2[Out] W3[Out] W4[Out] 0.0 W4[Out] Q K V O W1[In] W2[In] W3[In] W3[In] W1[Out] W2[Out] W3[Out] W4[Out] 0.0
+
+
+Figure 10: Distances between the factor vectors among 12 matrices
+in each layer of a trained BERTIV-72-384. The order is listed as
+**_W_** _[Q], W_ _[K], W_ _[V]_ _, W_ _[O], W1[In][,][ W]2[ In][,][ W][ In]3_ _[,][ W][ In]4_ _[,][ W]1[ Out], W2[Out], W3[Out], W4[Out]_ .
+
+[ ]
+
+model Paras _L D_ GPT-II-2048 GPT-III-2048 GPT-IV-12-768 GPT-IV-12-2048 GPT-IV-144-2048
+
+GPT-3 Small 125M 12 768 493.1M (0.3× ↓) 647.2M (0.2× ↓) 48.3M (2.6× ↓) 93.5M (1.3× ↓) 647.2M (0.2× ↓)
+GPT-3 Medium 350M 24 1024 1.3B (0.3× ↓) 1.3B (0.3× ↓) 56.7M (6.2× ↓) 102.5M (3.4× ↓) 656.2M (0.5× ↓)
+GPT-3 Large 760M 24 1536 1.9B (0.4× ↓) 1.3B (0.6× ↓) 90.0M (8.4× ↓) 137.1M (5.5× ↓) 690.8M (1.1× ↓)
+GPT-3 XL 1.3B 24 2048 2.5B (0.5× ↓) 1.3B (1.0× ↓) 102.3M (12.7× ↓) 150.8M (8.6× ↓) 704.5M (1.8× ↓)
+GPT-3 2.7B 2.7B 32 2560 4.2B (0.6× ↓) 1.8B (1.5× ↓) 194.4M (13.9× ↓) 244.2M (11.1× ↓) 797.9M (3.4× ↓)
+GPT-3 6.7B 6.7B 32 4096 6.7B (1.0× ↓) 1.9B (3.6× ↓) 270.9M (24.7× ↓) 324.7M (20.6× ↓) 878.4M (7.6× ↓)
+GPT-3 13B 13.0B 40 5140 10.4B (1.2× ↓) 2.4B (5.5× ↓) 333.6M (39.0× ↓) 390.0M (33.3× ↓) 943.7M (13.8× ↓)
+GPT-3 175B 175.0B 96 12288 59.0B (3.0× ↓) 5.9B (29.5× ↓) 1.1B (162.1× ↓) 1.2B (151.6× ↓) 1.7B (102.4× ↓)
+
+Table 12: Parameter compression ratios in various models
+
+24
+
+
+-----
+

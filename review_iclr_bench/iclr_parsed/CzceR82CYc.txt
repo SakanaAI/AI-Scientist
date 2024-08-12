@@ -1,0 +1,3649 @@
+## SCORE-BASED GENERATIVE MODELING WITH CRITICALLY-DAMPED LANGEVIN DIFFUSION
+
+**Tim Dockhorn[1,2,3,][∗]** **Arash Vahdat[1]** **Karsten Kreis[1]**
+
+
+1NVIDIA 2University of Waterloo 3Vector Institute
+
+tim.dockhorn@uwaterloo.ca, _{avahdat,kkreis}@nvidia.com_
+
+
+ABSTRACT
+
+Score-based generative models (SGMs) have demonstrated remarkable synthesis quality. SGMs rely on a diffusion process that gradually perturbs the data
+towards a tractable distribution, while the generative model learns to denoise.
+The complexity of this denoising task is, apart from the data distribution itself,
+uniquely determined by the diffusion process. We argue that current SGMs employ overly simplistic diffusions, leading to unnecessarily complex denoising processes, which limit generative modeling performance. Based on connections to
+statistical mechanics, we propose a novel critically-damped Langevin diffusion
+(CLD) and show that CLD-based SGMs achieve superior performance. CLD can
+be interpreted as running a joint diffusion in an extended space, where the auxiliary variables can be considered “velocities” that are coupled to the data variables
+as in Hamiltonian dynamics. We derive a novel score matching objective for CLD
+and show that the model only needs to learn the score function of the conditional
+distribution of the velocity given data, an easier task than learning scores of the
+data directly. We also derive a new sampling scheme for efficient synthesis from
+CLD-based diffusion models. We find that CLD outperforms previous SGMs in
+synthesis quality for similar network architectures and sampling compute budgets.
+We show that our novel sampler for CLD significantly outperforms solvers such as
+Euler–Maruyama. Our framework provides new insights into score-based denoising diffusion models and can be readily used for high-resolution image synthesis.
+[Project page and code: https://nv-tlabs.github.io/CLD-SGM.](https://nv-tlabs.github.io/CLD-SGM)
+
+
+1 INTRODUCTION
+
+Score-based generative models (SGMs) and denoising diffusion probabilistic models have emerged
+as a promising class of generative models (Sohl-Dickstein et al., 2015; Song et al., 2021c;b; Vahdat
+et al., 2021; Kingma et al., 2021). SGMs offer high quality synthesis and sample diversity, do not
+require adversarial objectives, and have found applications in image (Ho et al., 2020; Nichol &
+Dhariwal, 2021; Dhariwal & Nichol, 2021; Ho et al., 2021), speech (Chen et al., 2021; Kong et al.,
+2021; Jeong et al., 2021), and music synthesis (Mittal et al., 2021), image editing (Meng et al.,
+2021; Sinha et al., 2021; Furusawa et al., 2021), super-resolution (Saharia et al., 2021; Li et al.,
+2021), image-to-image translation (Sasaki et al., 2021), and 3D shape generation (Luo & Hu, 2021;
+Zhou et al., 2021). SGMs use a diffusion process to gradually add noise to the data, transforming a
+complex data distribution into an analytically tractable prior distribution. A neural network is then
+utilized to learn the score function—the gradient of the log probability density—of the perturbed
+data. The learnt scores can be used to solve a stochastic differential equation (SDE) to synthesize
+new samples. This corresponds to an iterative denoising process, inverting the forward diffusion.
+
+In the seminal work by Song et al. (2021c), it has been shown that the score function that needs to be
+learnt by the neural network is uniquely determined by the forward diffusion process. Consequently,
+the complexity of the learning problem depends, other than on the data itself, only on the diffusion.
+Hence, the diffusion process is the key component of SGMs that needs to be revisited to further
+improve SGMs, for example, in terms of synthesis quality or sampling speed.
+
+
+_∗Work done during internship at NVIDIA._
+
+
+-----
+
+Figure 1: In critically-damped Langevin diffusion, the data xt is augmented with a velocity vt. A diffusion
+coupling xt and vt is run in the joint data-velocity space (probabilities in red). Noise is injected only into vt.
+This leads to smooth diffusion trajectories (green) for the data xt. Denoising only requires ∇vt log p(vt|xt).
+
+Inspired by statistical mechanics (Tuckerman, 2010), we propose a novel forward diffusion process,
+the critically-damped Langevin diffusion (CLD). In CLD, the data variable, xt (time t along the
+diffusion), is augmented with an additional “velocity” variable vt and a diffusion process is run in the
+joint data-velocity space. Data and velocity are coupled to each other as in Hamiltonian dynamics,
+and noise is injected only into the velocity variable. As in Hamiltonian Monte Carlo (Duane et al.,
+1987; Neal, 2011), the Hamiltonian component helps to efficiently traverse the joint data-velocity
+space and to transform the data distribution into the prior distribution more smoothly. We derive
+the corresponding score matching objective and show that for CLD the neural network is tasked
+with learning only the score of the conditional distribution of velocity given data ∇vt log pt(vt|xt),
+which is arguably easier than learning the score of diffused data directly. Using techniques from
+molecular dynamics (Bussi & Parrinello, 2007; Tuckerman, 2010; Leimkuhler & Matthews, 2013),
+we also derive a new SDE integrator tailored to CLD’s reverse-time synthesis SDE.
+
+We extensively validate CLD and the novel SDE solver: (i) We show that the neural networks
+learnt in CLD-based SGMs are smoother than those of previous SGMs. (ii) On the CIFAR-10
+image modeling benchmark, we demonstrate that CLD-based models outperform previous diffusion
+models in synthesis quality for similar network architectures and sampling compute budgets. We
+attribute these positive results to the Hamiltonian component in the diffusion and to CLD’s easier
+score function target, the score of the velocity-data conditional distribution ∇vt log pt(vt|xt). (iii)
+We show that our novel sampling scheme for CLD significantly outperforms the popular Euler–
+Maruyama method. (iv) We perform ablations on various aspects of CLD and find that CLD does
+not have difficult-to-tune hyperparameters.
+
+In summary, we make the following technical contributions: (i) We propose CLD, a novel diffusion
+process for SGMs. (ii) We derive a score matching objective for CLD, which requires only the
+conditional distribution of velocity given data. (iii) We propose a new type of denoising score
+matching ideally suited for scalable training of CLD-based SGMs. (iv) We derive a tailored SDE
+integrator that enables efficient sampling from CLD-based models. (v) Overall, we provide novel
+insights into SGMs and point out important new connections to statistical mechanics.
+
+2 BACKGROUND
+
+Consider a diffusion process ut ∈ R[d] defined by the Itˆo SDE
+
+_dut = f_ (ut, t) dt + G(ut, t) dwt, _t ∈_ [0, T ], (1)
+
+with continuous time variable t ∈ [0, T ], standard Wiener process wt, drift coefficient f : R[d] _×_
+
+[0, T ] R[d] and diffusion coefficient G : R[d] [0, T ] R[d][×][d]. Defining ¯ut := uT _t, a correspond-_
+_→_ _×_ _→_ _−_
+ing reverse-time diffusion process that inverts the above forward diffusion can be derived (Anderson,
+1982; Haussmann & Pardoux, 1986; Song et al., 2021c) (with positive dt and t ∈ [0, T ]):
+
+_du¯_ _t =_ _−f_ (¯ut, T − _t) + G(¯ut, T −_ _t)G(¯ut, T −_ _t)[⊤]∇u¯t_ [log][ p]T −t[(¯]ut) _dt + G(¯ut, T −_ _t)dwt,_ (2)
+h i
+
+
+where **u¯** _t_ [log][ p]T _t[(¯]ut) is the score function of the marginal distribution over ¯ut at time T_ _t._
+_∇_ _−_ _−_
+
+The reverse-time process can be used as a generative model. In particular, Song et al. (2021c) model
+data x, setting p(u0)=pdata(x). Currently used SDEs (Song et al., 2021c; Kim et al., 2021) have
+drift and diffusion coefficients of the simple form f (xt, t)=f (t)xt and G(xt, t)=g(t)Id. Generally,
+**_f and G are chosen such that the SDE’s marginal, equilibrium density is approximately Normal at_**
+time T, i.e., p(uT )≈N (0, Id). We can then initialize x0 based on a sample drawn from a complex
+
+
+-----
+
+data distribution, corresponding to a far-from-equilibrium state. While the state x0 relaxes towards
+equilibrium via the forward diffusion, we can learn a model sθ(xt, t) for the score ∇xt log pt(xt),
+which can be used for synthesis via the reverse-time SDE in Eq. (2). If f and G take the simple
+form from above, the denoising score matching (Vincent, 2011) objective for this task is:
+
+min _λ(t)_ **sθ(xt, t)** **xt log pt(xt** **x0)** 2 (3)
+**_θ_** [E][t][∼U] [[0][,T][ ]][E][x][0][∼][p][(][x][0][)][E][x][t][∼][p][t][(][x][t][|][x][0][)] _∥_ _−∇_ _|_ _∥[2]_
+h i
+
+If f and G are affine, the conditional distribution pt(xt **x0) is Normal and available analyti-**
+_|_
+cally (S¨arkk¨a & Solin, 2019). Different λ(t) result in different trade-offs between synthesis quality
+and likelihood in the generative model defined by sθ(xt, t) (Song et al., 2021b; Vahdat et al., 2021).
+
+3 CRITICALLY-DAMPED LANGEVIN DIFFUSION
+
+We propose to augment the datadiffusion process that is run in the joint xt ∈ **xR[d]t-vwith auxiliaryt-space. With velocity ut = (x[1]** _tvariables, vt)[⊤]_ _∈ vRt[2] ∈[d], we setR[d]_ and utilize a
+
+**_f_** (ut, t) := −0β _−βMΓβM[−][1][−][1]_ _⊗_ **_Id_** **ut,** **_G(ut, t) :=_** 00 _√2Γ0_ _β_ _⊗_ **_Id,_** (4)
+
+where ⊗ denotes the Kronecker product. The coupled SDE that describes the diffusion process is
+_dxt_ _M_ **vt** **0d** 0
+
+= _[−][1]_ _βdt_ + _βdt +_ _dwt,_ (5)
+
+_dvt_ **xt** ΓM **vt** _√2Γβ_
+   _−_  − _[−][1]_   
+
+Hamiltonian component=:H Ornstein-Uhlenbeck process=:O
+
+which corresponds to Langevin dynamics| {z in each dimension. That is, each} | {z _xi is independently cou-}_
+pled to a velocity vi, which explains the blockwise structure of f and G. The mass M ∈ R[+] is
+a hyperparameter that determines the coupling between the xt and vt variables; β ∈ R[+] is a constant time rescaling chosen such that the diffusion converges to its equilibrium distribution within
+_t ∈_ [0, T ] (in practice, we set T =1) when initialized from a data-defined non-equilibrium state and is
+analogous to β(t) in previous diffusions (we could also use time-dependent β(t), but found constant
+_β’s to work well, and therefore opted for simplicity); Γ ∈_ R[+] is a friction coefficient that determines the strength of the noise injection into the velocities. Notice that the SDE in Eq. (5) consists
+of two components. The H term represents a Hamiltonian component. Hamiltonian dynamics are
+frequently used in Markov chain Monte Carlo methods to accelerate sampling and efficiently explore complex probability distributions (Neal, 2011). The Hamiltonian component in our diffusion
+process plays a similar role and helps to quickly and smoothly converge the initial joint data-velocity
+distribution to the equilibrium, or prior (see Fig. 1). Furthermore, Hamiltonian dynamics on their
+own are trivially invertible (Tuckerman, 2010), which intuitively is also beneficial in our situation
+when using this diffusion for training SGMs. The O term corresponds to an Ornstein-Uhlenbeck
+process (S¨arkk¨a & Solin, 2019) in the velocity component, which injects noise such that the diffusion dynamics properly converge to equilibrium for any Γ>0. It can be shown that the equilibrium
+distribution of this diffusion is pEQ(u) = N (x; 0d, Id) N (v; 0d, M **_Id) (see App. B.2)._**
+
+There is a crucial balance between M and Γ (McCall, 2010): For Γ[2]<4M (underdamped Langevin
+dynamics) the Hamiltonian component dominates, which implies oscillatory dynamics of xt and vt
+that slow down convergence to equilibrium. For Γ[2]>4M (overdamped Langevin dynamics) the Oterm dominates which also slows down convergence, since the accelerating effect by the Hamiltonian
+component is suppressed due to the strong noise injection. For Γ[2]=4M (critical damping), an ideal
+balance is achieved and convergence to pEQ(u) occurs as fast as possible in a smooth manner without
+oscillations (also see discussion in App. A.1) (McCall, 2010). Hence, we propose to set Γ[2]=4M
+and call the resulting diffusion critically-damped Langevin diffusion (CLD) (see Fig. 1).
+
+Diffusions such as the VPSDE (Song et al., 2021c) correspond to overdamped Langevin dynamics
+with high friction coefficients Γ (see App. A.2). Furthermore, in previous works noise is injected
+directly into the data variables (pixels, for images). In CLD, only the velocity variables are subject
+to direct noise and the data is perturbed only indirectly due to the coupling between xt and vt.
+
+1We call the auxiliary variables velocities, as they play a similar role as velocities in physical systems.
+Formally, our velocity variables would rather correspond to physical momenta, but the term momentum is
+already widely used in machine learning and our mass M is unitless anyway.
+
+
+-----
+
+3.1 SCORE MATCHING OBJECTIVE
+
+Considering the appealing convergence properties of CLD, we propose to utilize
+CLD as forward diffusion process in SGMs. To this end, we initialize the joint
+_p(u0)=p(x0) p(v0)=pdata(x0)_ (v0; 0d, γM **_Id) with hyperparameter γ<1 and let the dis-_**
+_N_
+tribution diffuse towards the tractable equilibrium—or prior—distribution pEQ(u). We can then
+learn the corresponding score functions and define CLD-based SGMs. Following a similar
+derivation as Song et al. (2021b), we obtain the score matching (SM) objective (see App. B.3):
+
+min _λ(t)_ _sθ(ut, t)_ **vt log pt(ut)** 2 (6)
+**_θ_** [E][t][∼U] [[0][,T][ ]][E][u][t][∼][p][t][(][u][t][)] _∥_ _−∇_ _∥[2]_
+
+Notice that this objective requires only the velocity gradient of the log-density of the joint distribu- 
+tion, i.e., ∇vt log pt(ut). This is a direct consequence of injecting noise into the velocity variables
+_only. Without loss of generality, pt(ut)=pt(xt, vt)=pt(vt_ **xt)pt(xt). Hence,**
+_|_
+
+_∇vt log pt(ut) = ∇vt [log pt(vt|xt) + log pt(xt)] = ∇vt log pt(vt|xt)_ (7)
+
+This means that in CLD the neural network-defined score
+model sθ(ut, t) only needs to learn the score of the conditional distribution pt(vt **xt), an arguably easier task than**
+_|_
+learning the score of pt(xt), as in previous works, or of
+the joint pt(ut). This is the case, because our velocity distribution is initialized from a simple Normal distribution,
+such that pt(vt **xt) is closer to a Normal distribution for**
+_|_
+all t 0 (and for any xt) than pt(xt) itself. This is most ev_≥_
+ident at t=0: The data and velocity distributions are independent at t=0 and the score of p0(v0 **x0)=p0(v0) simply**
+_|_
+corresponds to the score of the Normal distribution p0(v0)
+from which the velocities are initialized, whereas the score
+of the data distribution p0(x0) is highly complex and can
+even be unbounded (Kim et al., 2021). We empirically
+verify the reduced complexity of the score of pt(vt **xt) in**
+_|_
+Fig. 2. We find that the score that needs to be learnt by
+the model is more similar to a score corresponding to a
+Normal distribution for CLD than for the VPSDE. We also
+measure the complexity of the neural networks that were
+learnt to model this score via the squared Frobenius norm
+of their Jacobians. We find that the CLD-based SGMs have
+significantly simpler and smoother neural networks than
+VPSDE-based SGMs for most t, in particular when lever- Figure 2: Top: Difference ξ(t) (via L2
+aging a mixed score formulation (see next section). norm) between score of diffused data and
+
+score of Normal distribution. _Bottom:_
+
+3.2 SCALABLE TRAINING Frobenius norm of Jacobian JF (t) of the
+
+neural network defining the score function
+
+**A Practical Objective.** We cannot train directly with for different t. The underlying data distriEq. (6), since we do not have access to the marginal dis- bution is a mixture of Normals. Insets: Diftribution pt(ut). As presented in Sec. 2, we could employ ferent axes (see App. E.1 for detailed defidenoising score matching (DSM) and instead sample u0, nitions of ξ(t) and JF (t)).
+and diffuse those samples, which would lead to a tractable objective. However, recall that in CLD
+the distribution at t=0 is the product of a complex data distribution and a Normal distribution over
+the initial velocity. Therefore, we propose a hybrid version of score matching (Hyv¨arinen, 2005)
+and denoising score matching (Vincent, 2011), which we call hybrid score matching (HSM). In
+HSM, we draw samples from p0(x0)=pdata(x0) as in DSM, but then diffuse those samples while
+marginalizing over the full initial velocity distribution p0(v0)= (v; 0d, γM **_Id) as in regular SM_**
+_N_
+(HSM is discussed in detail in App. C). Since p0(v0) is Normal (and f and G affine), p(ut **x0) is**
+_|_
+also Normal and this remains tractable. We can write this HSM objective as:
+
+min _λ(t)_ _sθ(ut, t)_ **vt log pt(ut** **x0)** 2 _._ (8)
+**_θ_** [E][t][∈][[0][,T][ ]][E][x][0][∼][p][0][(][x][0][)][E][u][t][∼][p][t][(][u][t][|][x][0][)] _∥_ _−∇_ _|_ _∥[2]_
+ 
+
+In HSM, the expectation over p0(v0) is essentially solved analytically, while DSM would use a
+sample-based estimate. Hence, HSM reduces the variance of training objective gradients compared
+to pure DSM, which we validate in App. C.1. Furthermore, when drawing a sample u0 to diffuse in
+
+
+-----
+
+DSM, we are essentially placing an infinitely sharp Normal with unbounded score (Kim et al., 2021)
+at u0, which requires undesirable modifications or truncation tricks for stable training (Song et al.,
+2021c; Vahdat et al., 2021). Hence, with DSM we could lose some benefits of the CLD framework
+discussed in Sec. 3.1, whereas HSM is tailored to CLD and fundamentally avoids such unbounded
+scores. Closed form expressions for the perturbation kernel pt(ut **x0) are provided in App. B.1.**
+_|_
+
+**Score Model Parametrization. (i) Ho et al. (2020) found that it can be beneficial to parameter-**
+ize the score model to predict the noise that was used in the reparametrized sampling to generate
+perturbed samples ut. For CLD, ut = µt(x0) + Ltϵ2d, where Σt = LtL[⊤]t [is the Cholesky de-]
+composition of pt(ut **x0)’s covariance matrix, ϵ2d** (ϵ2d; 02d, I2d), and µt(x0) is pt(ut **x0)’s**
+mean. Furthermore, ∇| **vt log pt(ut|x0) = −ℓtϵd:2d ∼N, where ϵd:2d denotes those d components of|** **_ϵ2d_**
+that actually affect ∇vt log pt(ut|x0) (since we take velocity gradients only, not all are relevant).
+
+With **Σt =** Σ[xx]t Σ[xv]t **_Id,_** we have _ℓt :=_ Σ[xx]t
+Σ[xv]t Σ[vv]t _⊗_ s Σ[xx]t [Σ]t[vv] (Σ[xv]t [)][2][ .]
+  _−_
+
+“per-dimension” covariance matrix
+
+**(ii) Vahdat et al. (2021) showed that it can be beneficial to assume that the diffused marginal distri-**
+
+| {z }
+
+bution is Normal at all times and parametrize the model with a Normal score and a residual “correction”. For CLD, the score is indeed Normal at t = 0 (due to the independently initialized x and v at
+_t=0). Similarly, the target score is close to Normal for large t, as we approach the equilibrium._
+
+Based on (i) and (ii), we parameterize sθ(ut, t) = −ℓtαθ(ut, t) with αθ(ut, t) = ℓ[−]t [1][v][t][/][Σ]t[vv] +
+_αθ[′]_ [(][u][t][, t][)][, where][ Σ]t[vv] [corresponds to the][ v][-][v][ component of the “per-dimension” covariance matrix of]
+the Normal distribution pt(ut|x0 = 0d). In other words, we assumed p0(x0) = δ(x) when defining
+the analytic term of the score model. Formally, **v/Σ[vv]t** is the score of a Normal distribution with
+_−_
+covariance Σ[ˆ] _[vv]t_ **_[I][d][. Following][ Vahdat et al.][ (][2021][), we refer to this parameterization as][ mixed score]_**
+_parameterization. Alternative model parameterizations are possible, but we leave their exploration_
+to future work. With this definition, the HSM training objective becomes (details in App. B.3):
+min _λ(t)ℓ[2]t_ _[∥][ϵ][d][:2][d]_ 2 _,_ (9)
+**_θ_** [E][t][∼U] [[0][,T][ ]][E][x][0][∼][p][0][(][x][0][)][E][ϵ][2][d][∼N][ (][ϵ][2][d][;][0][2][d][,][I][2][d][)] _[−]_ _[α][θ][(][µ][t][(][x][0][)+][L][t][ϵ][2][d][, t][)][∥][2]_
+
+which corresponds to training the model to predict the noise only injected into the velocity during 
+reparametrized sampling of ut, similar to noise prediction in Ho et al. (2020); Song et al. (2021c).
+
+**Objective Weightings. For λ(t) = Γβ, the objective corresponds to maximum likelihood learning**
+(Song et al., 2021b) (see App. B.3). Analogously to prior work (Ho et al., 2020; Vahdat et al., 2021;
+Song et al., 2021b), an objective better suited for high quality image synthesis can be obtained by
+setting λ(t) = ℓ[−]t [2][, which corresponds to “dropping the variance prefactor”][ ℓ]t[2][.]
+
+3.3 SAMPLING FROM CLD-BASED SGMS
+
+To sample from the CLD-based SGM we can either directly simulate the reverse-time diffusion process (Eq. (2)) or, alternatively, solve the corresponding probability flow ODE (Song et al., 2021c;b)
+(see App. B.5). To simulate the SDE of the reverse-time diffusion process, previous works often relied on Euler-Maruyama (EM) (Kloeden & Platen, 1992) and related methods (Ho et al., 2020; Song
+et al., 2021c; Jolicoeur-Martineau et al., 2021a). We derive a new solver, tailored to CLD-based
+models. Here, we provide the high-level ideas and derivations (see App. D for details).
+
+Our generative SDE can be written as (with ¯ut = uT _t, ¯xt = xT_ _t, ¯vt = vT_ _t):_
+_−_ _−_ _−_
+_dx¯t_ _M_ **v¯t** **0d** **0d** **0d**
+
+= _−_ _[−][1]_ _βdt_ + _βdt +_ + _βdt_
+
+_dv¯t_ **x¯t** ΓM **v¯t** _√2Γβdwt_ 2Γ **s(¯ut, T** _t) + M_ **v¯t**
+    − _[−][1]_     _−_ _[−][1]_ 
+
+_AH_ _AO_  _S_ 
+
+It consists of a Hamiltonian component| {z } | _AH{z, an Ornstein-Uhlenbeck process}_ | _A{zO, and the score}_
+model term S. We could use EM to integrate this SDE; however, standard Euler methods are not
+well-suited for Hamiltonian dynamics (Leimkuhler & Reich, 2005; Neal, 2011). Furthermore, if S
+was 0, we could solve the SDE in closed form. This suggests the construction of a novel integrator.
+
+We use the Fokker-Planck operator[2] formalism (Tuckerman, 2010; Leimkuhler & Matthews, 2013;
+2015). Using a similar notation as Leimkuhler & Matthews (2013), the Fokker-Planck equation
+
+2The Fokker-Planck operator is also known as Kolmogorov operator. If the underlying dynamics is fully
+Hamiltonian, it corresponds to the Liouville operator (Leimkuhler & Matthews, 2015; Tuckerman, 2010).
+
+
+-----
+
+corresponding to the generative SDE is ∂pt(¯ut)/∂t=( L[ˆ]A[∗] [+ ˆ]LS[∗] [)][p][t][(¯]ut), where _L[ˆ]A[∗]_ [and][ ˆ]LS[∗] [are the]
+non-commuting Fokker-Planck operators corresponding to the A:=AH +AO and S terms, respectively. Expressions for _L[ˆ]A[∗]_ [and][ ˆ]LS[∗] [can be found in App. D. We can construct a formal, but intractable]
+solution of the generative SDE as ¯ut = e[t][( ˆ]LA[∗] [+ ˆ]LS[∗] [)]u¯0, where the operator e[t][( ˆ]LA[∗] [+ ˆ]LS[∗] [)] (known as the
+_classical propagator in statistical physics) propagates states ¯u0 for time t according to the dynamics_
+defined by the combined operators _L[ˆ]A[∗]_ [+ ˆ]LS[∗] [. Although this operation is not analytically tractable,]
+it can serve as starting point to derive a practical integrator. Using the symmetric Trotter theorem or
+Strang splitting formula as well as the Baker–Campbell–Hausdorff formula (Trotter, 1959; Strang,
+1968; Tuckerman, 2010), it can be shown that:
+
+_δt_ _δt_ _N_ _δt_ _δt_ _N_
+
+_e[t][( ˆ]LA[∗]_ [+ ˆ]LS[∗] [)] = lim _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ _e_ 2 _L[ˆ]A[∗]_ _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ _e_ 2 _L[ˆ]A[∗]_ + (Nδt[3]), (10)
+_N_ _≈_ _O_
+_→∞_
+
+h i h i
+
+for large N ∈ N[+] and time step δt := t/N . The expression suggests that instead of directly
+evaluating the intractable e[t][( ˆ]LA[∗] [+ ˆ]LS[∗] [)], we can discretize the dynamics over t into N pieces of step
+_δt_
+size δt, such that we only need to apply the individual e 2 _L[ˆ]A[∗]_ and e[δt][ ˆ]LS[∗] many times one after another
+
+for small steps δt. A finer discretization results in a smaller error (since N =t/δt, the error effectively
+_δt_
+scales as O(δt[2]) for fixed t). Hence, this implies an integration method. Indeed, e 2 _L[ˆ]A[∗]_ ¯ut is available
+
+in closed form, as mentioned before; however, e[δt][ ˆ]LS[∗] ¯ut is not. Therefore, we approximate this latter
+component of the integrator via a standard Euler step. Thus, the integrator formally has an error of
+the same order as standard EM methods. Nevertheless, as long as the dynamics is not dominated by
+the S component, our proposed integration scheme is expected to be more accurate than EM, since
+we split off the analytically tractable part and only use an Euler approximation for the S term. Recall
+that the model only needs to learn the score of the conditional distribution pt(vt **xt), which is close**
+_|_
+to Normal for much of the diffusion, in which case the S term will indeed be small. This suggests
+that the generative SDE dynamics are in fact dominated by AH and AO in practice. Note that only
+the propagator e[δt][ ˆ]LS[∗] is computationally expensive, as it involves evaluating the neural network. We
+coin our novel SDE integrator for CLD-based SGMs Symmetric Splitting CLD Sampler (SSCS). A
+detailed derivation, analyses, and a formal algorithm are presented in App. D.
+
+4 RELATED WORK
+
+
+**Relations to Statistical Mechanics and Molecular Dynamics. Learning a mapping between a**
+simple, tractable and a complex distribution as in SGMs is inspired by annealed importance sampling (Neal, 2001) and the Jarzynski equality from non-equilibrium statistical mechanics (Jarzynski,
+1997a;b; 2011; Bahri et al., 2020). However, after Sohl-Dickstein et al. (2015), little attention has
+been given to the origins of SGMs in statistical mechanics. Intuitively, in SGMs the diffusion process is initialized in a non-equilibrium state u0 and we would like to bring the system to equilibrium,
+i.e., the tractable prior distribution, as quickly and as smoothly as possible to enable efficient denoising. This “equilibration problem” is a much-studied problem in statistical mechanics, particularly in
+molecular dynamics, where a molecular system is often simulated in thermodynamic equilibrium.
+Algorithms to quickly and smoothly bring a system to and maintain at equilibrium are known as
+_thermostats. In fact, CLD is inspired by the Langevin thermostat (Bussi & Parrinello, 2007). In_
+molecular dynamics, advanced thermostats are required in particular for “multiscale” systems that
+show complex behaviors over multiple time- and length-scales. Similar challenges also arise when
+modeling complex data, such as natural images. Hence, the vast literature on thermostats (Andersen, 1980; Nos´e, 1984; Hoover, 1985; Martyna et al., 1992; H¨unenberger, 2005; Bussi et al., 2007;
+
+Ceriotti et al., 2009; 2010; Tuckerman, 2010) may be valuable for the development of future SGMs.
+Also the framework for developing SSCS is borrowed from statistical mechanics. The same techniques have been used to derive molecular dynamics algorithms (Tuckerman et al., 1992; Bussi &
+Parrinello, 2007; Ceriotti et al., 2010; Leimkuhler & Matthews, 2013; 2015; Kreis et al., 2017).
+
+**Further Related Work. Generative modeling by learning stochastic processes has a long history**
+(Movellan, 2008; Lyu, 2009; Sohl-Dickstein et al., 2011; Bengio et al., 2014; Alain et al., 2016;
+Goyal et al., 2017; Bordes et al., 2017; Song & Ermon, 2019; Ho et al., 2020). We build on Song et al.
+(2021c), which introduced the SDE framework for modern SGMs. Nachmani et al. (2021) recently
+introduced non-Gaussian diffusion processes with different noise distributions. However, the noise
+is still injected directly into the data, and no improved sampling schemes or training objectives are
+introduced. Vahdat et al. (2021) proposed LSGM, which is complementary to CLD: we improve
+
+
+-----
+
+the diffusion process itself, whereas LSGM “simplifies the data” by first embedding it into a smooth
+latent space. LSGM is an overall more complicated framework, as it is trained in two stages and
+relies on additional encoder and decoder networks. Recently, techniques to accelerate sampling from
+pre-trained SGMs have been proposed (San-Roman et al., 2021; Watson et al., 2021; Kong & Ping,
+2021; Song et al., 2021a). Importantly, these methods usually do not permit straightforward loglikelihood estimation. Furthermore, they are originally not based on the continuous time framework,
+which we use, and have been developed primarily for discrete-step diffusion models.
+
+A complementary work to CLD is “Gotta Go Fast” (GGF) (Jolicoeur-Martineau et al., 2021a), which
+introduces an adaptive SDE solver for SGMs, tuned towards image synthesis. GGF uses standard
+Euler-based methods under the hood (Kloeden & Platen, 1992; Roberts, 2012), in contrast to our
+SSCS that is derived from first principles. Furthermore, our SDE integrator for CLD does not make
+any data-specific assumptions and performs extremely well even without adaptive step sizes.
+
+Some works study SGMs for maximum likelihood training (Song et al., 2021b; Kingma et al., 2021;
+Huang et al., 2021). Note that we did not focus on training our models towards high likelihood.
+Furthermore, Chen et al. (2020) and Huang et al. (2020) recently trained augmented Normalizing
+Flows, which have conceptual similarities with our velocity augmentation. Methods leveraging
+auxiliary variables similar to our velocities are also used in statistics—such as Hamiltonian Monte
+Carlo (Neal, 2011)—and have found applications, for instance, in Bayesian machine learning (Chen
+et al., 2014; Ding et al., 2014; Shang et al., 2015). As shown in Ma et al. (2019), our velocity is
+equivalent to momentum in gradient descent and related methods (Polyak, 1964; Kingma & Ba,
+2015). Momentum accelerates optimization; the velocity in CLD accelerates mixing in the diffusion
+process. Lastly, our CLD method can be considered as a second-order Langevin algorithm, but even
+higher-order schemes are possible (Mou et al., 2021) and could potentially further improve SGMs.
+
+5 EXPERIMENTS
+
+**Architectures. We focus on image synthesis and implement CLD-based SGMs using NCSN++ and**
+DDPM++ (Song et al., 2021c) with 6 input channels (for velocity and data) instead of 3.
+
+**Relevant Hyperparameters. CLD’s hyperparameters are chosen as β=4, Γ=1 (or equivalently**
+_M_ _[−][1]=4) in all experiments. We set the variance scaling of the inital velocity distribution to γ=0.04_
+and use the proposed HSM objective with the weighting λ(t)=ℓ[−]t [2][, which promotes image quality.]
+
+**Sampling. We generate model samples via: (i) Probability flow using a Runge–Kutta 4(5) method;**
+reverse-time generative SDE sampling using either (ii) EM or (iii) our SSCS. For methods without
+adaptive stepsize (EM and SSCS), we use evaluation times chosen according to a quadratic function,
+like previous work (Song et al., 2021a; Kong & Ping, 2021; Watson et al., 2021) (indicated by QS).
+
+**Evaluation. We measure image sample quality for CIFAR-10 via Fr´echet inception distance (FID)**
+with 50k samples (Heusel et al., 2017). We also evaluate an upper bound on the negative loglikelihood (NLL): log p(x0) Ev0 _p(v0) log pε(x0, v0)_ _H, where H is the entropy of p(v0)_
+_−_ _≤−_ _∼_ _−_
+and log pε(x0, v0) is an unbiased estimate of log p(x0, v0) from the probability flow ODE (Grathwohl et al., 2019; Song et al., 2021c). As in Vahdat et al. (2021), the stochasticity of log pε(x, v)
+prevents us from performing importance weighted NLL estimation over the velocity distribution
+(Burda et al., 2015). We also record the number of function—neural network—evaluations (NFEs)
+during synthesis when comparing sampling methods. All implementation details in App. B.5 and E.
+
+5.1 IMAGE GENERATION
+
+Following Song et al. (2021c), we focus on the widely used CIFAR-10 unconditional image generation benchmark. Our CLD-based SGM achieves an FID of 2.25 based on the probability flow ODE
+and an FID of 2.23 via simulating the generative SDE (Tab. 1). The only models marginally outperforming CLD are LSGM (Vahdat et al., 2021) and NSCN++/VESDE with 2,000 step predictorcorrector (PC) sampling (Song et al., 2021c). However, LSGM uses a model with ≈475M parameters to achieve its high performance, while we obtain our numbers with a model of ≈100M
+parameters. For a fairer comparison, we trained a smaller LSGM also with ≈100M parameters,
+which is reported as “LSGM-100M” in Tab. 1 (details in App. E.2.7). Our model has a significantly
+better FID score than “LSGM-100M”. In contrast to NSCN++/VESDE, we achieve extremely strong
+results with much fewer NFEs (for example, see n∈{150, 275, 500} in Tab. 3 and also Tab. 2)—the
+VESDE performs poorly in this regime. We conclude that when comparing models with similar
+
+
+-----
+
+Table 1: Unconditional CIFAR-10 generative performance.
+
+Class Model NLL↓ FID↓
+
+CLD-SGM (Prob. Flow) (ours) 3.31 2.25
+**Score** CLD-SGM (SDE) (ours) _≤_ -  2.23
+
+
+DDPM++, VPSDE (Prob. Flow) (Song et al., 2021c) 3.13 3.08
+DDPM++, VPSDE (SDE) (Song et al., 2021c) -  2.41
+DDPM++, sub-VP (Prob. Flow) (Song et al., 2021c) 2.99 2.92
+DDPM++, sub-VP (SDE) (Song et al., 2021c) -  2.41
+NCSN++, VESDE (SDE) (Song et al., 2021c) -  2.20
+LSGM (LSGM-100M (DDPM (NCSN (Song & ErmonVahdat et al.Ho et al.Vahdat et al., 2020, 2021,) 2019), 2021) ) _≤≤≤3.432.963.75-_ 2.104.603.1725.3
+Adversarial DSM (Jolicoeur-Martineau et al., 2021b) -  6.10
+Likelihood SDE (Song et al., 2021b) 2.84 2.87
+DDIM (100 steps) (Song et al., 2021a) -  4.16
+FastDDPM (100 steps) (Kong & Ping, 2021) -  2.86
+Improved DDPM (Nichol & Dhariwal, 2021) 3.37 2.90
+VDM (UDM (Kingma et al.Kim et al., 2021, 2021) ) _≤3.042.49_ 7.41 (4.00)2.33
+D3PM (Gotta Go Fast (Austin et al.Jolicoeur-Martineau et al., 2021), 2021a) _≤3.44-_ 7.342.44
+DDPM Distillation (Luhman & Luhman, 2021) -  9.36
+
+SNGAN (Miyato et al., 2018) -  21.7
+SNGAN+DGflow (Ansari et al., 2021) -  9.62
+AutoGAN (Gong et al., 2019) -  12.4
+TransGAN (Jiang et al., 2021) -  9.26
+StyleGAN2 w/o ADA (Karras et al., 2020) -  8.32
+StyleGAN2 w/ ADA (Karras et al., 2020) -  2.92
+StyleGAN2 w/ Diffaug (Zhao et al., 2020) -  5.79
+
+
+**Score**
+
+**GANs**
+
+
+Figure 3: CIFAR-10 samples.
+
+Figure 4: CelebA-HQ-256 samples.
+
+
+DistAug (Jun et al., 2020) 2.53 42.90
+PixelCNN (Oord et al., 2016) 3.14 65.9
+Glow (Kingma & Dhariwal, 2018) 3.35 48.9
+**Aut.-Reg.,** Residual Flow (Chen et al., 2019) 3.28 46.37
+**Flows,** NVAE (Vahdat & Kautz, 2020) 2.91 23.5
+**VAEs,** NCP-VAE (Aneja et al., 2021) -  24.08
+**EBMs** DC-VAE Parmar et al. (2021) -  17.90
+IGEBM (Du & Mordatch, 2019) -  40.6
+VAEBM (Xiao et al., 2021) -  12.2
+Recovery EBM (Gao et al., 2021) 3.18 9.58
+
+
+network capacity and under NFE budgets ≤500, our CLD-SGM outperforms all published results in
+terms of FID. We attribute these positive results to our easier score matching task. Furthermore, our
+model reaches an NLL bound of 3.31, which is on par with recent works such as Nichol & Dhariwal
+(2021); Austin et al. (2021); Vahdat et al. (2021) and indicates that our model is not dropping modes.
+However, our bound is potentially quite loose (see discussion in App. B.5) and the true NLL might
+be significantly lower. We did not focus on training our models towards high likelihood.
+
+To demonstrate that CLD is also suitable for high-resolution image synthesis, we additionally trained
+a CLD-SGM on CelebA-HQ-256, but without careful hyperparameter tuning due to limited compute
+resources. Model samples in Fig. 4 appear diverse and high-quality (additional samples in App. F).
+
+5.2 SAMPLING SPEED AND SYNTHESIS QUALITY TRADE-OFFS
+
+We analyze the sampling speed vs. synthesis quality trade-off for CLD-SGMs and study SSCS’s
+performance under different NFE budgets (Tabs. 2 and 3). We compare to Song et al. (2021c) and
+use EM to solve the generative SDE for their VPSDE and PC (reverse-diffusion + Langevin sampler)
+for the VESDE model. We also compare to the GGF (Jolicoeur-Martineau et al., 2021a) solver for
+the generative SDE as well as probability flow ODE sampling with a higher-order adaptive step
+size solver. Further, we compare to LSGM (Vahdat et al., 2021) (using our LSGM-100M), which
+also uses probability flow sampling. With one exception (VESDE with 2,000 NFE) our CLD-SGM
+outperforms all baselines, both for adaptive and fixed-step size methods. More results in App. F.2.
+
+Several observations stand out: (i) As expected (Sec. 3.3), for CLD, SSCS significantly outperforms
+EM under limited NFE budgets. When using a fine discretization of the SDE (high NFE), the two
+perform similarly, which is also expected, as the errors of both methods will become negligible.
+**(ii) In the adaptive solver setting, using a simpler ODE solver, we even outperform GGF, which is**
+tuned towards image synthesis. (iii) Our CLD-SGM also outperforms the LSGM-100M model in
+terms of FID. It is worth noting, however, that LSGM was designed primarily for faster synthesis,
+which it achieves by modeling a smooth distribution in latent space instead of the more complex
+data distribution directly. This suggests that it would be promising to combine LSGM with CLD
+and train a CLD-based LSGM, combining the strengths of the two approaches. It would also be
+interesting to develop a more advanced, adaptive SDE solver that leverages SSCS as the backbone
+
+
+-----
+
+Table 2: (right) Performance using adaptive stepsize solvers (ODE is based on probability flow, GGF simulates
+generative SDE). †: taken from Jolicoeur-Martineau et al. (2021a). LSGM corresponds to the small LSGM100M model for fair comparison (details in App. E.2.7). Error tolerances were chosen to obtain similar NFEs.
+
+
+Table 3: (bottom) Performance using non-adaptive stepsize solvers (for
+PC, QS performed poorly). †: 2.23 FID is our evaluation, Song et al.
+(2021c) reports 2.20 FID. See Tab. 9 in App. F.2 for extended results.
+
+Model Sampler _n=50_ _n=150FID atn n=275 function evaluationsn=500_ _n=1000 ↓_ _n=2000_
+
+CLD EM-QS 52.7 7.00 3.24 2.41 **2.27** **2.23**
+CLD SSCS-QS **20.5** **3.07** **2.38** **2.25** 2.30 2.29
+
+VPSDE EM-QS 28.2 4.06 2.65 2.47 2.66 2.60
+
+VESDE PC 460 216 11.2 3.75 2.43 **2.23[†]**
+
+
+Model Solver NFEs↓ FID↓
+
+CLD ODE 312 **2.25**
+VPSDE GGF 330 2.56[†]
+
+VESDE GGF 488 2.99[†]
+
+CLD ODE 147 **2.71**
+VPSDE ODE 141 2.76
+VPSDE GGF 151 2.73[†]
+VESDE ODE 182 7.63
+VESDE GGF 170 10.15[†]
+LSGM ODE 131 4.60
+
+
+and, for example, potentially test our method within a framework like GGF. Our current SSCS only
+allows for fixed step sizes—nevertheless, it achieves excellent performance. Table 4: Mass hyperpa
+rameter.
+
+5.3 ABLATION STUDIES
+
+_M_ _[−][1]_ NLL↓ FID↓
+
+We perform ablation studies to study CLD’s new hyperparameters (run with 1 _≤3.30_ 3.23
+a smaller version of our CLD-SGM used above; App. E for details). 4 _≤3.37_ 3.14
+
+16 _≤3.26_ 3.16
+
+**Mass Parameter: Tab. 4 shows results for a CLD-SGM trained with dif-**
+ferent M _[−][1]_ (also recall that M _[−][1]_ and Γ are tied together via Γ[2] = 4M ; we Table 5: Initial velocity
+are always in the critical-damping regime). Different mass values perform distribution width.
+mostly similarly. Intuitively, training with smaller M _[−][1]_ means that noise _γ_ NLL↓ FID↓
+flows from the velocity variablesnecessitates a larger time rescaling v βt. We found that simply tying into the data xt more slowly, which M _[−][1]_ and 0.40.04 _≤≤3.373.15_ 3.143.21
+_β together via β=8√M works well and did not further fine-tune._ 1 _≤3.15_ 3.27
+
+**Initial Velocity Distribution: Tab. 5 shows results for a CLD-SGM trained with different initial**
+velocity variance scalings γ. Varying γ similarly has only a small effect, but small γ seems slightly
+beneficial for FID, while the NLL bound suffers a bit. Due to our focus on synthesis quality as
+measued by FID, we opted for small γ. Intuitively, this means that the data at t=0 is “at rest”, and
+noise flows from the velocity into the data variables only slowly.
+
+**Mixed Score: Similar to previous work (Vahdat et al., 2021), we find training with the mixed score**
+(MS) parametrization (Sec. 3.2) beneficial. With MS, we achieve an FID of 3.14, without only 3.56.
+
+**Hybrid Score Matching: We also tried training with regular DSM, instead of HSM. However,**
+training often became unstable. As discussed in Sec. 3.2, this is likely because when using standard
+DSM our CLD would suffer from unbounded scores close to t=0, similar to previous SDEs (Kim
+et al., 2021). Consequently, we consider our novel HSM a crucial element for training CLD-SGMs.
+
+We conclude that CLD does not come with difficult-to-tune hyperparameters. We expect our chosen
+hyperparameters to immediately translate to new tasks and models. In fact, we used the same M _[−][1],_
+_γ, MS and HSM settings for CIFAR-10 and CelebA-HQ-256 experiments without fine-tuning._
+
+6 CONCLUSIONS
+
+We presented critically-damped Langevin diffusion, a novel diffusion process for training SGMs.
+CLD diffuses the data in a smoother, easier-to-denoise manner compared to previous SGMs, which
+results in smoother neural network-parametrized score functions, fast synthesis, and improved expressivity. Our experiments show that CLD outperforms previous SGMs on image synthesis for
+similar-capacity models and sampling compute budgets, while our novel SSCS is superior to EM in
+CLD-based SGMs. From a technical perspective, in addition to proposing CLD, we derive CLD’s
+score matching objective termed as HSM, a variant of denoising score matching suited for CLD, and
+we derive a tailored SDE integrator for CLD. Inspired by methods used in statistical mechanics, our
+work provides new insights into SGMs and implies promising directions for future research.
+
+We believe that CLD can potentially serve as the backbone diffusion process of next generation
+SGMs. Future work includes using CLD-based SGMs for generative modeling tasks beyond images,
+combining CLD with techniques for accelerated sampling from SGMs, adapting CLD-based SGMs
+towards maximum likelihood, and utilizing other thermostating methods from statistical mechanics.
+
+
+-----
+
+7 ETHICS AND REPRODUCIBILITY
+
+Our paper focuses on fundamental algorithmic advances to improve the generative modeling performance of SGMs. As such, the proposed CLD does not imply immediate ethical concerns. However,
+we validate CLD on image synthesis benchmarks. Generative modeling of images has promising
+applications, for example for digital content creation and artistic expression (Bailey, 2020), but can
+also be used for nefarious purposes (Vaccari & Chadwick, 2020; Mirsky & Lee, 2021; Nguyen et al.,
+2021). It is worth mentioning that compared to generative adversarial networks (Goodfellow et al.,
+2014), a very popular class of generative models, SGMs have the promise to model the data more
+faithfully, without dropping modes and introducing problematic biases. Generally, the ethical impact
+of our work depends on its application domain and the task at hand.
+
+To aid reproducibility of the results and methods presented in our paper, we made source code to
+reproduce the main results of the paper publicly available, including detailed instructions; see our
+[project page https://nv-tlabs.github.io/CLD-SGM and the code repository https:](https://nv-tlabs.github.io/CLD-SGM)
+[//github.com/nv-tlabs/CLD-SGM. Furthermore, all training details and hyperparameters](https://github.com/nv-tlabs/CLD-SGM)
+are already in detail described in the Appendix, in particular in App. E.
+
+REFERENCES
+
+Guillaume Alain, Yoshua Bengio, Li Yao, Jason Yosinski, Eric Thibodeau-Laufer, Saizheng Zhang,[´]
+[and Pascal Vincent. GSNs: generative stochastic networks. Information and Inference: A Journal](https://academic.oup.com/imaiai/article/5/2/210/2363406?casa_token=cS6Jv5xhODkAAAAA:rEqQTLTN69zcXlxh7PAf1J9PZOEYOUxSxqf-Jlpa6ymgXTo0X8RC_bhZ8wCA0ihZkZjE-MHtnxJDow)
+_of the IMA, 5(2):210–249, 03 2016. ISSN 2049-8764._
+
+[Hans C. Andersen. Molecular dynamics simulations at constant pressure and/or temperature. The](https://aip.scitation.org/doi/abs/10.1063/1.439486?casa_token=gHLpgunpqikAAAAA:NCq8f3NXxPmAtB2UcwiTHgyAKuf1N7hYlse-CRwd-0TrmV4Ryepni12JTJD_gN1nrfkBmdcnGGbOXg)
+_Journal of Chemical Physics, 72(4):2384–2393, 1980._
+
+[Brian DO Anderson. Reverse-time diffusion equation models. Stochastic Processes and their Ap-](https://www.sciencedirect.com/science/article/pii/0304414982900515)
+_plications, 12(3):313–326, 1982._
+
+Jyoti Aneja, Alexander Schwing, Jan Kautz, and Arash Vahdat. [A Contrastive Learning Ap-](https://arxiv.org/abs/2010.02917)
+[proach for Training Variational Autoencoder Priors. In Neural Information Processing Systems](https://arxiv.org/abs/2010.02917)
+_(NeurIPS), 2021._
+
+[Abdul Fatir Ansari, Ming Liang Ang, and Harold Soh. Refining Deep Generative Models via Dis-](https://openreview.net/forum?id=Zbc-ue9p_rE)
+[criminator Gradient Flow. In International Conference on Learning Representations, 2021.](https://openreview.net/forum?id=Zbc-ue9p_rE)
+
+[Jacob Austin, Daniel Johnson, Jonathan Ho, Danny Tarlow, and Rianne van den Berg. Structured](https://arxiv.org/abs/2107.03006)
+[Denoising Diffusion Models in Discrete State-Spaces. In Neural Information Processing Systems](https://arxiv.org/abs/2107.03006)
+_(NeurIPS), 2021._
+
+Yasaman Bahri, Jonathan Kadmon, Jeffrey Pennington, Sam S. Schoenholz, Jascha Sohl-Dickstein,
+[and Surya Ganguli. Statistical Mechanics of Deep Learning. Annual Review of Condensed Matter](https://www.annualreviews.org/doi/10.1146/annurev-conmatphys-031119-050745)
+_Physics, 11:501–528, 2020._
+
+J. Bailey. The tools of generative art, from flash to neural networks. Art in America, 2020.
+
+[Yoshua Bengio, Eric Laufer, Guillaume Alain, and Jason Yosinski. Deep Generative Stochastic Net-](http://proceedings.mlr.press/v32/bengio14.html)
+[works Trainable by Backprop. In Proceedings of the 31st International Conference on Machine](http://proceedings.mlr.press/v32/bengio14.html)
+_Learning, 2014._
+
+[Florian Bordes, Sina Honari, and Pascal Vincent. Learning to Generate Samples from Noise through](https://openreview.net/forum?id=BJAFbaolg)
+[Infusion Training. In 5th International Conference on Learning Representations, ICLR, 2017.](https://openreview.net/forum?id=BJAFbaolg)
+
+Yuri Burda, Roger Grosse, and Ruslan Salakhutdinov. [Importance Weighted Autoencoders.](https://arxiv.org/abs/1509.00519)
+_arXiv:1509.00519, 2015._
+
+[Giovanni Bussi and Michele Parrinello. Accurate sampling using Langevin dynamics. Phys. Rev. E,](https://journals.aps.org/pre/abstract/10.1103/PhysRevE.75.056707)
+75:056707, 2007.
+
+[Giovanni Bussi, Davide Donadio, and Michele Parrinello. Canonical sampling through velocity](https://aip.scitation.org/doi/full/10.1063/1.2408420?casa_token=r7dJcjelUI4AAAAA%3AwY02eEQqoEkKUl5giwbKjyD3DWpgPDrmolbb2a37SIfbFvymGKu5-8D_cyzbsUlHzlzKWaCNOROK4Q)
+[rescaling. The Journal of Chemical Physics, 126(1):014101, 2007.](https://aip.scitation.org/doi/full/10.1063/1.2408420?casa_token=r7dJcjelUI4AAAAA%3AwY02eEQqoEkKUl5giwbKjyD3DWpgPDrmolbb2a37SIfbFvymGKu5-8D_cyzbsUlHzlzKWaCNOROK4Q)
+
+
+-----
+
+[Michele Ceriotti, Giovanni Bussi, and Michele Parrinello. Langevin Equation with Colored Noise](https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.102.020601)
+[for Constant-Temperature Molecular Dynamics Simulations.](https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.102.020601) _Physical Review Letters, 102:_
+020601, 2009.
+
+[Michele Ceriotti, Michele Parrinello, Thomas E. Markland, and David E. Manolopoulos. Efficient](https://aip.scitation.org/doi/full/10.1063/1.3489925?casa_token=zlE_DVhY8wEAAAAA%3Ajy5DTUfsR4M_hROG9gXNaeN0-z0vOMkZok5_DkXM69_Ewl68BiSnbgs6ZsbhH1xcNzCslKmJI6604A)
+[stochastic thermostatting of path integral molecular dynamics. The Journal of Chemical Physics,](https://aip.scitation.org/doi/full/10.1063/1.3489925?casa_token=zlE_DVhY8wEAAAAA%3Ajy5DTUfsR4M_hROG9gXNaeN0-z0vOMkZok5_DkXM69_Ewl68BiSnbgs6ZsbhH1xcNzCslKmJI6604A)
+133(12):124104, 2010.
+
+[Jianfei Chen, Cheng Lu, Biqi Chenli, Jun Zhu, and Tian Tian. VFlow: More Expressive Generative](http://proceedings.mlr.press/v119/chen20p.html)
+[Flows with Variational Data Augmentation. In International Conference on Machine Learning,](http://proceedings.mlr.press/v119/chen20p.html)
+pp. 1660–1669. PMLR, 2020.
+
+[Nanxin Chen, Yu Zhang, Heiga Zen, Ron J Weiss, Mohammad Norouzi, and William Chan. Wave-](https://openreview.net/forum?id=NsMLjcFaO8O)
+[Grad: Estimating Gradients for Waveform Generation. In International Conference on Learning](https://openreview.net/forum?id=NsMLjcFaO8O)
+_Representations, 2021._
+
+[Ricky T. Q. Chen, Yulia Rubanova, Jesse Bettencourt, and David Duvenaud. Neural Ordinary Dif-](https://papers.nips.cc/paper/2018/hash/69386f6bb1dfed68692a24c8686939b9-Abstract.html)
+[ferential Equations. Advances in Neural Information Processing Systems, 2018.](https://papers.nips.cc/paper/2018/hash/69386f6bb1dfed68692a24c8686939b9-Abstract.html)
+
+[Ricky T. Q. Chen, Jens Behrmann, David Duvenaud, and J¨orn-Henrik Jacobsen. Residual Flows for](https://papers.nips.cc/paper/2019/hash/5d0d5594d24f0f955548f0fc0ff83d10-Abstract.html)
+[Invertible Generative Modeling. In Advances in Neural Information Processing Systems, 2019.](https://papers.nips.cc/paper/2019/hash/5d0d5594d24f0f955548f0fc0ff83d10-Abstract.html)
+
+[Tianqi Chen, Emily Fox, and Carlos Guestrin. Stochastic Gradient Hamiltonian Monte Carlo. In](http://proceedings.mlr.press/v32/cheni14.html)
+_Proceedings of the 31st International Conference on Machine Learning, 2014._
+
+[Prafulla Dhariwal and Alex Nichol. Diffusion Models Beat GANs on Image Synthesis. In Neural](https://arxiv.org/abs/2105.05233)
+_Information Processing Systems (NeurIPS), 2021._
+
+Nan Ding, Youhan Fang, Ryan Babbush, Changyou Chen, Robert D Skeel, and Hartmut Neven.
+
+[Bayesian Sampling Using Stochastic Gradient Thermostats. In Advances in Neural Information](https://papers.nips.cc/paper/2014/hash/21fe5b8ba755eeaece7a450849876228-Abstract.html)
+_Processing Systems, 2014._
+
+[J. R. Dormand and P. J. Prince. A family of embedded Runge–Kutta formulae. Journal of Compu-](https://www.sciencedirect.com/science/article/pii/0771050X80900133)
+_tational and Applied Mathematics, 6(1):19–26, 1980._
+
+[Yilun Du and Igor Mordatch. Implicit Generation and Modeling with Energy Based Models. In](https://papers.nips.cc/paper/2019/hash/378a063b8fdb1db941e34f4bde584c7d-Abstract.html)
+_Advances in Neural Information Processing Systems, pp. 3608–3618, 2019._
+
+[Simon Duane, A.D. Kennedy, Brian J. Pendleton, and Duncan Roweth. Hybrid Monte Carlo. Physics](https://www.sciencedirect.com/science/article/abs/pii/037026938791197X)
+_Letters B, 195(2):216–222, 1987._
+
+Chie Furusawa, Shinya Kitaoka, Michael Li, and Yuri Odagiri. [Generative Probabilistic Image](https://arxiv.org/abs/2109.14518)
+[Colorization. arXiv:2109.14518, 2021.](https://arxiv.org/abs/2109.14518)
+
+[Ruiqi Gao, Yang Song, Ben Poole, Ying Nian Wu, and Diederik P Kingma. Learning Energy-Based](https://openreview.net/forum?id=v_1Soh8QUNc)
+[Models by Diffusion Recovery Likelihood. In International Conference on Learning Represen-](https://openreview.net/forum?id=v_1Soh8QUNc)
+_tations, 2021._
+
+[Xinyu Gong, Shiyu Chang, Yifan Jiang, and Zhangyang Wang. AutoGAN: Neural Architecture](https://ieeexplore.ieee.org/document/9010885)
+[Search for Generative Adversarial Networks.](https://ieeexplore.ieee.org/document/9010885) In Proceedings of the IEEE/CVF International
+_Conference on Computer Vision, pp. 3224–3234, 2019._
+
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair,
+[Aaron Courville, and Yoshua Bengio. Generative Adversarial Nets. Advances in neural informa-](https://papers.nips.cc/paper/2014/hash/5ca3e9b122f61f8f06494c97b1afccf3-Abstract.html)
+_tion processing systems, 27, 2014._
+
+[Anirudh Goyal, Nan Rosemary Ke, Surya Ganguli, and Yoshua Bengio. Variational Walkback:](https://proceedings.neurips.cc/paper/2017/hash/46a558d97954d0692411c861cf78ef79-Abstract.html)
+[Learning a Transition Operator as a Stochastic Recurrent Net. In Proceedings of the 31st Inter-](https://proceedings.neurips.cc/paper/2017/hash/46a558d97954d0692411c861cf78ef79-Abstract.html)
+_national Conference on Neural Information Processing Systems, 2017._
+
+Will Grathwohl, Ricky T. Q. Chen, Jesse Bettencourt, Ilya Sutskever, and David Duvenaud.
+
+[FFJORD: Free-form Continuous Dynamics for Scalable Reversible Generative Models. Inter-](https://openreview.net/forum?id=rJxgknCcK7)
+_national Conference on Learning Representations, 2019._
+
+
+-----
+
+[Ulrich G Haussmann and Etienne Pardoux. Time Reversal of Diffusions. The Annals of Probability,](https://www.jstor.org/stable/2243859?casa_token=Oo7mZ_vU5g8AAAAA%3AZYnZu_UhInRidL-HCGINgKNTwvmEV5R7PW_HkpuroOoolTxdDjHgv0tLDMnxxgqmsFaCBO0-OSTWPH07wXaO_5eVJ9Ln4bG4qT3z2knXX5ChBGgZKsE5&seq=1#metadata_info_tab_contents)
+pp. 1188–1205, 1986.
+
+Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter.
+
+[GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium. In](https://proceedings.neurips.cc/paper/2017/hash/8a1d694707eb0fefe65871369074926d-Abstract.html)
+I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett
+(eds.), Advances in Neural Information Processing Systems, volume 30. Curran Associates, Inc.,
+2017.
+
+[Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising Diffusion Probabilistic Models. In Advances](https://proceedings.neurips.cc/paper/2020/hash/4c5bcfec8584af0d967f1ab10179ca4b-Abstract.html)
+_in Neural Information Processing Systems, 2020._
+
+Jonathan Ho, Chitwan Saharia, William Chan, David J Fleet, Mohammad Norouzi, and Tim Sali[mans. Cascaded Diffusion Models for High Fidelity Image Generation. arXiv:2106.15282, 2021.](https://arxiv.org/abs/2106.15282)
+
+[William G. Hoover. Canonical dynamics: Equilibrium phase-space distributions. Physical Review](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.31.1695)
+_A, 31:1695–1697, 1985._
+
+[Chin-Wei Huang, Laurent Dinh, and Aaron Courville. Augmented Normalizing Flows: Bridging](https://arxiv.org/abs/2002.07101)
+[the Gap Between Generative Flows and Latent Variable Models. arXiv:2002.07101, 2020.](https://arxiv.org/abs/2002.07101)
+
+[Chin-Wei Huang, Jae Hyun Lim, and Aaron Courville. A Variational Perspective on Diffusion-](https://arxiv.org/abs/2106.02808)
+[Based Generative Models and Score Matching.](https://arxiv.org/abs/2106.02808) In Neural Information Processing Systems
+_(NeurIPS), 2021._
+
+[Philippe H. H¨unenberger. Thermostat Algorithms for Molecular Dynamics Simulations, volume 173](https://link.springer.com/chapter/10.1007/b99427)
+of Advanced Computer Simulation. Advances in Polymer Science. Springer, Berlin, Heidelberg,
+2005.
+
+[Aapo Hyv¨arinen. Estimation of Non-Normalized Statistical Models by Score Matching. Journal of](https://www.jmlr.org/papers/v6/hyvarinen05a.html)
+_Machine Learning Research, 6:695–709, 2005. ISSN 1532-4435._
+
+[Christopher Jarzynski. Equilibrium free-energy differences from nonequilibrium measurements: A](https://journals.aps.org/pre/abstract/10.1103/PhysRevE.56.5018)
+[master-equation approach. Physical Review E, 56:5018–5035, 1997a.](https://journals.aps.org/pre/abstract/10.1103/PhysRevE.56.5018)
+
+[Christopher Jarzynski. Nonequilibrium Equality for Free Energy Differences. Physical Review](https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.78.2690)
+_Letters, 78:2690–2693, 1997b._
+
+[Christopher Jarzynski. Equalities and Inequalities: Irreversibility and the Second Law of Thermo-](https://www.annualreviews.org/doi/abs/10.1146/annurev-conmatphys-062910-140506?casa_token=_6kz1zfmVlUAAAAA%3AlephG2iwVxBpn6FPrRqLhiPPExfW0yHYNqZWeVnOtKJBP9tDP_xlH82Bbty8lXSVtIYYx53exvSpJA)
+[dynamics at the Nanoscale. Annual Review of Condensed Matter Physics, 2(1):329–351, 2011.](https://www.annualreviews.org/doi/abs/10.1146/annurev-conmatphys-062910-140506?casa_token=_6kz1zfmVlUAAAAA%3AlephG2iwVxBpn6FPrRqLhiPPExfW0yHYNqZWeVnOtKJBP9tDP_xlH82Bbty8lXSVtIYYx53exvSpJA)
+
+[Myeonghun Jeong, Hyeongju Kim, Sung Jun Cheon, Byoung Jin Choi, and Nam Soo Kim. Diff-](https://arxiv.org/abs/2104.01409)
+[TTS: A Denoising Diffusion Model for Text-to-Speech. arXiv preprint arXiv:2104.01409, 2021.](https://arxiv.org/abs/2104.01409)
+
+[Yifan Jiang, Shiyu Chang, and Zhangyang Wang. TransGAN: Two Pure Transformers Can Make](https://arxiv.org/abs/2102.07074)
+[One Strong GAN, and That Can Scale Up. arXiv:2102.07074, 2021.](https://arxiv.org/abs/2102.07074)
+
+Alexia Jolicoeur-Martineau, Ke Li, R´emi Pich´e-Taillefer, Tal Kachman, and Ioannis Mitliagkas.
+
+[Gotta Go Fast When Generating Data with Score-Based Models. arXiv:2105.14080, 2021a.](https://arxiv.org/abs/2105.14080)
+
+Alexia Jolicoeur-Martineau, R´emi Pich´e-Taillefer, Ioannis Mitliagkas, and Remi Tachet des
+[Combes. Adversarial score matching and improved sampling for image generation. In Inter-](https://openreview.net/forum?id=eLfqMl3z3lq)
+_national Conference on Learning Representations, 2021b._
+
+Heewoo Jun, Rewon Child, Mark Chen, John Schulman, Aditya Ramesh, Alec Radford, and Ilya
+[Sutskever. Distribution Augmentation for Generative Modeling. In International Conference on](http://proceedings.mlr.press/v119/jun20a.html)
+_Machine Learning, pp. 5006–5019. PMLR, 2020._
+
+[Tero Karras, Miika Aittala, Janne Hellsten, Samuli Laine, Jaakko Lehtinen, and Timo Aila. Training](https://arxiv.org/abs/2006.06676)
+[Generative Adversarial Networks with Limited Data. In Neural Information Processing Systems](https://arxiv.org/abs/2006.06676)
+_(NeurIPS), 2020._
+
+[Dongjun Kim, Seungjae Shin, Kyungwoo Song, Wanmo Kang, and Il-Chul Moon. Score Matching](https://arxiv.org/abs/2106.05527)
+[Model for Unbounded Data Score. arXiv:2106.05527, 2021.](https://arxiv.org/abs/2106.05527)
+
+
+-----
+
+[Diederik P Kingma and Jimmy Ba. Adam: A Method for Stochastic Optimization. In International](https://openreview.net/forum?id=8gmWwjFyLj)
+_Conference on Learning Representations, 2015._
+
+[Diederik P Kingma, Tim Salimans, Ben Poole, and Jonathan Ho. Variational Diffusion Models.](https://arxiv.org/abs/2107.00630)
+_arXiv:2107.00630, 2021._
+
+[Durk P Kingma and Prafulla Dhariwal. Glow: Generative Flow with Invertible 1x1 Convolutions.](https://papers.nips.cc/paper/2018/hash/d139db6a236200b21cc7f752979132d0-Abstract.html)
+In Advances in neural information processing systems, pp. 10215–10224, 2018.
+
+[Peter E. Kloeden and Eckhard Platen. Numerical Solution of Stochastic Differential Equations.](https://www.springer.com/gp/book/9783540540625)
+Springer, Berlin, 1992.
+
+Zhifeng Kong and Wei Ping. [On Fast Sampling of Diffusion Probabilistic Models.](https://arxiv.org/abs/2106.00132)
+_arXiv:2106.00132, 2021._
+
+[Zhifeng Kong, Wei Ping, Jiaji Huang, Kexin Zhao, and Bryan Catanzaro. DiffWave: A Versatile](https://openreview.net/forum?id=a-xFK8Ymz5J)
+[Diffusion Model for Audio Synthesis. In International Conference on Learning Representations,](https://openreview.net/forum?id=a-xFK8Ymz5J)
+2021.
+
+[Karsten Kreis, Kurt Kremer, Raffaello Potestio, and Mark E. Tuckerman. From classical to quantum](https://aip.scitation.org/doi/full/10.1063/1.5000701?casa_token=LklzDV2S3KAAAAAA%3AU6Vj2gJBDInu3VmuXLomKXlQb8GRI64y_p0kzkF-YnXveQvb4WmxVRaELXuLWes8jXMo0vpGxYgr2w)
+[and back: Hamiltonian adaptive resolution path integral, ring polymer, and centroid molecular](https://aip.scitation.org/doi/full/10.1063/1.5000701?casa_token=LklzDV2S3KAAAAAA%3AU6Vj2gJBDInu3VmuXLomKXlQb8GRI64y_p0kzkF-YnXveQvb4WmxVRaELXuLWes8jXMo0vpGxYgr2w)
+[dynamics. The Journal of Chemical Physics, 147(24):244104, 2017.](https://aip.scitation.org/doi/full/10.1063/1.5000701?casa_token=LklzDV2S3KAAAAAA%3AU6Vj2gJBDInu3VmuXLomKXlQb8GRI64y_p0kzkF-YnXveQvb4WmxVRaELXuLWes8jXMo0vpGxYgr2w)
+
+[Benedict Leimkuhler and Charles Matthews. Rational Construction of Stochastic Numerical Meth-](https://academic.oup.com/amrx/article/2013/1/34/166771?login=true)
+[ods for Molecular Sampling. Applied Mathematics Research eXpress, 2013(1):34–56, 2013.](https://academic.oup.com/amrx/article/2013/1/34/166771?login=true)
+
+[Benedict Leimkuhler and Charles Matthews. Molecular Dynamics: With Deterministic and Stochas-](https://www.springer.com/gp/book/9783319163741)
+_[tic Numerical Methods. Interdisciplinary Applied Mathematics. Springer, 2015.](https://www.springer.com/gp/book/9783319163741)_
+
+[Benedict Leimkuhler and Sebastian Reich. Simulating Hamiltonian Dynamics. Cambridge Mono-](https://www.cambridge.org/ca/academic/subjects/mathematics/computational-science/simulating-hamiltonian-dynamics?format=HB&isbn=9780521772907)
+graphs on Applied and Computational Mathematics. Cambridge University Press, 2005.
+
+[Haoying Li, Yifan Yang, Meng Chang, Huajun Feng, Zhihai Xu, Qi Li, and Yueting Chen. SRDiff:](https://arxiv.org/abs/2104.14951)
+[Single Image Super-Resolution with Diffusion Probabilistic Models. arXiv:2104.14951, 2021.](https://arxiv.org/abs/2104.14951)
+
+[Eric Luhman and Troy Luhman. Knowledge Distillation in Iterative Generative Models for Im-](https://arxiv.org/abs/2101.02388)
+[proved Sampling Speed. arXiv:2101.02388, 2021.](https://arxiv.org/abs/2101.02388)
+
+[Shitong Luo and Wei Hu. Diffusion Probabilistic Models for 3D Point Cloud Generation. In Pro-](https://openaccess.thecvf.com/content/CVPR2021/html/Luo_Diffusion_Probabilistic_Models_for_3D_Point_Cloud_Generation_CVPR_2021_paper.html)
+_ceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),_
+2021.
+
+[Siwei Lyu. Interpretation and Generalization of Score Matching. In Proceedings of the Twenty-Fifth](https://dl.acm.org/doi/10.5555/1795114.1795156)
+_Conference on Uncertainty in Artificial Intelligence, UAI ’09, pp. 359–366, Arlington, Virginia,_
+USA, 2009. AUAI Press.
+
+Yi-An Ma, Niladri Chatterji, Xiang Cheng, Nicolas Flammarion, Peter Bartlett, and Michael I Jor[dan. Is There an Analog of Nesterov Acceleration for MCMC? arXiv:1902.00996, 2019.](https://arxiv.org/abs/1902.00996)
+
+[Glenn J. Martyna, Michael L. Klein, and Mark Tuckerman. Nos´e–Hoover chains: The canonical](https://aip.scitation.org/doi/abs/10.1063/1.463940?casa_token=l48jpMUJAoAAAAAA:_NYtqr8KZl3osQR455RPx87yFSah8FSKjH3G9bNQErXYVTinvxJ0ka2HnfSbZEZPDpvNMyBTIOJo1Q)
+[ensemble via continuous dynamics. The Journal of Chemical Physics, 97(4):2635–2643, 1992.](https://aip.scitation.org/doi/abs/10.1063/1.463940?casa_token=l48jpMUJAoAAAAAA:_NYtqr8KZl3osQR455RPx87yFSah8FSKjH3G9bNQErXYVTinvxJ0ka2HnfSbZEZPDpvNMyBTIOJo1Q)
+
+Martin W McCall. Classical Mechanics: From Newton to Einstein: A Modern Introduction, 2nd
+_Edition. Wiley, Hoboken, N.J., 2010._
+
+[Chenlin Meng, Yang Song, Jiaming Song, Jiajun Wu, Jun-Yan Zhu, and Stefano Ermon. SDEdit:](https://arxiv.org/abs/2108.01073)
+[Image Synthesis and Editing with Stochastic Differential Equations. arXiv:2108.01073, 2021.](https://arxiv.org/abs/2108.01073)
+
+[Yisroel Mirsky and Wenke Lee. The Creation and Detection of Deepfakes: A Survey. ACM Comput.](https://dl.acm.org/doi/abs/10.1145/3425780?casa_token=dNM1WT1Tk5cAAAAA:EY6oH11-RXcmnv683wpcTq_LnG_M6CpJzlCYiJYVcIle8DQM6fuZGMuVyrKNw6-nEy9gsgRO9Atibw)
+_Surv., 54(1), 2021._
+
+Gautam Mittal, Jesse Engel, Curtis Hawthorne, and Ian Simon. Symbolic music generation with
+diffusion models. In Proceedings of the 22nd International Society for Music Information Re_[trieval Conference, 2021. URL https://archives.ismir.net/ismir2021/paper/](https://archives.ismir.net/ismir2021/paper/000058.pdf)_
+[000058.pdf.](https://archives.ismir.net/ismir2021/paper/000058.pdf)
+
+
+-----
+
+[Takeru Miyato, Toshiki Kataoka, Masanori Koyama, and Yuichi Yoshida. Spectral Normalization](https://arxiv.org/abs/1802.05957)
+[for Generative Adversarial Networks. In International Conference on Learning Representations](https://arxiv.org/abs/1802.05957)
+_(ICLR), 2018._
+
+[Wenlong Mou, Yi-An Ma, Martin J. Wainwright, Peter L. Bartlett, and Michael I. Jordan. High-](https://www.jmlr.org/papers/v22/20-576.html)
+[Order Langevin Diffusion Yields an Accelerated MCMC Algorithm. Journal of Machine Learn-](https://www.jmlr.org/papers/v22/20-576.html)
+_ing Research, 22(42):1–41, 2021._
+
+[Javier R. Movellan. Contrastive Divergence in Gaussian Diffusions. Neural Computation, 20(9):](https://ieeexplore.ieee.org/abstract/document/6796824)
+2238–2252, 2008.
+
+[Eliya Nachmani, Robin San Roman, and Lior Wolf. Non Gaussian Denoising Diffusion Models.](https://arxiv.org/abs/2106.07582)
+_arXiv:2106.07582, 2021._
+
+[Radford M. Neal. Annealed importance sampling. Statistics and Computing, 2001.](https://link.springer.com/article/10.1023/A:1008923215028)
+
+Radford M. Neal. MCMC Using Hamiltonian Dynamics. Handbook of Markov Chain Monte Carlo,
+54:113–162, 2011.
+
+Thanh Thi Nguyen, Quoc Viet Hung Nguyen, Cuong M. Nguyen, Dung Nguyen, Duc Thanh
+[Nguyen, and Saeid Nahavandi. Deep Learning for Deepfakes Creation and Detection: A Sur-](https://arxiv.org/abs/1909.11573)
+[vey. arXiv:1909.11573, 2021.](https://arxiv.org/abs/1909.11573)
+
+[Alexander Quinn Nichol and Prafulla Dhariwal. Improved Denoising Diffusion Probabilistic Mod-](http://proceedings.mlr.press/v139/nichol21a.html)
+[els. In International Conference on Machine Learning, 2021.](http://proceedings.mlr.press/v139/nichol21a.html)
+
+[Shuichi Nos´e. A unified formulation of the constant temperature molecular dynamics methods. The](https://aip.scitation.org/doi/abs/10.1063/1.447334?casa_token=qwfnwtVbU_wAAAAA:Q4eno4quZFIqV3J5nprUTUl88IiAb64BX1yIu4J13vdVF0DBs_gviYlLVI1Wuahg73n_Kgiv5z-6Bw)
+_Journal of Chemical Physics, 81(1):511–519, 1984._
+
+[Aaron van den Oord, Nal Kalchbrenner, and Koray Kavukcuoglu. Pixel Recurrent Neural Networks.](http://proceedings.mlr.press/v48/oord16.html)
+_International Conference on Machine Learning, 2016._
+
+[Gaurav Parmar, Dacheng Li, Kwonjoon Lee, and Zhuowen Tu. Dual Contradistinctive Generative](https://openaccess.thecvf.com/content/CVPR2021/html/Parmar_Dual_Contradistinctive_Generative_Autoencoder_CVPR_2021_paper.html)
+[Autoencoder.](https://openaccess.thecvf.com/content/CVPR2021/html/Parmar_Dual_Contradistinctive_Generative_Autoencoder_CVPR_2021_paper.html) In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+_Recognition, pp. 823–832, 2021._
+
+[B. T. Polyak. Some methods of speeding up the convergence of iteration methods. USSR Computa-](https://www.sciencedirect.com/science/article/abs/pii/0041555364901375)
+_tional Mathematics and Mathematical Physics, 4(5):1–17, 1964. ISSN 0041-5553._
+
+[A. J. Roberts. Modify the Improved Euler scheme to integrate stochastic differential equations.](https://arxiv.org/abs/1210.0933)
+_arXiv:1210.0933, 2012._
+
+Chitwan Saharia, Jonathan Ho, William Chan, Tim Salimans, David J Fleet, and Mohammad
+[Norouzi. Image Super-Resolution via Iterative Refinement. arXiv:2104.07636, 2021.](https://arxiv.org/abs/2104.07636)
+
+[Robin San-Roman, Eliya Nachmani, and Lior Wolf. Noise Estimation for Generative Diffusion](https://arxiv.org/abs/2104.02600)
+[Models. arXiv:2104.02600, 2021.](https://arxiv.org/abs/2104.02600)
+
+[Simo S¨arkk¨a and Arno Solin. Applied Stochastic Differential Equations, volume 10. Cambridge](https://www.cambridge.org/fi/academic/subjects/statistics-probability/applied-probability-and-stochastic-networks/applied-stochastic-differential-equations?format=PB)
+University Press, 2019.
+
+[Hiroshi Sasaki, Chris G. Willcocks, and Toby P. Breckon. UNIT-DDPM: UNpaired Image Transla-](https://arxiv.org/abs/2104.05358)
+[tion with Denoising Diffusion Probabilistic Models. arXiv:2104.05358, 2021.](https://arxiv.org/abs/2104.05358)
+
+Xiaocheng Shang, Zhanxing Zhu, Benedict Leimkuhler, and Amos J Storkey. [Covariance-](https://proceedings.neurips.cc/paper/2015/hash/6f4922f45568161a8cdf4ad2299f6d23-Abstract.html)
+[Controlled Adaptive Langevin Thermostat for Large-Scale Bayesian Sampling. In Advances in](https://proceedings.neurips.cc/paper/2015/hash/6f4922f45568161a8cdf4ad2299f6d23-Abstract.html)
+_Neural Information Processing Systems, 2015._
+
+[Abhishek Sinha, Jiaming Song, Chenlin Meng, and Stefano Ermon. D2C: Diffusion-Denoising](https://arxiv.org/abs/2106.06819)
+[Models for Few-shot Conditional Generation. arXiv:2106.06819, 2021.](https://arxiv.org/abs/2106.06819)
+
+[Jascha Sohl-Dickstein, Peter Battaglino, and Michael R. DeWeese. Minimum Probability Flow](https://icml.cc/Conferences/2011/papers.php.html#480)
+[Learning. In Proceedings of the 28th International Conference on International Conference on](https://icml.cc/Conferences/2011/papers.php.html#480)
+_Machine Learning, 2011._
+
+
+-----
+
+[Jascha Sohl-Dickstein, Eric Weiss, Niru Maheswaranathan, and Surya Ganguli. Deep Unsuper-](http://proceedings.mlr.press/v37/sohl-dickstein15.html)
+[vised Learning using Nonequilibrium Thermodynamics. In International Conference on Machine](http://proceedings.mlr.press/v37/sohl-dickstein15.html)
+_Learning, 2015._
+
+[Jiaming Song, Chenlin Meng, and Stefano Ermon. Denoising Diffusion Implicit Models. In Inter-](https://openreview.net/forum?id=St1giarCHLP)
+_national Conference on Learning Representations, 2021a._
+
+[Yang Song and Stefano Ermon. Generative Modeling by Estimating Gradients of the Data Distribu-](https://proceedings.neurips.cc/paper/2019/hash/3001ef257407d5a371a96dcd947c7d93-Abstract.html)
+[tion. In Proceedings of the 33rd Annual Conference on Neural Information Processing Systems,](https://proceedings.neurips.cc/paper/2019/hash/3001ef257407d5a371a96dcd947c7d93-Abstract.html)
+2019.
+
+[Yang Song, Conor Durkan, Iain Murray, and Stefano Ermon. Maximum Likelihood Training of](https://arxiv.org/abs/2101.09258)
+[Score-Based Diffusion Models. In Neural Information Processing Systems (NeurIPS), 2021b.](https://arxiv.org/abs/2101.09258)
+
+Yang Song, Jascha Sohl-Dickstein, Diederik P Kingma, Abhishek Kumar, Stefano Ermon, and Ben
+[Poole. Score-Based Generative Modeling through Stochastic Differential Equations. In Interna-](https://openreview.net/forum?id=PxTIG12RRHS)
+_tional Conference on Learning Representations, 2021c._
+
+[Gilbert Strang. On the Construction and Comparison of Difference Schemes. SIAM Journal on](https://epubs.siam.org/doi/abs/10.1137/0705041?casa_token=cIRVUWnT6RAAAAAA:PGihxI3dblGhEJmdxZIjycMefwGSrLqsyVXTqEbj2bQegcUI5wCZTMAGMccN8LxhAnCS5-wRVDc)
+_Numerical Analysis, 5(3):506–517, 1968._
+
+[H. F. Trotter. On the Product of Semi-Groups of Operators. Proceedings of the American Mathe-](https://www.jstor.org/stable/2033649?casa_token=0OfiMcKep80AAAAA%3AFZ4zqfiuEp_DWq6VyvW027QZPQCMXk7Fq4lrFJWaZm-HZ-XM212eTDUNqo7brocxeIRzQkXyNPnismYEXU1iPv1K2HDF2YMItEtRskr2oZ8XV1CWvmiT&seq=1#metadata_info_tab_contents)
+_matical Society, 10:545–551, 1959._
+
+[M. Tuckerman, B. J. Berne, and G. J. Martyna. Reversible multiple time scale molecular dynamics.](https://aip.scitation.org/doi/abs/10.1063/1.463137?casa_token=ny5RBZegCksAAAAA:c9PLT8Lw750OYq3x9LN3uSJbYNO-dSEinhmIJ8N5sYpN5egrEl_bs0-D2biWwSPEezxbidMbpzYCRw)
+_The Journal of Chemical Physics, 97(3):1990–2001, 1992._
+
+Mark E. Tuckerman. Statistical Mechanics: Theory and Molecular Simulation. Oxford University
+Press, New York, 2010.
+
+[Cristian Vaccari and Andrew Chadwick. Deepfakes and Disinformation: Exploring the Impact of](https://journals.sagepub.com/doi/full/10.1177/2056305120903408)
+[Synthetic Political Video on Deception, Uncertainty, and Trust in News. Social Media + Society,](https://journals.sagepub.com/doi/full/10.1177/2056305120903408)
+6(1):2056305120903408, 2020.
+
+[Arash Vahdat and Jan Kautz. NVAE: A Deep Hierarchical Variational Autoencoder. In Neural](https://arxiv.org/abs/2007.03898)
+_Information Processing Systems (NeurIPS), 2020._
+
+[Arash Vahdat, Karsten Kreis, and Jan Kautz. Score-based Generative Modeling in Latent Space. In](https://arxiv.org/abs/2106.05931)
+_Neural Information Processing Systems (NeurIPS), 2021._
+
+Pascal Vincent. [A Connection Between Score Matching and Denoising Autoencoders.](https://ieeexplore.ieee.org/abstract/document/6795935) _Neural_
+_Computation, 23(7):1661–1674, 2011._
+
+Daniel Watson, Jonathan Ho, Mohammad Norouzi, and William Chan. [Learning to Efficiently](https://arxiv.org/abs/2106.03802)
+[Sample from Diffusion Probabilistic Models. arXiv:2106.03802, 2021.](https://arxiv.org/abs/2106.03802)
+
+[Zhisheng Xiao, Karsten Kreis, Jan Kautz, and Arash Vahdat. VAEBM: A Symbiosis between Vari-](https://openreview.net/forum?id=5m3SEczOV8L)
+[ational Autoencoders and Energy-based Models. In International Conference on Learning Rep-](https://openreview.net/forum?id=5m3SEczOV8L)
+_resentations, 2021._
+
+[Richard Zhang. Making Convolutional Networks Shift-Invariant Again. In Kamalika Chaudhuri](http://proceedings.mlr.press/v97/zhang19a.html)
+and Ruslan Salakhutdinov (eds.), Proceedings of the 36th International Conference on Machine
+_Learning, volume 97 of Proceedings of Machine Learning Research, pp. 7324–7334. PMLR,_
+09–15 Jun 2019.
+
+[Shengyu Zhao, Zhijian Liu, Ji Lin, Jun-Yan Zhu, and Song Han. Differentiable Augmentation for](https://proceedings.neurips.cc/paper/2020/hash/55479c55ebd1efd3ff125f1337100388-Abstract.html)
+[Data-Efficient GAN Training. Advances in Neural Information Processing Systems, 33, 2020.](https://proceedings.neurips.cc/paper/2020/hash/55479c55ebd1efd3ff125f1337100388-Abstract.html)
+
+Linqi Zhou, Yilun Du, and Jiajun Wu. [3D Shape Generation and Completion through Point-](https://arxiv.org/abs/2104.03670)
+[Voxel Diffusion. In Proceedings of the IEEE/CVF International Conference on Computer Vision](https://arxiv.org/abs/2104.03670)
+_(ICCV), 2021._
+
+
+-----
+
+CONTENTS
+
+**1** **Introduction** **1**
+
+**2** **Background** **2**
+
+**3** **Critically-Damped Langevin Diffusion** **3**
+
+3.1 Score Matching Objective . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+
+3.2 Scalable Training . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+
+3.3 Sampling from CLD-based SGMs . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+
+**4** **Related Work** **6**
+
+**5** **Experiments** **7**
+
+5.1 Image Generation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+
+5.2 Sampling Speed and Synthesis Quality Trade-Offs . . . . . . . . . . . . . . . . . . 8
+
+5.3 Ablation Studies . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+
+**6** **Conclusions** **9**
+
+**7** **Ethics and Reproducibility** **10**
+
+**References** **10**
+
+**A Langevin Dynamics** **18**
+
+A.1 Different Damping Ratios . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+
+A.2 Very High Friction Limit and Connections to previous SDEs in SGMs . . . . . . . 18
+
+**B** **Critically-Damped Langevin Diffusion** **20**
+
+B.1 Perturbation Kernel . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+
+B.2 Convergence and Equilibrium . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+
+B.3 CLD Objective . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+
+B.4 CLD-specific Implementation Details . . . . . . . . . . . . . . . . . . . . . . . . 24
+
+B.5 Lower Bounds and Probability Flow ODE . . . . . . . . . . . . . . . . . . . . . . 24
+
+B.6 On Introducing a Hamiltonian Component into the Diffusion . . . . . . . . . . . . 26
+
+**C HSM: Hybrid Score Matching** **26**
+
+C.1 Gradient Variance Reduction via HSM . . . . . . . . . . . . . . . . . . . . . . . . 28
+
+**D Symmetric Splitting CLD Sampler (SSCS)** **29**
+
+D.1 Background . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+
+D.2 Derivation and Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+
+**E** **Implementation and Experiment Details** **34**
+
+
+-----
+
+E.1 Score and Jacobian Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+
+E.2 Image Modeling Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+
+E.2.1 Training Details and Model Architectures . . . . . . . . . . . . . . . . . . 36
+
+E.2.2 CIFAR-10 Results for VESDE and VPSDE . . . . . . . . . . . . . . . . . 36
+
+E.2.3 Quadratic Striding . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 37
+
+E.2.4 Denoising . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 37
+
+E.2.5 Solver Error Tolerances for Runge–Kutta 4(5) . . . . . . . . . . . . . . . . 38
+
+E.2.6 Ablation Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+
+E.2.7 LSGM-100M Model . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+
+**F** **Additional Experiments** **39**
+
+F.1 Toy Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 39
+
+F.1.1 Analytical Sampling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 39
+
+F.1.2 Maximum Likelihood Training . . . . . . . . . . . . . . . . . . . . . . . . 39
+
+F.2 CIFAR-10 — Extended Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+
+F.3 CelebA-HQ-256 — Extended Results . . . . . . . . . . . . . . . . . . . . . . . . 45
+
+**G Proofs of Perturbation Kernels** **50**
+
+G.1 Forward Diffusion . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 50
+
+G.1.1 Proof of Correctness of the Mean . . . . . . . . . . . . . . . . . . . . . . 50
+
+G.1.2 Proof of Correctness of the Covariance . . . . . . . . . . . . . . . . . . . 51
+
+G.2 Analytical Splitting Term of SSCS . . . . . . . . . . . . . . . . . . . . . . . . . . 52
+
+G.2.1 Proof of Correctness of the Mean . . . . . . . . . . . . . . . . . . . . . . 53
+
+G.2.2 Proof of Correctness of the Covariance . . . . . . . . . . . . . . . . . . . 53
+
+
+-----
+
+A LANGEVIN DYNAMICS
+
+Here, we discuss different aspects of Langevin dynamics. Recall the Langevin dynamics, Eq. (5),
+from the main paper:
+
+_dxt_ _M_ **vt** **0d** 0
+
+= _[−][1]_ _βdt_ + _βdt +_ _dwt_ _._ (11)
+
+_dvt_ **xt** ΓM **vt** _√2Γβ_
+   _−_  − _[−][1]_   
+
+Hamiltonian component=:H Ornstein-Uhlenbeck process=:O
+| {z } | {z }
+
+A.1 DIFFERENT DAMPING RATIOS
+
+As discussed in Sec. 3, Langevin dynamics can be run with different ratios between mass M and
+squared friction Γ[2]. To recap from the main paper:
+
+**(i) For Γ[2]** _< 4M (underdamped Langevin dynamics), the Hamiltonian component dominates, which_
+implies oscillatory dynamics of xt and vt that slow down convergence to equilibrium.
+
+**(ii) For Γ[2]** _> 4M (overdamped Langevin dynamics), the O-term dominates which also slows down_
+convergence, since the accelerating effect by the Hamiltonian component is suppressed due to the
+strong noise injection.
+
+**(iii) For Γ[2]** = 4M (critical-damping), an ideal balance is achieved and convergence to pEQ(u)occurs
+quickly in a smooth manner without oscillations.
+
+In Fig. 5, we visualize diffusion trajectories according to Langevin dynamics run in the different
+damping regimes. We observe that underdamped Langevin dynamics show undesired oscillatory
+behavior, while overdamped Langevin dynamics perform very inefficiently, too. Critical-damping
+achieves a good balance between the two and mixes and converges quickly. In fact, it can be shown
+to be optimal in terms of convergence; see, for example, McCall (2010).
+
+Consequently, we propose to set Γ[2] = Γ[2]critical [:= 4][M][ in CLD.]
+
+A.2 VERY HIGH FRICTION LIMIT AND CONNECTIONS TO PREVIOUS SDES IN SGMS
+
+Let us re-write the above Langevin dynamics and consider the more general case with timedependent β(t):
+
+_dxt = M_ _[−][1]vtβ(t)dt,_ (12)
+
+_dvt = −_ **xtβ(t)dt** _−_ ΓM _[−][1]vtβ(t)dt_ + 2Γβ(t)dwt _._ (13)
+**(ii): potential term** **(iii): friction term** p(iv): noise term
+
+To solve this SDE, let us assume a simple Euler-based integration scheme, with the update equation| {z } | {z } | {z }
+for a single step at time t (this integration scheme would not be optimal, as discussed in Sec. 3.3.,
+however, it would be accurate for sufficiently small time steps and we just need this to make the
+connection to previous works like the VPSDE):
+
+
+**xn+1 = xn + β(t)M** _[−][1]vn+1δt,_ (14)
+
+
+**vn+1 =** **vn** _−_ _β(t)xnδt_ _−_ _β(t)ΓM_ _[−][1]vnδt_ + 2β(t)ΓN (0d, δtId), (15)
+**(i): current step velocity** **(ii): potential term** **(iii): friction term** p **(iv): noise term**
+
+Now, let us assume a friction coefficient|{z} | {z Γ = Γ} max| := _β{z(Mt)δt_ [. Since the time step]} | {z _[ δt][ is usually very]}_
+
+small, this correspond to a very high friction. In fact, it can be considered the maximum friction
+limit, at which the friction is so large that the current step velocity (i) is completely cancelled out by
+the friction term (iii). We obtain:
+
+**xn+1 = xn + β(t)M** _[−][1]vn+1δt_ (16)
+
+
+2 _[M]_ (17)
+
+_δt_
+
+_[N]_ [(][0][d][, δt][I][d][)][.]
+
+
+**vn+1 = −β(t)xtδt +**
+
+
+-----
+
+Figure 5: Langevin dynamics in different damping regimes. Each pair of visualizations corresponds to the
+(coupled) evolution of data xt and velocities vt. We show the marginal (red) probabilities and the projections
+of the (green) trajectories. The probabilities always correspond to the same optimal setting Γ = Γcritical (recall
+that Γcritical = 2√M and Γmax = M/(β(t)δt); see Sec. A.2). The trajectories correspond to different Langevin
+
+trajectories run in the different regimes with indicated friction coefficients Γ. We see in (b), that for critical
+_damping the xt trajectories quickly explore the space and converge according to the distribution indicated_
+by the underlying probability. In the under-damped regime (a), even though the trajectories mix quickly we
+observe undesired oscillatory behavior. For over-damped Langevin dynamics, (c) and (d), the xt trajectories
+mix and converge only very slowly. Note that the visualized diffusion uses different hyperparameters compared
+to the diffusion shown in Fig. 1 in the main text: Here, we have chosen a much larger β, such that also the slow
+overdamped Langevin dynamics trajectories shown here mix a little bit over the visualized diffusion time (while
+the probability distribution and the trajectories for critical damping converge almost instantly).
+
+Now the velocity update, Eq. (17), does not depend on the current step velocity on the right-handside anymore. Hence, we can insert Eq. (17) directly into Eq. (16) and obtain:
+
+
+**xn+1 = xn −** _β(t)[2]M_ _[−][1]xnδt[2]_ +
+
+= xn _β(t)[2]M_ **xnδt[2]** +
+_−_ _[−][1]_
+
+Re-defining δt[′] := δt[2] and β[′](t) := β(t)[2], we obtain
+
+
+2β(t)[2]δtM (0d, δtId)
+
+_[−][1]N_ (18)
+
+2β(t)[2]δt[2]M (0d, Id).
+
+_[−][1]N_
+
+
+**xn+1 = xn −** _β[′](t)M_ _[−][1]xnδt[′]_ + 2β[′](t)δt[′]M _[−][1]N_ (0d, Id), (19)
+p
+
+which corresponds to the high-friction overdamped Langevin dynamics that are frequently run,
+for example, to train energy-based generative models (Du & Mordatch, 2019; Xiao et al., 2021).
+Let’s further absorb the mass M _[−][1]_ and the time step δt[′] into the time rescaling, defining _β[ˆ](t) :=_
+
+
+-----
+
+2β[′](t)M _[−][1]δt[′]. We obtain:_
+
+
+**xn+1 = xn** _βˆ(t)xn +_
+_−_ [1]2
+
+= (1 _βˆ(t))xn +_
+_−_ [1]2
+
+_≈_ 1 − _β[ˆ](t)xn +_
+q
+
+
+_βˆ(t)_ (0d, Id)
+_N_
+
+_βˆ(t)_ (0d, Id)
+_N_
+
+q
+
+_βˆ(t)_ (0d, Id),
+_N_
+
+
+(20)
+
+
+where the last approximation is true for sufficiently small _β[ˆ](t). However, this expression corre-_
+sponds to
+
+**xn+1** (xn+1; 1 _β(t)xn,_ _β[ˆ](t)Id)_ (21)
+_∼N_ _−_ [ˆ]
+q
+
+which is exactly the transition kernel of the VPSDE’s Markov chain (Ho et al., 2020; Song et al.,
+2021c). We see that the VPSDE corresponds to the high-friction limit of a more general Langevin
+dynamics-based diffusion process of the form of Eq. (11).
+
+If we assume a diffusion as above but with the potential term (ii) set to 0, we can similarly derive
+the VESDE Song et al. (2021c) as a high-friction limit of the corresponding diffusion. Generally,
+all previously used diffusions that inject noise directly into the data variables correspond to such
+high-friction diffusions.
+
+In conclusion, we see that previous high-friction diffusions require an excessive amount of noise
+to be injected to bring the dynamics to the prior, which intuitively makes denoising harder. For our
+CLD in the critical damping regime we can run the diffusion for a much shorter time or, equivalently,
+can inject less noise to converge to the equilibrium, i.e., the prior.
+
+B CRITICALLY-DAMPED LANGEVIN DIFFUSION
+
+Here, we present further details about our proposed critically-damped Langevin diffusion (CLD).
+We provide the derivations and formulas that were not presented in the main paper in the interest of
+brevity.
+
+B.1 PERTURBATION KERNEL
+
+To recap from the main text, in this work we propose to augment the datalocity variables vt ∈ R[d]. We then run the following diffusion process in the joint xt ∈ R[d] xwith auxiliaryt-vt-space _ve-_
+
+_dut :=_ _dxt_ = f (ut, t)dt + G(ut, t)dwt (22)
+_dvt_
+ 
+
+**_f_** (ut, t) = (f (t) ⊗ **_Id)ut,_** _f_ (t) := −β0(t) _−ββ((tt))ΓMM[−][1][−][1]_ _,_ (23)
+
+0 0
+**_G(ut, t) = G(t) ⊗_** **_Id,_** _G(t) :=_ 0 2Γβ(t) _,_ (24)
+ 
+
+where wt is a standard Wiener process in R[2][d] and β : [0, Tp] R[+]0 [is a time rescaling.][3][ In particular,]
+_→_
+we consider the critically-damped Langevin diffusion which can be obtained by setting M = Γ[2]/4,
+resulting in the following drift kernel
+
+0 4β(t)Γ[−][2]
+**_fCLD(ut, t) = (fCLD(t) ⊗_** **_Id)ut,_** _fCLD(t) :=_ _β(t)_ 4β(t)Γ[−][1] _._ (25)
+− _−_ 
+
+Since we only consider the critically-damped case in this work, we redefine f := fCLD and
+_f := fCLD for simplicity. Since our drift f and diffusion G coefficients are affine, ut is Nor-_
+mally distributed for all t ∈ [0, T ] if u0 is Normally distributed at t = 0 (S¨arkk¨a & Solin, 2019). In
+particular, given that u0 ∼N (u0; µ0, Σ0 = Σ0 ⊗ **_Id), where Σ0 = diag(Σ[xx]0_** _[,][ Σ]0[vv][)][ is a positive]_
+
+3For our experiments, we only used constant β; however, for generality, we present all derivations for
+time-dependent β(t).
+
+
+-----
+
+semi-definite diagonal 2-by-2 matrix (we restrict our derivation to diagonal covariance matrices at
+_t = 0 for simplicity, since in our situation velocity and data are generally independent at t = 0), we_
+derive expressions for µt and Σt, the mean and the covariance matrix of ut, respectively.
+
+Following S¨arkk¨a & Solin (2019) (Section 6.1), the mean and covariance matrix of ut obey the
+following respective ordinary differential equations (ODEs)
+
+_dµt_ (26)
+
+_dt_ [= (][f] [(][t][)][ ⊗] **_[I][d][)][µ][t][,]_**
+
+_dΣt_
+
+= (f (t) **_Id)Σt + [(f_** (t) **_Id)Σt][⊤]_** + _G(t)G(t)[⊤][]_ **_Id._** (27)
+_dt_ _⊗_ _⊗_ _⊗_
+
+Notating µ0 = (x0, v0)[⊤], the solutions to the above ODEs are  
+
+
+2 (t)Γ[−][1]x0 + 4 (t)Γ[−][2]v0 + x0
+**_µt =_** _B_ _B_
+ _−B(t)x0 −_ 2B(t)Γ[−][1]v0 + v0
+
+
+_e[−][2][B][(][t][)Γ][−][1]_ _,_ (28)
+
+
+and
+
+
+**Σt = Σt ⊗** **_Id,_** (29)
+
+Σt = Σ[xx]t Σ[xv]t _e[−][4][B][(][t][)Γ][−][1]_ _,_ (30)
+Σ[xv]t Σ[vv]t
+ 
+
+Σ[xx]t = Σ[xx]0 [+][ e][4][B][(][t][)Γ][−][1][ −] [1 + 4][B][(][t][)Γ][−][1][ (Σ]0[xx] _[−]_ [1) + 4][B][2][(][t][)Γ][−][2][ (Σ]0[xx] _[−]_ [2) + 16][B][(][t][)][2][Γ][−][4][Σ](31)0[vv][,]
+
+Σ[xv]t = −B(t)Σ[xx]0 [+ 4][B][(][t][)Γ][−][2][Σ]0[vv] _[−]_ [2][B][2][(][t][)Γ][−][1][ (Σ]0[xx] _[−]_ [2)][ −] [8][B][2][(][t][)Γ][−][3][Σ]0[vv][,] (32)
+
+Σ[vv]t = [Γ]4[2] _e[4][B][(][t][)Γ][−][1]_ 1 + (t)Γ + Σ[vv]0 1 + 4 (t)[2]Γ[−][2] 4 (t)Γ[−][1][] + (t)[2] (Σ[xx]0
+
+_−_ _B_ _B_ _−_ _B_ _B_ _[−]_ [2)][,]
+    (33)
+
+_t_
+where B(t) = 0 _[β][(ˆ]t) dt[ˆ]. For constant β(t) = β (as is used in all our experiments), we simply have_
+(t) = tβ. The correctness of the proposed mean and covariance matrix can be verified by simply
+_B_ R
+plugging them back into their respective ODEs; see App. G.1.
+
+With the above derivations, we can find analytical expressions for the perturbation kernel p(ut ).
+_|·_
+For example, when conditioning on initial data and velocity samples x0 and v0 (as in denoising
+score matching (DSM)), the mean and covariance matrix of the perturbation kernel p(ut **u0) can be**
+_|_
+obtained by setting µ0 = (x0, v0)[⊤], Σ[xx]0 = 0, and Σ[vv]0 [= 0][.]
+
+In our experiments, the initial velocity distribution is set to (0d, γM **_Id). Conditioning only on_**
+_N_
+initial data samples x0 and marginalizing over the full initial velocity distribution (as in our hybrid
+score matching (HSM), see Sec. C), the mean and covariance matrix of the perturbation kernel
+_p(ut|x0) can be obtained by setting µ0 = (x0, 0d)[⊤], Σ[xx]0_ = 0, and Σ[vv]0 [=][ γM] [.]
+
+B.2 CONVERGENCE AND EQUILIBRIUM
+
+Our CLD-based training of SGMs—as well as denoising diffusion models more generally—relies
+on the fact that the diffusion converges towards an analytically tractable equilibrium distribution for
+sufficiently large t. In fact, from the above equations we can easily see that,
+
+lim _t_ = 1, (34)
+_t→∞_ [Σ][xx]
+
+lim _t_ = 0, (35)
+_t→∞_ [Σ][xv]
+
+lim _t_ = [Γ][2] (36)
+_t_ 4 [=][ M,]
+_→∞_ [Σ][vv]
+
+lim (37)
+_t→∞_ **_[µ][t][ =][ 0][2][d][,]_**
+
+which establishes pEQ(u) = N (x; 0d, Id) N (v; 0d, M **_Id)._**
+
+Notice that our CLD is an instantiation of the more general Langevin dynamics defined by
+
+_dxt_ _M_ **vt** **0d** 0
+
+= _[−][1]_ _βdt +_ _βdt +_ _dwt._ (38)
+
+dvt ∇xt log ppot(xt) −ΓM _[−][1]vt_ √2Γβ
+
+
+-----
+
+which has the equilibrium distribution ˆpEQ(u) = ppot(x) N (v; 0d, M **_Id) (Leimkuhler & Matthews,_**
+
+2015; Tuckerman, 2010). However, the perturbation kernel of this Langevin dynamics is not available analytically anymore for arbitrary ppot(x). In our case, however, we have the analytically
+tractable ppot(x) = N (x; 0d, Id). Note that this corresponds to the classical “harmonic oscillator”
+problem from physics.
+
+B.3 CLD OBJECTIVE
+
+To derive the objective for training CLD-based SGMs, we start with a derivation that targets maximum likelihood training in a similar fashion to Song et al. (2021b). Let p0 and q0 be two densities,
+then
+
+_DKL(p0 ∥_ _q0) = DKL T(p∂D0 ∥_ KLq0)( −pt _DKLqt)(pT ∥_ _qT ) + DKL(pT ∥_ _qT )_ (39)
+
+= _∥_ _dt + DKL(pT_ _qT ),_
+_−_ 0 _∂t_ _∥_
+Z
+
+where pt and qt are the marginal densities of p0 and q0, respectively, diffused by our criticallydamped Langevin diffusion. As has been shown in Song et al. (2021b), Eq. (39) can be written as a
+mixture (over t) of score matching losses. To this end, let us consider the Fokker–Planck equation
+associated with the critically-damped Langevin diffusion:
+
+_∂pt(ut)_ 1
+
+_∂t_ = ∇ut · 2 _G(t)G(t)[⊤]_ _⊗_ **_Id_** _∇ut_ _pt(ut) −_ _pt(ut)(f_ (t) ⊗ **_Id)ut_**
+
+= **ut** [hp (ut, t)pt(ut)], hp(ut, t) := [1]2 _G(t)G(t)[⊤]_ **_Id_** ut log pt(ut) (f (t) **_Id)ut._**
+_∇_ _·_ _⊗_ _∇_ _−_ (40) ⊗
+
+  
+
+
+Similarly, we have _[∂q][t]∂t[(][u][t][)]_ = **ut** [hq(ut, t)qt(ut)]. Assuming log pt(ut) and log qt(ut) are
+
+smooth functions with at most polynomial growth at infinity, we have ∇ _·_
+
+lim (41)
+**ut→∞** **_[h][p][(][u][t][, t][)][p][t][(][u][t][) = lim]ut→∞_** **_[h][q][(][u][t][, t][)][q][t][(][u][t][) = 0][.]_**
+
+Using the above fact, we can compute the time-derivative of the Kullback–Leibler divergence between pt and qt as
+
+
+_∂DKL(pt_ _qt)_
+_∥_ = _[∂]_
+
+_∂t_ _∂t_
+
+
+_pt(ut) log_ _[p][t][(][u][t][)]_
+
+_qt(ut)_ _[d][u][t]_
+
+
+= − _pt(ut) [hp(ut, t) −_ **_hq(ut, t)][⊤]_** [∇ut log pt(ut) −∇ut log qt(ut)] dut
+Z
+
+= _pt(ut) [_ **ut log pt(ut)** **ut log qt(ut)][⊤]** [ ]G(t)G(t)[⊤] **_Id_** [ **ut log pt(ut)**
+_−_ [1]2 _∇_ _−∇_ _⊗_ _∇_
+
+Z
+
+_−∇ut log qt(ut)] dut_ 
+
+
+= −β(t)Γ _pt(ut)∥∇vt log pt(ut) −∇vt log qt(ut)∥2[2]_ _[d][u][t][.]_
+Z
+
+
+(42)
+
+
+Notice that due to the form of G(t), we now have only gradients with respect to the velocity component vt. Combining the above with Eq. (39), we have
+
+_DKL(p0_ _q0) = Et_ [0,T ],ut _pt(u)_ Γβ(t) **vt log pt(ut)** **vt log qt(ut)** 2 + DKL(pT _qT )_
+_∥_ _∼U_ _∼_ _∥∇_ _−∇_ _∥[2]_ _∥_
+h i
+
+
+Et [0,T ],ut _pt(u)_ Γβ(t) **vt log pt(ut)** **vt log qt(ut)** 2
+_≈_ _∼U_ _∼_ _∥∇_ _−∇_ _∥[2]_
+h
+
+
+(43)
+
+
+Note that the approximation holds if pT is sufficiently “close” to qT . We obtain a more general
+objective function by replacing Γβ(t) with an arbitrary function λ(t), i.e.,
+
+Et [0,T ],ut _pt(u)_ _λ(t)_ **vt log pt(ut)** **vt log qt(ut)** 2 (44)
+_∼U_ _∼_ _∥∇_ _−∇_ _∥[2]_
+h i
+
+
+-----
+
+As shown in App. C, the above can be rewritten, up to irrelevant constant terms, as either of the
+following two objectives:
+
+HSM(λ(t)) := Et [0,T ],x0 _p0(x0),ut_ _pt(ut_ **x0)** _λ(t)_ **vt log pt(ut** **x0)** **vt log qt(ut)** 2 _,_
+_∼U_ _∼_ _∼_ _|_ _∥∇_ _|_ _−∇_ _∥[2]_
+h (45)i
+
+
+DSM(λ(t)) := Et [0,T ],u0 _p0(u0),ut_ _pt(ut_ **u0)** _λ(t)_ **vt log pt(ut** **u0)** **vt log qt(ut)** 2 _._
+_∼U_ _∼_ _∼_ _|_ _∥∇_ _|_ _−∇_ _∥[2]_
+h (46)i
+
+For both HSM and DSM, we have shown in App. B.1 that the perturbation kernels pt(ut **x0) and**
+_pt(ut_ **u0) are Normal distributions with the following structure of the covariance matrix: |**
+_|_
+
+**Σt = Σt** **_Id,_** Σt = Σ[xx]t Σ[xv]t _._ (47)
+_⊗_ Σ[xv]t Σ[vv]t
+ 
+
+We can use this fact to compute the gradient∇ut log pt(ut | ·) = −∇ ∇uut logt 12 [(][u] p[t]t[ −](ut[µ] | ·[t][)])[Σ]t[−][1][(][u][t] _[−]_ **_[µ][t][)]_**
+
+= **Σ[−]t** [1][(][u][t]
+_−_ _[−]_ **_[µ][t][)]_** (48)
+
+= **_L[−⊤]t_** **_L[−]t_** [1][(][u][t]
+_−_ _[−]_ **_[µ][t][)]_**
+
+= **_L[−⊤]t_** **_ϵ2d,_**
+_−_
+
+Note that the structure ofofwhere Σt, i.e, ϵ2d ∼N (0, I2d) and Σt Σ implies thatt = LtL[⊤]t **_L[is the Cholesky factorization of the covariance matrix]t = Lt ⊗_** **_Id, where LtL[⊤]t_** [is the Cholesky factorization][ Σ][t][.]
+
+
+Σ[xx]t
+
+Σ[xv]t
+_√Σ[xx]t_
+
+
+_Lt =_ _L[xx]t_ _L[xv]t_
+_L[xv]t_ _L[vv]t_
+
+
+
+_._ (49)
+
+
+
+
+
+(50)
+
+
+Σ[xx]t Σ[vv]tΣ[xx]t[−][(Σ]t[xv][)][2]
+
+
+Furthermore, we have
+**_L[−⊤]t_** = L[−⊤]t **_Id_**
+_⊗_
+
+= Σ[xx]t _√ΣΣ[xv]t_ _[xx]t_
+
+p0 Σ[xx]t Σ[vv]tΣ[xx]t[−][(Σ]t[xv][)][2]
+
+ q
+
+
+_−1_
+
+
+**_Id_**
+_⊗_
+
+
+Σ[xz]t
+_−_
+
+Σ[xx]t ΣΣ[xx]t[zz]t _[−][(Σ]t[xv][)][2]_
+
+
+Σ[xx]t
+
+
+Σ[xx]t
+
+
+Σ[xx]t Σ[xx]t Σ[xx]t Σ[zz]t _t_ [)][2]
+
+=  0 Σ[xx]t _[−][(Σ][xv]_  _⊗_ **_Id._**
+
+Σ[xx]t Σ[vv]t _[−][(Σ]t[xv][)][2]_
+
+Using the above, we can compute q 
+_∇vt log pt(ut | ·) = [∇ut log pt(ut | ·)]d:2d_
+= **_L[−⊤]t_** **_ϵ2d_** _d:2d_
+_−_
+
+=  _ℓtϵd:2d,_ 
+_−_
+
+where
+
+
+(51)
+
+
+_ℓt :=_ Σ[xx]t (52)
+
+s Σ[xx]t [Σ]t[vv] (Σ[xv]t [)][2][,]
+
+_−_
+
+and ϵd:2d denotes those (latter) d components of ϵ2d that actually affect ∇vt log pt(ut|·) .
+
+Note that ℓt depends on the conditioning in the perturbation kernel, and therefore ℓt is different for
+DSM, which is based on p(ut **u0), and HSM, which is based on p(ut** **x0). Therefore, we will**
+henceforth refer to ℓ[HSM]t and ℓ |[DSM]t if distinction of the two cases is necessary (otherwise we will |
+simply refer to ℓt for both).
+
+As discussed in Section 3.2, we model ∇vt log qt(ut) as sθ(ut, t) = −ℓtαθ(ut, t). Plugging everything back into our objective functions, Eq. (45) and Eq. (46), we obtain
+
+HSM(λ(t)) = Et∼U [0,T ],x0∼p0(x0),ut∼pt(ut|x0) _λ(t)_ _ℓ[HSM]t_ 2 ∥ϵd:2d − _αθ(ut, t)∥22_ _,_ (53)
+
+DSM(λ(t)) = Et∼U [0,T ],u0∼p0(u0),ut∼pt(ut|u0) hλ(t)  ℓ[DSM]t 2 ∥ϵd:2d − _αθ(ut, t)∥22i_ _,_ (54)
+h    i
+
+
+-----
+
+140
+
+120
+
+
+100
+
+80
+
+
+60
+
+40
+
+
+20
+
+|Col1|HSM w/ ϵ = 1e −12 num HSM w/ ϵ = 1e −9 num HSM w/ ϵ = 1e −6 num DSM w/ ϵ = 1e −12 num DSM w/ ϵ = 1e −9 num DSM w/ ϵ = 1e −6 num|Col3|Col4|Col5|Col6|Col7|Col8|
+|---|---|---|---|---|---|---|---|
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+|||||||||
+
+
+HSM w/ ϵnum = 1e − 12
+
+HSM w/ ϵnum = 1e − 9
+
+HSM w/ ϵnum = 1e − 6
+
+DSM w/ ϵnum = 1e − 12
+
+DSM w/ ϵnum = 1e − 9
+
+DSM w/ ϵnum = 1e − 6
+
+
+10[−][5] 10[−][4] 10[−][3] 10[−][2] 10[−][1] 10[0]
+
+_t_
+
+Figure 6: Comparison of ℓ[HSM]t (in green) and ℓ[DSM]t (in orange) for our main hyperparameter setting
+with M = 0.25 and γ = 0.04. In contrast to ℓ[DSM]t, ℓ[HSM]t is analytically bounded. Nevertheless,
+numerical computation can be unstable (even when using double precision) in which case adding
+a numerical stabilization of ϵnum = 10[−][9] to the covariance matrix before computing ℓt suffices to
+make HSM work (see App. B.4).
+
+
+where ut is sampled via reparameterization:
+
+**ut = µt + Ltϵ = µt +** _L[xx]t_ **_[ϵ][0:][d]_**
+_L[xv]t_ **_[ϵ][0:][d]_** [+][ L][vv]t **_[ϵ][d][:2][d]_**
+
+
+
+(55)
+
+
+Note again that Lt is different for HSM and DSM.
+
+Analogously to prior work (Ho et al., 2020; Vahdat et al., 2021; Song et al., 2021b) an objective
+better suited for high quality image synthesis can be obtained by “dropping the variance prefactor”:
+
+2[]
+HSM _λ(t) =_ _ℓ[HSM]t_ _−_ = Et∼U [0,T ],x0∼p0(x0),ut∼pt(ut|x0) _∥ϵd:2d −_ _αθ(ut, t)∥2[2]_ _,_ (56)
+
+DSM λ(t) =  ℓ[DSM]t −2[] = Et∼U [0,T ],u0∼p0(u0),ut∼pt(ut|u0) h∥ϵd:2d − _αθ(ut, t)∥2[2]i_ _._ (57)
+    h i
+
+B.4 CLD-SPECIFIC IMPLEMENTATION DETAILS
+
+Analytically, ℓ[HSM]t is bounded (in particular, ℓ[HSM]0 = 1/[√]γM ), whereas ℓ[DSM]t is diverging for
+_t_ 0. In practice, however, we found that computation of ℓ[HSM]t can also be numerically unstable,
+_→_
+even when using double precision. As is common practice for computing Cholesky decompositions,
+we add a numerical stabilization matrix ϵnumI2d to Σt before computing ℓt. In Fig. 6, we visualize
+_ℓ[HSM]t_ and ℓ[DSM]t for different values of ϵnum using our main experimental setup of M = 0.25 and
+_γ = 0.04 (also, recall that in practice we have T = 1). Note that a very small numerical stabilization_
+of ϵnum = 10[−][9] in combination with the use of double precision makes HSM work in practice.
+
+
+B.5 LOWER BOUNDS AND PROBABILITY FLOW ODE
+
+Given the score model sθ(ut, t), we can synthesize novel samples via simulating the reverse-time
+diffusion SDE, Eq. (2) in the main text. This can be achieved, for example, via our novel SSCS,
+
+
+-----
+
+Euler-Maruyama, or methods such as GGF (Jolicoeur-Martineau et al., 2021a). However, Song et al.
+(2021b;c) have shown that a corresponding ordinary differential equation can be defined that generates samples from the same distribution, in case sθ(ut, t) models the ground truth scores perfectly.
+This ODE is:
+
+_du¯t =_ **_f_** (¯ut, T _t) + [1]_ **ut, T** _t)G(¯ut, T_ _t)[⊤]_ **u¯** _t_ [log][ p]T _t[(¯]ut)_ _dt_ (58)
+_−_ _−_ 2 **_[G][(¯]_** _−_ _−_ _∇_ _−_
+ 
+
+This ODE is often referred to as the probability flow ODE. We can use it to generate novel data
+by sampling the prior and solving this ODE, like previous works (Song et al., 2021c). Note that
+in practice sθ(ut, t) won’t be a perfect model, though, such that the generative models defined by
+simulating the reverse-time SDE and the probability flow ODE are not exactly equivalent (Song
+et al., 2021b). Nevertheless, they are very closely connected and it has been shown that their performance is usually very similar or almost the same, when we have learnt a good sθ(ut, t). In addition
+to sampling the generative SDE in our paper, we also sample from our CLD-based SGMs via this
+probability flow approach.
+
+With the definition of our CLD, the ODE becomes:
+
+_dx¯t_ _M_ **v¯t** **0d**
+
+= _−_ _[−][1]_ _βdt_ + _βdt_ (59)
+
+_dv¯t_ **x¯t** Γ **s(¯ut, T** _t) + M_ **v¯t**
+     _−_ _[−][1]_ 
+
+_A[′]H_  _S[′]_ 
+
+Notice the interesting form of this probability flow ODE for CLD: It corresponds to Hamiltonian| {z } | {z }
+dynamics (A[′]H [) plus the score function term][ S][′][. Compared to the generative SDE (Sec. 3.3), the]
+Ornstein-Uhlenbeck term disappears. Generally, symplectic integrators are best suited for integrating Hamiltonian systems (Neal, 2011; Tuckerman, 2010; Leimkuhler & Reich, 2005). However,
+our ODE is not perfectly Hamiltonian, due to the score term, and modern non-symplectic methods,
+such as the higher-order adaptive-step size Runge-Kutta 4(5) ODE integrator (Dormand & Prince,
+1980), which we use in practice to solve the probability flow ODE, can also accurately simulate
+Hamiltonian systems over limited time horizons.
+
+Importantly, the ODE formulation also allows us to estimate the log-likelihood of given test data,
+as it essentially defines a continuous Normalizing flow (Chen et al., 2018; Grathwohl et al., 2019),
+that we can easily run in either direction. However, in CLD the input into this ODE is not just the
+data x0, but also the velocity variable v0. In this case, we can still calculate a lower bound on the
+log-likelihood:
+
+
+log p(x0) = log _p(x0, v0)dv0_
+Z 
+
+= log _p(v0)_ _[p][(][x][0][,][ v][0][)]_ _dv0_
+
+_p(v0)_
+
+Z 
+
+Ev0 _p(v0) [log p(x0, v0)_ log p(v0)]
+_≥_ _∼_ _−_
+
+= Ev0 _p(v0) [log p(x0, v0)] + H(p(v0))_
+_∼_
+
+
+(60)
+
+
+where H(p(v0)) denotes the entropy of p(v0) (we have H(p(v0)) = 12 [log (2][πeγM] [)][). We can]
+obtain a stochastic, but unbiased estimate of log p(x0, v0) log pε(x0, v0) via solving the prob_≈_
+ability flow ODE with initial conditions (x0, v0) and calculating a stochastic estimate of the logdeterminant of the Jacobian via Hutchinson’s trace estimator (and also calculating the probability of
+the output under the prior), as done in Normalizing flows (Chen et al., 2018; Grathwohl et al., 2019)
+and previous works on SGMs (Song et al., 2021c;b). In the main paper, we report the negative of
+Eq. (60) as our upper bound on the negative log-likelihood (NLL).
+
+Note that this bound can be potentially quite loose. In principle, it would be desirable to perform an importance-weighted estimation of the log-likelihood, as in importance-weighted autoencoders (Burda et al., 2015), using multiple samples from the velocity distribution. However, this
+isn’t possible, as we only have access to a stochastic estimate log pε(x0, v0). The problems arising
+from this are discussed in detail in Appendix F of Vahdat et al. (2021). We could consider training
+a velocity encoder network, somewhat similar to Chen et al. (2020), to improve our bound, but we
+leave this for future research.
+
+
+-----
+
+B.6 ON INTRODUCING A HAMILTONIAN COMPONENT INTO THE DIFFUSION
+
+Here, we provide additional high-level intuitions and motivations about adding the Hamiltonian
+component to the diffusion process, as is done in our CLD.
+
+Let us recall how the data distribution evolves in the forward diffusion process of SGMs: The
+role of the diffusion is to bring the initial non-equilibrium state quickly towards the equilibrium or
+prior distribution. Suppose for a moment, we could do so with “pure” Hamiltonian dynamics (no
+noise injection). In that case, we could generate data from the backward model without learning
+a score or neural network at all, because Hamiltonian dynamics is analytically invertible (flipping
+the sign of the velocity, we can just integrate backwards in reverse time direction). Now, this is not
+possible in practice, since Hamiltonian dynamics alone usually cannot convert the non-equilibrium
+distribution to the prior distribution. Nevertheless, Hamiltonian dynamics essentially achieves a
+certain amount of mixing on its own; moreover, since it is deterministic and analytically invertible,
+this mixing comes at no cost in the sense that we do not have to learn a complex score function to
+invert the Hamiltonian dynamics. Our thought experiment shows that we should strive for a diffusion
+process that behaves as deterministically (meaning that deterministic implies easily invertible) as
+possible with as little noise injection as possible. And this is exactly what is achieved by adding
+the Hamiltonian component in the overall diffusion process. In fact, recall that it is the diffusion
+coefficient G of the forward SDE that ultimately scales the score function term of the backward
+generative SDE (and it is the score function that is hard to approximate with complex neural nets).
+Therefore, in other words, relying more on a deterministic Hamiltonian component for enhanced
+mixing (mixing just like in MCMC in that it brings us quickly towards the target distribution, in
+our case the prior) and less on pure noise injection will lead to a nicer generative SDE that relies
+less on a score function that requires complex and approximate neural network-based modeling, but
+more on a simple and analytical Hamiltonian component. Such an SDE could then be solved easier
+with an appropriate integrator (like our SSCS). In the end, we believe that this is the reason why our
+networks are “smoother” and why given the same network capacity and limited compute budgets
+we essentially outperform all previous results in the literature (on CIFAR-10).
+
+We would also like to offer a second perspective, inspired by the Markov chain Monte Carlo
+(MCMC) literature. In MCMC, “mixing” helps to quickly traverse the high probability parts of
+the target distribution and, if an MCMC chain is initialized far from the high probability manifold,
+to quickly converge to this manifold. However, this is precisely the situation we are in with the
+forward diffusion process of SGMs: The system is initialized in a far-from-equilibrium state (the
+data distribution) and we need to traverse the space as efficiently as possible to converge to the
+equilibrium distribution, this is, the prior. Without efficient mixing, it takes longer to converge to
+the prior, which also implies a longer generation path in the reverse direction—which intuitively
+corresponds to a harder problem. Therefore, we believe that ideas from the MCMC literature that
+accelerate mixing and traversal of state space may be beneficial also for the diffusions in SGMs. In
+fact, leveraging Hamiltonian dynamics to accelerate sampling is popular in the MCMC field (Neal,
+2011). Note that this line of reasoning extends to thermostating techniques from statistical mechanics and molecular dynamics, which essentially tackle similar problems like MCMC methods from
+the statistics literature (see discussion in Sec. 4).
+
+C HSM: HYBRID SCORE MATCHING
+
+We begin by recalling our objective function from App. B.3 (Eq. (44)):
+
+Et [0,T ] _λ(t)Eut_ _pt(u)[_ **vt log pt(ut)** _sθ(ut, t)_ 2[]] _,_ (61)
+_∼U_ _∼_ _∥∇_ _−_ _∥[2]_
+h i
+
+where sθ(u, t) is our score model. In the following, we dissect the “score matching” part of the
+above objective:
+
+SM := Eut _pt(ut)_ **vt log pt(ut)** _sθ(ut, t)_ 2
+_L_ _∼_ _∥∇_ _−_ _∥[2]_ (62)
+h i
+
+= Eut∼pt(ut)∥sθ(ut, t)∥2[2] _[−]_ [2][S][(][θ][) +][ C][2][(][t][)][.]
+
+where C2(t) := Eut _pt(ut)_ **vt log pt(ut)** 2 and S(θ) is the cross term discussed below. Fol_∼_ _∥∇_ _∥[2]_
+lowing Vincent (2011), we can rewriteh _LSM as an equivalent (up to addition of a time-dependenti_
+
+
+-----
+
+constant) denoising score matching objective DSM:
+_L_
+
+DSM := Eu0 _p(u0),ut_ _pt(ut_ **u0)** **vt log pt(ut** **u0)** _sθ(ut, t)_ 2
+_L_ _∼_ _∼_ _|_ _∥∇_ _|_ _−_ _∥[2]_ (63)
+= LSM + C3(t) − _C2(t),_
+
+where C3(t) := Eu0 _p(u0),ut_ _pt(ut_ **u0)** **vt log pt(ut** **u0)** 2 . Something that might not neces_∼_ _∼_ _|_ _∥∇_ _|_ _∥[2]_
+
+sarily be quite obvious is that there is no fundamental need to “denoise” with the distributionh i _p(u0)_
+(this is, use samples from the joint x0-v0 distribution p(u0), perturb them, and learn the score for
+denoising).
+
+Instead, we can “denoise” only with the data distribution p(x0) and marginalize over the entire initial
+velocity distribution p(v0), which results in
+
+HSM := Ex0 _p(x0),ut_ _pt(ut_ **x0)** **vt log pt(ut** **x0)** _sθ(ut, t)_ 2
+_L_ _∼_ _∼_ _|_ _∥∇_ _|_ _−_ _∥[2]_
+= Eut _pt(ut)_ _sθ(ut, t)_ 2 0[∼][p][(][x]0[)][,][u]t[∼][p]t[(][u]t[|][x]0[)][[][⟨∇][v]t [log][ p][t][(][u][t][ |][ x][0][)][, s][θ][(][u][t][, t][)][⟩][] +][ C][4][(][t][)][,]
+_∼_ _∥_ _∥[2]_ _[−]_ [2][E][x] (64)
+
+where C4(t) := Ex0 _p(x0),ut_ _pt(ut_ **x0)** **vt log pt(ut** **x0)** 2 and _,_ donates the inner product
+_∼_ _∼_ _|_ _∥∇_ _|_ _∥[2]_ _⟨·_ _·⟩_
+
+(notation chosen to be consistent with Vincenth (2011)). In our case, this makes sense sincei _p(v0) is_
+Normal, and therefore (as shown in App B.1), the perturbation kernel pt(ut **x0) is still Normal.**
+_|_
+
+In the following, for completeness, we redo the derivation of Vincent (2011) and show that LSM is
+equivalent to LHSM (up to addition of a constant). Starting from S(θ), we have
+
+_S(θ) = Eut_ _pt(ut)_ **vt log pt(ut), sθ(ut, t)**
+_∼_ _⟨∇_ _⟩_
+
+= **ut** _pt(ut) ⟨∇vt log pt(ut), sθ(ut, t)⟩_ _dut_
+Z
+
+= **vt** _pt(ut), sθ(ut, t)_ _dut_
+
+**ut** _⟨∇_ _⟩_
+
+Z
+
+
+(65)
+
+
+**vt**
+_∇_
+
+
+_pt(ut_ **x0)p0(x0) dx0, sθ(ut, t)** _dut_
+**x0** _|_
+
+
+**ut**
+
+**ut**
+
+**ut**
+
+
+**x0** _pt(ut | x0)p0(x0)∇vt log pt(ut | x0) dx0, sθ(ut, t)_ _dut_
+
+Z 
+
+**x0** _pt(ut | x0)p0(x0) ⟨∇vt log pt(ut | x0), sθ(ut, t)⟩_ _dx0 dut_
+
+
+= Ex0 _p0(x0),ut_ _p(ut_ **x0) [** **vt log pt(ut** **x0), sθ(ut, t)** ] .
+_∼_ _∼_ _|_ _⟨∇_ _|_ _⟩_
+
+Hence, we have that
+
+
+_LHSM = LSM + C4(t) −_ _C2(t)._ (66)
+
+
+This further implies that
+
+
+_LHSM = LDSM + C4(t) −_ _C3(t)._ (67)
+
+2
+Using the analysis from App B.1, we realize that C3 and C4 can be simplified to d _ℓ[DSM]t_ and
+
+2
+_d_ _ℓ[HSM]t_, respectively. Here, we used the fact that the expected squared norm of a multivariate  
+standard Normal random variable is equal to its dimension, i.e.,   Eε∼N (0d,Id)∥ε∥2[2] [=][ d][. This analysis]
+then simplifies Eq. (67) to
+
+2 2[]
+HSM = DSM + d _ℓ[DSM]t_ _ℓ[HSM]t_ _._ (68)
+_L_ _L_ _−_
+
+Using this relation, we can also find a connection between our CLD objective functions from     
+App. B.3. In particular, we have
+
+
+HSM(λ(t)) = Et [0,T ] [λ(t) HSM]
+_∼U_ _L_
+
+2 2[i]
+= Et [0,T ] [λ(t) DSM] + d Et [0,T ] _λ(t)_ _ℓ[DSM]t_ _ℓ[HSM]t_
+_∼U_ _L_ _∼U_ _−_
+
+= DSM(λ(t)) + d Et∼U [0,T ] _λ(t)_ _ℓ[DSM]th_ 2  − _ℓ[HSM]t_  2[i]  _._ 
+h      
+
+
+(69)
+
+
+-----
+
+C.1 GRADIENT VARIANCE REDUCTION VIA HSM
+
+Above, we derived that LHSM = LDSM + const, so one might wonder why we advocate for HSM
+over DSM. As discussed in Sec. 3.2, one advantage of HSM is that it avoids unbounded scores at
+_t →_ 0. However, there is a second advantage: In practice, we never solve expectations analytically
+but rather approximate them using Monte Carlo estimates. In the remainder of this section, we will
+show that in practice (Monte Carlo) gradients based on HSM have lower variance than those based
+on DSM.
+
+From Eq. (69), we have
+
+**_θHSM(λ(t)) = Et_** [0,T ] [λ(t) **_θ_** HSM]
+_∇_ _∼U_ _∇_ _L_
+
+= Et [0,T ] [λ(t) **_θ_** DSM], (70)
+_∼U_ _∇_ _L_
+
+= **_θDSM(λ(t)),_**
+_∇_
+
+where θ are the learnable parameters of the neural network. Instead of comparing the above expectations directly, we instead compare λ(t)∇θLHSM with λ(t)∇θLDSM for t ∈ [0, 1] (we use T = 1
+in all experiments) at discretized time values (as is done in practice). Replacing LHSM and LDSM
+with a single Monte Carlo estimate (as is used in practice), we have
+
+_λ(t)∇θLHSM ≈_ _λ(t)∇θsθ(ut, t)∇sθ(ut,t)∥∇vt log pt(ut | x0) −_ _sθ(ut, t)∥2[2][,]_ (71)
+
+**x0** _p(x0), ut_ _pt(ut_ **x0),**
+_∼_ _∼_ _|_
+
+_λ(t)∇θLDSM ≈_ _λ(t)∇θsθ(ut, t)∇sθ(ut,t)∥∇vt log pt(ut | u0) −_ _sθ(ut, t)∥2[2][,]_ (72)
+
+**u0** _p(u0), ut_ _pt(ut_ **u0),**
+_∼_ _∼_ _|_
+
+where we applied the chain-rule. Note that in Eq. (71) and Eq. (72), ut is sampled from the same
+distribution. Hence, λ(t) **_θsθ(ut, t) acts as a common scaling factor, with the variance difference_**
+_∇_
+between HSM and DSM originating from the squared norm term. Hence, we ignore λ(t) **_θsθ(ut, t)_**
+_∇_
+and only focus our analysis on the gradient of the norm terms, which we can further simplify:
+
+1
+2 [=][ s][θ][(][u][t][, t][)][ −∇][v]t [log][ p][t][(][u][t][ |][ x][0][) =:][ K][HSM][,][ (73)]
+2 _[∇][s][θ][(][u][t][,t][)][∥∇][v][t][ log][ p][t][(][u][t][ |][ x][0][)][ −]_ _[s][θ][(][u][t][, t][)][∥][2]_
+
+and
+
+1
+2 _[∇][s][θ][(][u][t][,t][)][∥∇][v][t][ log][ p][t][(][u][t][ |][ u][0][)][ −]_ _[s][θ][(][u][t][, t][)][∥]2[2]_ [=][ s][θ][(][u][t][, t][)][ −∇][v][t] [log][ p][t][(][u][t][ |][ u][0][) =:][ K][DSM][.][ (74)]
+
+We explore this difference in a realistic setup; in particular, we evaluate KHSM and KDSM for all
+data points in the CIFAR-10 training set. We choose sθ to be our trained ablation CLD model (with
+the standard setup of M _[−][1]_ = β = 4, see Sec. E.2.1 for model details). We then use these samples
+to compute the empirical covariance matrices CovHSM and CovDSM of the random variables KHSM
+and DSM, respectively.
+_K_
+
+As is common practice in statistics, we consider only the trace of the estimated covariance matrices.[4]
+The trace of the covariance matrix (of a random variable) is also commonly referred to as the total
+variation (of a random variable).
+
+We visualize our results in Fig. 7. For HSM, there is barely any visual difference in Tr(Cov) for
+_γ = 0.04 and γ = 1. For DSM, both γ = 0.04 and γ = 1 result in very large Tr(Cov) values for_
+small t. For large t, Tr(Cov) is considerably smaller for γ = 0.04 than for γ = 1. However, in
+practice, we found that DSM is even unstable for small γ. Given this analysis, we believe this is due
+to the large gradient variance for small t. In conclusion, these results demonstrate a clear variance
+reduction by the HSM objective, in particular for large γ. Ultimately, this is expected: In HSM,
+we are effectively integrating out the initial velocity distribution when estimating gradients, while in
+DSM we use noisy samples for the initial velocity.
+
+Note that re-introducing λ(t) weightings would allow us to scale the Tr(Cov) curves according to
+the “reweighted” objective or the maximum likelihood objective. However, we believe it is most
+instructive to directly analyze the gradient of the relevant norm term itself.
+
+4Arguably, the most prominent algorithm that follows this practice is principal component analysis (PCA).
+
+
+-----
+
+Figure 7: Traces of the estimated covariance matrices.
+
+D SYMMETRIC SPLITTING CLD SAMPLER (SSCS)
+
+In this section, we present a more complete derivation and analysis of our novel Symmetric Splitting
+CLD Sampler (SSCS).
+
+D.1 BACKGROUND
+
+Our derivation is inspired by methods from the statistical mechanics and molecular dynamics literature. In particular, we are leveraging symmetric splitting techniques as well as (Fokker–Planck)
+operator concepts. The high-level idea of symmetric splitting as well as the operator formalism are
+well-explained in Tuckerman (2010), in particular in their Section 3.10, which includes simple examples. Symmetric splitting methods for stochastic dynamics in particular are discussed in detail
+in Leimkuhler & Matthews (2015). We also recommend Leimkuhler & Matthews (2013), which
+discusses splitting methods for Langevin dynamics in a concise but insightful manner.
+
+D.2 DERIVATION AND ANALYSIS
+
+**Generative SDE. From Sec. 3.3, recall that our generative SDE can be written as (with ¯ut = uT** _t,_
+_−_
+**x¯t = xT** _t, ¯vt = vT_ _t):_
+_−_ _−_
+
+_dx¯t_ _M_ **v¯t** **0d** **0d** **0d**
+
+= _−_ _[−][1]_ _βdt_ + _βdt +_ + _βdt_
+
+_dv¯t_ **x¯t** ΓM **v¯t** _√2Γβdwt_ 2Γ **s(¯ut, T** _t) + M_ **v¯t**
+    − _[−][1]_     _−_ _[−][1]_ 
+
+_AH_ _AO_  _S_ 
+
+(75)
+
+| {z } | {z } | {z }
+
+**Fokker–Planck Equation and Fokker–Planck Operators. The evolution of the probability distri-**
+bution pT −t(¯ut) is described by the general Fokker–Planck equation (S¨arkk¨a & Solin, 2019):
+
+
+2d
+
+_i=1_
+
+X
+
+
+2d
+
+_i=1_
+
+X
+
+
+2d
+
+_j=1_
+
+X
+
+
+_∂[2]_
+
+_∂u¯i∂u¯j_ [Dij(¯ut, T − _t)pT −t(¯ut)],_
+
+(76)
+
+
+_∂pT −t(¯ut)_ =
+
+_∂t_ _−_
+
+
+_∂u¯i_ [µi(¯ut, T − _t)pT −t(¯ut)] +_
+
+
+-----
+
+with
+
+_M_ **v¯t**
+**_µ(¯ut, T_** _t) =_ _−_ _[−][1]_
+_−_ **x¯t**
+
+
+
+_β +_ **0d**
+ΓM **v¯t**
+− _[−][1]_
+
+
+_β +_ **0d** _β,_ (77)
+2Γ **s(¯ut, T** _t) + M_ **v¯t**
+ _−_ _[−][1]_ 
+ 
+
+
+**_Id._** (78)
+_⊗_
+
+
+_D(¯ut, T −_ _t) =_ 0 Γβ
+
+
+
+For our SDE, we can write the Fokker–Planck equation in short form as
+
+_∂pT −t(¯ut)_ = ( [ˆ]A[+ ˆ]S[)][p][T][ −][t][(¯]ut), (79)
+
+_∂t_ _L[∗]_ _L[∗]_
+
+with the Fokker–Planck operators (defined via their action on functions of the variables φ(¯ut)):
+
+_LˆA[∗]_ _[φ][(¯]ut) := βM_ _[−][1]v¯t∇x¯t_ _[φ][(¯]ut) −_ _βx¯t∇v¯t_ _[φ][(¯]ut) + ΓβM_ _[−][1]∇v¯t_ [[¯]vtφ(¯ut)] + Γβ∆v¯t _[φ][(¯]ut),_
+
+
+(80)
+_LˆS[∗]_ _[φ][(¯]ut) := −2Γβ∇v¯t_ **s(¯ut, T −** _t) + M_ _[−][1]v¯t_ _φ(¯ut)_ _,_ (81)
+
+_d_ 2
+
+_∂_    
+
+∆v¯t [:=] + _[∂][2]_ _._ (82)
+
+_i=1_  _∂x¯[2]i_ _∂v¯i[2]_ 
+
+X
+
+We are providing these formulas for transparency and completeness. We do not directly leverage
+them. However, working with these operators can be convenient. In particular, the operators describe the time evolution of states ¯ut under the stochastic dynamics defined by the SDE. Given an
+initial state ¯u0, we can construct a formal solution to the generative SDE via (Tuckerman, 2010;
+
+Leimkuhler & Matthews, 2015):
+
+**u¯t = e[t][(][ ˆ]LA[∗]** [+ ˆ]LS[∗] [)]u¯0, (83)
+
+where the operator e[t][(][ ˆ]LA[∗] [+ ˆ]LS[∗] [)] is known as the classical propagator that propagates states ¯u0 for
+time t according to the dynamics defined by the combined Fokker–Planck operators _L[ˆ]A[∗]_ [+ ˆ]LS[∗] [(to]
+avoid confusion, note that in Eq. (83) the operator e[t][(][ ˆ]LA[∗] [+ ˆ]LS[∗] [)] is applied on ¯u0 in an element-wise
+or “vectorized” fashion on all elements of ¯u0 in parallel). The problem with that expression is that
+we cannot analytically evaluate it. However, we can leverage it to design an integration method.
+
+**Symmetric Splitting Integration. Using the symmetric Trotter theorem or Strang splitting formula**
+as well as the Baker–Campbell–Hausdorff formula (Trotter, 1959; Strang, 1968; Tuckerman, 2010),
+it can be shown that:
+
+_δt_ _δt_ _N_ _δt_ _δt_ _N_
+
+_e[t][( ˆ]LA[∗]_ [+ ˆ]LS[∗] [)] = lim _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ _e_ 2 _L[ˆ]A[∗]_ _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ _e_ 2 _L[ˆ]A[∗]_ + (Nδt[3]), (84)
+_N_ _≈_ _O_
+_→∞_
+
+h i h i
+
+for large N ∈ N[+] and time step δt := t/N . The expression suggests that instead of directly
+evaluating the intractable e[t][( ˆ]LA[∗] [+ ˆ]LS[∗] [)], we can discretize the dynamics over t into N pieces of step size
+_δt_
+_δt, such that we only need to apply the individual e_ 2 _L[ˆ]A[∗]_ and e[δt][ ˆ]LS[∗] many times one after another for
+
+small time steps δt. A finer discretization implies a smaller error (since N =t/δt the error effectively
+scales as O(δt[2]) for fixed t). Hence, this implies an integration method. The general idea of such
+splitting schemes is to split an initially intractable propagator into separate terms, each of which is
+analytically tractable. In that case, the overall integration error for many steps is only due to the
+splitting scheme error,[5] but not due to the evaluation of the individual updates. Such techniques are,
+for example, popular in molecular dynamics to develop symplectic integrators as well as accurate
+samplers (Tuckerman et al., 1992; Tuckerman, 2010; Leimkuhler & Matthews, 2013; 2015; Bussi &
+Parrinello, 2007).
+
+
+**Analyzing the Splitting Terms. Next, we need to analyze the two individual terms:**
+
+_δt_
+**(i) Let us first analyze e** 2 _L[ˆ]A[∗]_ ¯ut: This term describes the stochastic evolution of ¯ut under the dy
+namics of an SDE like Eq. (75), but with S set to zero. However, if S is set to zero, the remaining
+
+5In principle, the error of the splitting scheme is defined more specifically by the commutator of the noncommuting Fokker–Planck operators. See, for example Leimkuhler & Matthews (2013; 2015); Tuckerman
+(2010).
+
+
+-----
+
+SDE has affine drift and diffusion coefficients. In that case, if the input is Normal (or a discrete
+state corresponding to a Normal with 0 variance) then the distribution is Normal at all times and we
+can calculate the evolution analytically. In particular, we can solve the differential equations for the
+mean ¯µ δt **Σ δt**
+
+2 [and covariance][ ¯] 2 [of the Normal (see Sec. B.1), and obtain]
+
+**_µ¯_** _δt2_ [(¯]ut) = 2ββ[δt]2[δt]2[Γ]x[−][¯]t[1]x[¯]t −2β4[δt]2β[Γ][δt]2[−][Γ][1]v[−][¯]t[2] + ¯v[¯]t + ¯vt **xt** _e[−][2][β][ δt]2_ [Γ][−][1] _,_ (85)
+
+ _−_ 
+
+as well as
+**Σ¯** _δt_ Σ δt (86)
+
+2 [= ¯] Σ¯2 _[xx]δt[⊗]_ **_[I][d]Σ¯[,]_** _[xv]δt_
+
+Σ¯ _δt2_ [=] Σ¯ _[xv]δt2_ Σ¯ _[vv]δt2_ _e[−][4][β][ δt]2_ [Γ][−][1] _,_ (87)
+
+2 2 !
+
+2
+
+Σ¯ _[xx]δt_ 2 [Γ][−][1] 1 4β [δt] _β [δt]_ Γ[−][2], (88)
+
+2 [=][ e][4][β][ δt] _−_ _−_ 2 [Γ][−][1][ −] [8] 2
+
+ 
+
+2
+
+Σ¯ _[xv]δt_ _β [δt]_ Γ[−][1], (89)
+
+2 [=][ −][4] 2
+ 
+
+2
+
+Σ¯ _[vv]δt_ _e[4][β][ δt]2_ [Γ][−][1] 1 + β [δt] _β [δt]_ _._ (90)
+
+2 [= Γ]4[2] _−_ 2 [Γ][ −] [2] 2
+
+   
+
+The correctness of the proposed mean and covariance matrix can be verified by simply plugging
+them back in their respective ODEs; see App. G.2.
+
+_δt_
+Now, we can write the action of the the propagator e 2 _L[ˆ]A[∗]_ on a state ¯ut as:
+
+
+_δt_
+_e_ 2 _L[ˆ]A[∗]_ ¯ut ∼N (¯ut+ δt2 [; ¯]µ δt2 [(¯]ut), **Σ[¯]** _δt2_ [)][.] (91)
+
+**(ii): Next, we need to analyze e[δt][ ˆ]LS[∗] ¯ut. Unfortunately, we cannot calculate the action of the prop-**
+agator e[δt][ ˆ]LS[∗] on ¯ut analytically and we need to make an approximation. From Eq. (75), we can
+easily see that the propagator e[δt][ ˆ]LS[∗] describes the evolution of the velocity component ¯vt for time
+step δt under the ODE (this can be easily seen by noticing that the S term in Eq. (75) only acts on
+the velocity component of the joint state ¯ut):
+
+_dv¯t = 2βΓ_ **s(¯ut, T −** _t) + M_ _[−][1]v¯t_ _dt._ (92)
+
+We propose to simply solve this ODE for the step _δt via a simple step of Euler’s method, resulting_
+in:
+
+
+_S_ **0d**
+_e[δt][ ˆ]L[∗] ¯ut_ **u¯t + δt** + (δt[2])
+_≈_ 2βΓ **s(¯ut, T −** _t) + M_ _[−][1]v¯t_  _O_
+
+= e[δt][ ˆ]LS[∗] [Euler]u¯t + O (δt[2]), 
+
+with the informal definition
+
+
+(93)
+
+
+_e[δt][ ˆ]LS[∗]_ [Euler]u¯t := ¯ut + δt **0d** _._ (94)
+2βΓ **s(¯ut, T** _t) + M_ **v¯t**
+ _−_ _[−][1]_ 
+ 
+
+**Error Analysis. It is now instructive to study the overall error of our proposed integrator. With the**
+additional Euler integration in one of the splitting terms, we have
+
+_δt_ _δt_ _N_
+_e[t][( ˆ]LA[∗]_ [+ ˆ]LS[∗] [)] _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ [Euler] + (δt[2]) _e_ 2 _L[ˆ]A[∗]_ + (Nδt[3])
+_≈_ _O_ _O_
+h _δt_  _δt_ _N_ i
+
+= _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ [Euler] _e_ 2 _L[ˆ]A[∗]_ + N (δt[2]) (95)
+
+_O_
+
+h _δt_   _δt_ iN
+
+= _e_ 2 _L[ˆ]A[∗]_ _e[δt][ ˆ]LS[∗]_ [Euler] _e_ 2 _L[ˆ]A[∗]_ + (δt),
+
+_O_
+
+where we used N = _δtt_ [and only kept the dominating error terms of lowest order in]h   i _[ δt][. We see that,]_
+
+just like Euler’s method, also our SSCS is a first-order integrator with local error ∼δt[2] and global
+
+
+-----
+
+Figure 8: Conceptual visualization of our new SSCS sampler and comparison to Euler-Maruyama
+(for image synthesis): (a) In EM-based sampling, in each integration step the entire SDE is integrated using an Euler-based approximation. This can be formally expressed as solving the full-step
+propagator exp _δt( L[ˆ]A[∗]_ [+ ˆ]LS[∗] [)] via Euler-based approximation for N small steps of size δt (see
+
+**red steps; for simplicity, this visualization assumes constantn** o _δt). (b): In contrast, in our SSCS the_
+propagator is partitioned into an analytically tractable component exp _δt2_ _L[ˆ]A[∗]_ (blue) and the score
+
+model term exp _δt_ [ˆ]S (brown). Only the latter requires numerical approximation, which resultsn o
+_L[∗]_
+in an overall more accurate integration scheme.n o
+
+error ∼δt, which can be also seen from the last two lines of Eq. (95). This is expected, considering
+that we used an Euler step for the S term. Nevertheless, as long as the dynamics is not dominated by
+the S component, our proposed integration scheme is still expected to be more accurate than EM,
+since we split off the analytically tractable part and only use an Euler approximation for the S term.
+
+To this end, recall that the model only needs to learn the score of the conditional distribution
+_pt(vt_ **xt), which is close to Normal for much of the diffusion, in which case the S term will in-**
+_|_
+deed be small. This suggests that the generative SDE dynamics are in fact dominated by AH and
+_AO in practice. From another perspective, note that (recalling that sθ(ut, t) = −ℓtαθ(ut, t) with_
+_αθ(ut, t) = ℓ[−]t_ [1][v][t][/][Σ]t[vv] + αθ[′] [(][u][t][, t][)][ from Sec. 3.2):]
+
+**s(¯ut, T −** _t) + M_ _[−][1]v¯t = −ℓtαθ[′]_ [(][u][t][, t][)][ −] Σ[v][vv]t[t] 1+ M _[−][1]1v¯t_ (96)
+
+= _ℓtαθ[′]_ [(][u][t][, t][) + ¯]vt _._
+_−_ _M_ Σ[vv]t
+
+ _[−]_ 
+
+For large parts of the diffusion, Σ[vv]t is indeed close to M, such that the ¯vt term is very small (this
+cancellation is the reason why we pulled the M _[−][1]v¯t term into the S component). In Sec. 3, we_
+have also seen that our neural network component αθ[′] [(][u][t][, t][)][ can be much smoother than that of]
+previous SGMs. Overall, this suggests that the error of SSCS indeed might be smaller than the error
+we would obtain when applying a naive Euler–Maruyama integrator to the full generative SDE. Our
+positive experimental results in Sec. 5.2 validate that. Only in the limit for very small steps, both
+our SSCS and EM make only very small errors and are expected to perform equally well, which is
+exactly what we observe in our experiments. Our SSCS turns out to be well-suited for integrating
+the generative SDE of CLD-SGMs with relatively few synthesis steps.
+
+
+-----
+
+Note that error analysis of stochastic differential equation solvers is usually performed in terms of
+weak and strong convergence (Kloeden & Platen, 1992). Due to the use of Euler’s method for the S
+component, as argued above, we expect our SSCS to formally have the same weak and strong convergence properties like EM, this is, weak convergence of order 1 and strong convergence of order
+1 as well, since the noise is additive in our case (and assuming appropriate smoothness conditions
+for the drift and diffusion coefficients; furthermore, without additive noise, we would have strong
+convergence of order 0.5). We leave a more detailed analysis to future work.
+
+In practice, we do not use SSCS to integrate all the way from t=0 to t=T, but only up to t=T − _ϵ,_
+and perform a denoising step, similar to previous works (Jolicoeur-Martineau et al., 2021a; Song
+et al., 2021c). It is worth noting that our SSCS scheme would also be applicable when we used
+time-dependent β(t), as in our more general derivation of the CLD perturbation kernel in App. B.
+However, since we only used constant β in the main paper, we also presented SSCS in that way.
+
+A promising direction for future work would be to extend SSCS to adaptive step sizes and to use
+techniques to facilitate higher-order integration, while still leveraging the advantages of SSCS.
+
+**SSCS Algorithm. Finally, we summarize SSCS in terms of a concise algorithm:**
+
+**Algorithm 1 Symmetric Splitting CLD Sampler (SSCS)**
+
+**Input: Score function sθ(¯ut, T −** _t), CLD parameters Γ, β, M = Γ[2]/4, number of sampling steps N_, step
+sizesOutput: {δt Synthesized model samplen ≥ 0}n[N]=0[−][1] [chosen such that] ¯x[ ϵ][′]N[ :=][, along with a velocity sample][ T][ −] [P]n[N]=0[−][1] _[δt][n][ ≥]_ [0][ (stepsizes can vary, for example in QS).][ ¯]vN[′] [.]
+
+**xt¯ = 00 ∼N** (¯x0; 0d, Id), ¯v0 ∼N (¯v0; 0d, M **_Id), ¯u0 = (¯x0, ¯v0)_** _▷_ Draw initial prior samples from▷ Initialize time pEQ(u)
+
+**for nuu¯¯ = 0[′]nn++ 12[1]2** **to[∼N][←] Nu[¯] −n[(¯]u+ 1n21+ do[+] 12[ δt][;][ ¯]µ[n] δtn2** 2[(¯]βuΓn),sΣ(¯[¯]u δtnt2, T[)] −0dt) + M _[−][1]v¯t_  _▷_ First half-step: apply▷ Full step: apply exp exp{δt{n[δt]L2[ˆ][n]S[∗]L[}]ˆ[ on]A[∗] _[}][ ¯][ on]un[ ¯]+u 1n2_
+
+**u¯** _n+1 ∼N_ (¯un+1; ¯µ δtn2 [(¯]u[′]n+[1]2 [)][,][ ¯]Σ δtn2 [)] _▷Second half-step: apply exp{_ _[δt]2[n]_ _LˆA[∗]_ _[}][ on][ ¯]u[′]n+_ 2[1]
+
+_t ←_ _t + δtn_ _▷_ Update time
+
+**end for**
+
+0 _βM_ **0d**
+**u¯** _[′]N_ _[←]_ **u[¯]** _N −_ _ϵ_ −β _−ΓβM[−][1][−][1]_ _⊗_ **_Id_** **u¯** _N + ϵ_ 2βΓs(¯ut, ϵ) _▷_ Denoising
+
+(¯x[′]N _[,][ ¯]vN[′]_ [) = ¯]u[′]N _▷_ Extract output data and velocity samples
+
+
+Note that the algorithm uses the expressions in Eqs. (85) and (86) for ¯µt and **Σ[¯]** _t. Furthermore, in_
+practice in the denoising step at the end, we usually only update the ¯x[′]N [component of][ ¯]u[′]N [, since we]
+are only interested in the data sample. This saves us the final neural network call during denoising,
+which only affects the ¯vN[′] [component (also see App. E.2.4). However, we wrote the algorithm in]
+the general way, which also allows to correctly generate the velocity sample ¯vN[′] [. In Fig. 8, we show]
+a conceptual visualization of our SSCS and contrast it to EM.
+
+Also note that we could combine the second half-step from one iteration of SSCS with the first halfstep from the next iteration of SSCS. This is commonly done in the Leapfrog integrator (Leimkuhler
+& Reich, 2005; Tuckerman, 2010; Neal, 2011; Leimkuhler & Matthews, 2015),[6] which follows a
+similar structure as our SSCS. However, it is not important in our case, as the only computationally
+costly operation is in the center full step, which involves the neural network evaluation. The first
+and last half-steps come at virtually no computational cost.
+
+
+-----
+
+(a) Difference ξ(t) (via L2 norm) between score of
+diffused data and score of Normal distribution.
+
+
+(b) Frobenius norm of Jacobian JF (t) of the neural
+network defining the score function for different t.
+
+
+Figure 9: Toy experiments for mixture of Normals dataset.
+
+E IMPLEMENTATION AND EXPERIMENT DETAILS
+
+E.1 SCORE AND JACOBIAN EXPERIMENTS
+
+In this section, we provide details for the experiments presented in Sec. 3.1. For both experiments,
+we consider a two-dimensional simple mixture of Normals of the form
+
+
+1
+(97)
+9 _[p][(][k][)][(][x][)][,]_
+
+
+_pdata(x) =_
+
+where p[(][k][)](x) = (x; µk; 0.04[2]I2) and
+_N_
+
+
+_k=1_
+
+
+_a_
+**_µ1 =_** _−_
+0
+ 
+
+_a/2_
+**_µ4 =_** _−_
+−a/2
+
+0
+**_µ7 =_**
+−a
+
+
+_a/2_
+**_µ2 =_** _−_
+_a/2_
+
+
+0
+**_µ5 =_** _,_
+0
+ 
+
+_a/2_
+**_µ8 =_**
+−a/2
+
+
+**_µ3 =_**
+_a_
+ 
+
+_a/2_
+**_µ6 =_**
+_a/2_
+
+
+_a_
+**_µ9 =_**
+0
+ 
+
+
+and a = 2[−] [1]2 . The choice of this data distribution is not arbitrary. In fact, mixture of Normal
+
+distributions are diffused by simply diffusing the components, i.e., setting p0(x0) = pdata(x), we
+have
+
+
+1
+9 _[p]t[(][k][)](xt),_ (98)
+
+
+_pt(xt) =_
+
+
+_k=1_
+
+
+where p[(]t[k][)] are the diffused components (analogously for CLD with velocity augmentation). This
+means that for both CLD as well as VPSDE Song et al. (2021c) we can diffuse pdata(x) with
+analytical access to the diffused marginal pt(xt) or pt(ut). This allows us to perform interesting
+analyses that would be impossible when working, for example, with image data. We visualize the
+data distribution in Fig. 10.
+
+**Score experiment:** We empirically verify the reduced complexity of the score of pt(vt|xt), which
+is learned in CLD, compared to the score of pt(xt), which is learned in VPSDE. To avoid scaling
+issues between VPSDE and CLD, we chose M = γ = 1 for CLD in this experiment; this results
+in an equilibrium distribution of (02, I2) (for both data and velocity components, which are inde_N_
+pendent at equilibrium), which is the same as the equilibrium distribution of the VPSDE. We then
+
+6The Leapfrog integrator corresponds to the velocity Verlet integrator in molecular dynamics.
+
+
+-----
+
+(a) Data pdata (b) CLD w/ MS (c) CLD w/o MS (d) VPSDE w/ MS (e) VPSDE w/o MS
+
+Figure 10: Mixture of Normals: data and trained models (samples).
+
+measure the difference of the respective scores at time t and the equilibrium (or prior) scores, i.e.
+(recall that the score of a Normal distribution p(x) = N (02, I2) is simply ∇x log p(x) = −x),
+
+_ξ[VPSDE](t) := Ext_ _p(xt)_ **xt log pt(xt) + xt** 2[,] (99)
+_∼_ _∥∇_ _∥[2]_
+
+_ξ[CLD](t) := Eut_ _p(ut)_ **vt log pt(vt** **xt) + vt** 2[.] (100)
+_∼_ _∥∇_ _|_ _∥[2]_
+
+The expectations are approximated using 10[5] samples from p(xt) and p(ut) for VPSDE and CLD,
+respectively. As can be seen in Fig. 9a, ξ[CLD](t) is smaller than ξ[VPSDE](t) for all t ∈ [0, T ]. The
+difference is particularly striking for small time values t. Other previous SDEs, such as the VESDE,
+sub-VPSDE, etc., are expected to behave similarly. This result implies that the ground truth scores
+that need to be learnt in CLD are closer to Normal scores than the ground truth scores in previous
+SDEs like the VPSDE. Since the score of a Normal is very simple—and indeed directly leveraged
+in our mixed score formulation—we would intuitively expect that the CLD training task is easier.
+
+**Complexity experiment:** Therefore, to understand the above observations in terms of learning
+neural networks, we train a small ResNet architecture (less than 100k parameters) for each of the
+following four setups: both CLD and VPSDE each with and without a mixed score parameterization.
+The mixed score of the VPSDE simply assumes a standard Normal data distribution (which is also
+the equilibrium distribution of VPSDE) resulting in adding −xt to the score function. Formally,
+_−xt is the score of a Normal distribution with unit variance._
+
+We train the models for 1M iterations using fresh data synthesized from pdata at a batch size of 512.
+The model and data distributions are visualized in Fig. 10. We see that all models have learnt good
+representations of the data. We measure the complexity of the trained neural networks using the
+squared Frobenius norm of the networks’ Jacobians. For CLD, we have
+
+_JF[CLD](t) := Eut∼p(ut)∥∇ut_ _αθ[′]_ [(][u][t][)][∥][2]F _[.]_ (101)
+
+Similarly, for the VPSDE we compute
+
+_JF[VPSDE](t) := Ext∼p(xt)∥∇xt_ _αθ[′]_ [(][x][t][)][∥][2]F _[.]_ (102)
+
+For both CLD and VPSDE, expectations are again approximated using 10[5] samples. As can be seen
+in Fig. 9b the neural network complexity is significantly lower for CLD compared to VPSDE. A
+mixed score formulation further helps decreasing the neural network complexity for both CLD and
+VPSDE. This result implies that the arguably simpler training task in CLD indeed also translates to
+reduced model complexity in that the neural network is smoother as measured by F(t). In large_J_
+scale experiments, this would mean that, given similar model capacity, a CLD-based SGM could
+potentially have a higher expressivity. Or, on the other hand, similar performance could be achieved
+with a smoother and potentially smaller model. Indeed these findings are in line with our strong
+results on the CIFAR-10 benchmark.
+
+E.2 IMAGE MODELING EXPERIMENTS
+
+We perform image modeling experiments on CIFAR-10 as well as CelebA-HQ-256. We report
+FID scores on CIFAR-10 for our main model for various different solvers; see Tab. 3 and Tab. 2.
+We further present generated samples for both models in Sec. 5 using Euler–Maruyama with 2000
+
+
+-----
+
+Hyperparameter CIFAR10 (Main) CelebA (Qualitative) CIFAR10 (Ablation)
+
+**Model**
+EMA rate 0.9999 0.9999 0.9999
+# of ResBlocks per Resolution 8 2 2
+Normalization Group Normalization Group Normalization Group Normalization
+Scaling by σ   
+Nonlinearity Swish Swish Swish
+Attention resolution 16 16 16
+Embedding type Fourier Positional Positional
+Progressive None None None
+Progressive input Residual None None
+Progressive combine Sum N/A N/A
+Finite Impulse Response (Zhang, 2019)   
+# of parameters _≈_ 108M _≈_ 68M _≈_ 39M
+
+**Training**
+# of iterations 800k 320k 1M
+# of warmup iterations 100k 100k 100k
+Optimizer Adam Adam Adam
+Mixed precision   
+Learning rate 2 · 10[−][4] 10[−][4] 2 · 10[−][4]
+Gradient norm clipping 1.0 1.0 1.0
+Dropout 0.1 0.1 0.1
+Batch size per GPU 8 4 8
+# of GPUs 16 16 16
+_t-sampling cutoff during training_ 10[−][5] 10[−][5] 10[−][5]
+
+**SDE**
+_M_ 0.25 0.25 varies
+_γ_ 0.04 0.04 varies
+_β_ 4 4 varies
+_ϵnum_ 10[−][9] 10[−][6] 10[−][9]
+
+Table 6: Model architectures as well as SDE and training setups for our experiments on CIFAR-10
+and CelebA-HQ-256.
+
+quadratic striding steps and Runge–Kutta 4(5) for CIFAR10 and CelebA-HQ-256, respectively. We
+present additional samples for various solver settings in App. F. All (average) NFEs for the Runge–
+Kutta solver are computed using a batch size of 128.
+
+E.2.1 TRAINING DETAILS AND MODEL ARCHITECTURES
+
+Our models are based on the NCSN++ and the DDPM++ architectures from Song et al. (2021c).
+Importantly, we changed the number of input channels from three to six to facilitate the additional
+velocity variables. Note that the number of additional neural network parameters due to this change
+is negligible.
+
+For fair a comparison, we train our models using the same t-sampling cutoff during training as is
+used for VESDE and VPSDE in Song et al. (2021c). Note, however, that this is not strictly necessary
+for CLD as we do not have any “blow-up” of the SDE due to unbounded scores as t → 0 (also see
+Fig. 18 and Fig. 19).
+
+We summarize our three model architectures as well as our SDE and training setups in Tab. 6.
+
+E.2.2 CIFAR-10 RESULTS FOR VESDE AND VPSDE
+
+The results reported for VESDE and VPSDE using the GGF sampler are taken from JolicoeurMartineau et al. (2021a). All other results for VESDE and VPSDE are generated using the provided
+PyTorch code as well as the provided checkpoints from Song et al. (2021c).[7] We used EM and PC
+
+[7https://github.com/yang-song/score_sde_pytorch](https://github.com/yang-song/score_sde_pytorch)
+
+
+-----
+
+to sample from the VPSDE and VESDE models, respectively (see Sec. 5.2), since these choices
+correspond to their recommended settings.[8]
+
+Furthermore, in App. F.2 we also used DDIM (Song et al., 2021a) to sample the VPSDE. DDIM’s
+update rule is
+
+
+**xt** 1 = _[α][t][−][1]_
+_−_ _αt_
+
+
+**xt + σt[2][s][θ][(][x][t][, t][)]** _σt_ 1σtsθ(xt, t), (103)
+_−_ _−_
+
+
+
+_t_ _t_
+where αt = exp _−0.5_ 0 _[β][(][t][)][ dt]_, σt[2] [= 1][ −] [exp] _−_ 0 _[β][(][t][)][ dt]_, and β(t) = 0.1 + 19.9t.
+   
+R R
+
+E.2.3 QUADRATIC STRIDING
+
+When we simulate our generative SDE numerically, using for example EM or our SSCS, we need to
+choose a time discretization. Given a certain NFE budget NNFE, how do we choose time step sizes?
+The standard approach is to use an equidistant discretization, corresponding to a set of evaluation
+time steps _δti_ 0 _i=0_ with δti = _N1NFE_
+
+2021a; Kong & Ping { _≥_ _},[N] 2021[NFE][−][1]; Watson et al., 2021[∀]_ _[i]) has shown that it can be beneficial to focus function[ ∈]_ [[0][, N][NFE][ −] [1]][. However, prior work (][Song et al.][,]
+evaluations (neural network calls) on times t “close to the data”. This is because the diffusion
+process distribution is most complex close to the data and almost perfectly Normal close to the
+prior. Among other techniques, these works used a useful heuristic, denoted as quadratic striding
+(QS), which discretizes the integration interval such that the evaluation times follow a quadratic
+schedule and the individual time steps follow a linear schedule. We also used this QS approach in
+our experiments.
+
+We can formally define it as follows (assuming a time interval [0.0, 1.0] here for simplicity): Denote
+the evaluation times as τi (including 0.0 and 1.0) and define:
+
+_τi = cτ_ _i[2]_ _∀i ∈_ [0, NNFE]. (104)
+
+Hence,
+_δti = τi_ _τi_ 1 = cτ (2i 1) _i_ [1, NNFE], (105)
+and cτ = _N1NFE[2]_ [to ensure that][ τ][NFE][ = 1] − _[.]−[0][.]_ _−_ _∀_ _∈_
+
+This describes the time steps as going from t = 0 to t = 1. During synthesis, however, we are going
+backwards. Hence, we can define our time steps as
+
+_δtj = cτ [2NNFE −_ 2j + 1] _∀j ∈_ [1, NNFE], (106)
+
+where j now counts time steps in the other direction. Note that this can be easily adapted to general
+integration intervals [ϵ, T ].
+
+E.2.4 DENOISING
+
+As has been pointed out in Jolicoeur-Martineau et al. (2021b), samples that are generated with
+models similar to ours can contain noise that is hard to detect visually but worsens FID scores
+significantly.
+
+**Denoising Formulas.** For a fair comparison we use the same denoising setup for all experiments
+we conducted (including VESDE (PC/ODE) and VPSDE (EM/ODE)) except for LSGM.[9] We simulate the underlying generative ODE/SDE until the time cutoff ε = 10[−][3] and then take a single
+denoising step of the form
+
+
+**u0 = uε** _εf_ (uε, ε) + εG(uε, ε)G(uε, ε)[⊤] **0d**
+_−_ **_sθ(uε, ε)_**
+
+
+
+(107)
+
+
+This denoising step can be considered as an Euler–Maruyama step without noise injection. For
+SDEs acting on data directly (VESDE, VPSDE, etc.) the corresponding denoising formula is
+
+**x0 = xε −** _εf_ (xε, ε) + εG(xε, ε)G(xε, ε)[⊤]sθ(xε, ε). (108)
+
+[8https://colab.research.google.com/drive/1dRR_0gNRmfLtPavX2APzUggBuXyjWW55](https://colab.research.google.com/drive/1dRR_0gNRmfLtPavX2APzUggBuXyjWW55)
+9Denoising has not been used in the original LSGM work (Vahdat et al., 2021) and is not needed in their
+case, since the output of the latent SGM lives in a smooth latent space and is further processed by a decoder.
+
+
+-----
+
+Table 7: Influence of denoising step on FID scores (using our main CIFAR-10 model).
+
+FID at n function evaluations ↓
+Sampler Denoising _n=50_ _n=500_
+
+SSCS  81.1 2.30
+SSCS-QS  20.5 2.25
+
+SSCS  78.9 2.32
+SSCS-QS  28.5 2.3
+
+**Influence of Denoising on Results.** For SDEs acting in the data space directly, it has been reported
+that this denoising step is crucial to obtain good FID scores Jolicoeur-Martineau et al. (2021b); Song
+et al. (2021c). When we simulate the generative probability flow ODE we found that denoising is
+important in order for the Runge–Kutta solver not to “blow-up” as t → 0. On the other hand, when
+simulating CLD using our new SSCS solver, we found that denoising only slightly influences FID
+(see Tab. 7). We believe that this might be because the neural network does not have any influence
+on the denoising step for CLD. More specifically, the neural network only denoises the velocity
+component. However, we are primarily interested in the data component. Putting the drift and
+diffusion coefficients of CLD in the denoising formula in Eq. (107), we obtain
+
+
+**u0 = uε** _ε_ 0 _βM_ _[−][1]_
+_−_ −β _−βΓM_ _[−][1]_
+
+
+**uε + ε** **0d**
+2Γβsθ(uε, ε)
+
+
+
+_⇒_ **x0 = xε −** _εβM_ _[−][1]vε._
+
+(109)
+
+
+**_Id_**
+_⊗_
+
+
+E.2.5 SOLVER ERROR TOLERANCES FOR RUNGE–KUTTA 4(5)
+
+In Tab. 2, we report FID scores for a Runge–Kutta 4(5) solver (Dormand & Prince, 1980) as well as
+the “Gotta Go Fast” solver from Jolicoeur-Martineau et al. (2021a) (see their Table 1). For simulating
+CLD with Runge–Kutta 4(5) we chose the solver error tolerances to hit certain regimes of NFEs to
+facilitate comparisons with VPSDE and VESDE. We obtain a mean number of function evaluations
+of 312 and 137 using Runge–Kutta 4(5) solver error tolerances of 10[−][5] and 10[−][3], respectively.
+For VESDE, VPSDE and LSGM we used 10[−][5] as the ODE solver error tolerance, following the
+recommended default setups (Song et al., 2021c; Vahdat et al., 2021). These values are used for
+both relative and absolute error tolerances.
+
+E.2.6 ABLATION EXPERIMENTS
+
+The model architecture used for all ablation experiments can be found in Tab. 6. As pointed out in
+Sec. 5 we found that the hyperparameters γ and M only have small effects on CIFAR-10 FID scores.
+On the other hand, we found that the mixed score parameterization helps significantly in obtaining
+competitive FIDs.
+
+E.2.7 LSGM-100M MODEL
+
+Our CLD-based SGM has ≈108M parameters, while the original CIFAR-10 Latent SGM from
+Vahdat et al. (2021), to which we compare in Tab. 1, uses ≈476M parameters. To establish a
+fairer comparison between our CLD-based SGMs and LSGM (Vahdat et al., 2021), we train another smaller LSGM model with ≈109M parameters. To do this, we followed the exact setup of
+the “CIFAR-10 (balanced)” model from LSGM (see Table 7 in Vahdat et al. (2021)), with a few
+minor modifications: We used a VAE backbone model with only 10 groups instead of 20, which
+corresponds to a reduction in parameters by a factor of 2 in the encoder and decoder networks. We
+also reduced the convolutional channels in the latent space SGM from 512 to 256 and reduced the
+number of the residual cells per scale from 8 to 4. With these modifications the resulting “LSGM100M” uses only ≈109M parameters overall with approximately half of them in the encoder and
+decoder networks and the other half in the latent SGM. Other than these architecture modifications,
+our model is trained in exactly the same way as the bigger, original models in Vahdat et al. (2021).
+
+
+-----
+
+Table 8: Performance (measured in negative log-likelihood) using analytical scores for non-adaptive stepsize
+solvers for varying numbers of synthesis steps n (function evaluations).
+
+_−_ log p(x) at n function evaluations ↓
+Model Sampler _n=20_ _n=50_ _n=100_ _n=200_
+
+CLD EM 60.6 9.71 0.72 -1.04
+CLD SSCS **10.5** **1.55** **-1.25** **-1.54**
+VPSDE EM 14.2 4.68 -0.35 -1.11
+
+For evaluation, we follow the recommended setting by Vahdat et al. (2021) and use the same RungeKutta 4(5) ODE solver with an error tolerance of 10[−][5] to solve the probability flow ODE in LSGM’s
+latent space. LSGM-100M achieves an FID of 4.60, an NLL bound of 2.96 bpd, and requires on
+average 131 NFE for sampling new images. We report these results in Tabs. 1 and 2 in the main
+text.
+
+Note that we also tried training a model following the “CIFAR-10 (best FID)” setup, but found training to be unstable (however, the orignal “CIFAR-10 (best FID)” model from Vahdat et al. (2021)
+only performs marginally better in FID than their “CIFAR-10 (balanced)” model anyway). Furthermore, we also tried training another small LSGM with a similar number of parameters but with
+more parameters in the latent SGM and less in the encoder and decoder networks, compared to the
+reported LSGM-100M. However, this model performed significantly worse.
+
+F ADDITIONAL EXPERIMENTS
+
+F.1 TOY EXPERIMENTS
+
+F.1.1 ANALYTICAL SAMPLING
+
+In order to test combinations of diffusions and numerical samplers in isolation, we consider a dataset
+for which we know the ground truth score function (for all t) analytically. In particular, we use the
+mixture of Normals introduced in App. E.1; see Fig. 10a for a visualization of the data distribution.
+In Fig. 11, we show samples for VPSDE (Euler–Maruyama (EM) sampler) and CLD (EM and
+SSCS samplers). For quantitative comparison, we also compute negative log-likelihoods for the
+three combinations (which can be done easily due to our access to the ground truth distribution): as
+can be seen in Tab. 8, for each number of steps n ∈{20, 50, 100, 200} CLD with SCSS outperforms
+both VPSDE and CLD with EM. As discussed in Sec. 3.3, we can see in Tab. 8 that EM is not wellsuited for CLD. This is true, in particular, when using a small number of synthesis steps n (function
+evaluations). In Fig. 11, we see that CLD with EM leads to sampling distributions which are too
+broad. These results are exactly in line with the “diverging” dynamics that is observed when solving
+Hamiltonian dynamics with a non-symplectic integrator, such as the standard Euler method (Neal,
+2011). This problematic behavior of Euler-based techniques is more pronounced when using fewer
+steps with larger stepsizes, which is also what we observe in our experiments. These results further
+motivate the use of our novel SSCS, which addresses these challenges, for sampling from our CLDbased SGMs.
+
+F.1.2 MAXIMUM LIKELIHOOD TRAINING
+
+For maximum likelihood training, models based on overdamped Langevin dynamics such as VPSDE
+need to learn an unbounded score for t → 0. Our model, on the other hand, only ever needs to learn
+a bounded score even for t = 0. For our image data experiments, we use a reweighted objective
+function to improve visual quality of samples (as is general practice).
+
+Here, we also study training towards maximum likelihood on toy dataset tasks. To explore this, we
+repeat the neural network complexity experiment from App. E.1 with maximum likelihood training
+(instead of the reweighted objective). Furthermore, we also train VPSDE-based and CLD-based
+SGMs on a challenging toy dataset and find that CLD significantly outperforms VPSDE. We leave
+the study of CLD with maximum likelihood training for high-dimensional (image) datasets to future
+work.
+
+
+-----
+
+(a) VPSDE + EM, n = 20 (b) CLD + EM, n = 20 (c) CLD + SSCS, n = 20
+
+(d) VPSDE + EM, n = 50 (e) CLD + EM, n = 50 (f) CLD + SSCS, n = 50
+
+(g) VPSDE + EM, n = 100 (h) CLD + EM, n = 100 (i) CLD + SSCS, n = 100
+
+(j) VPSDE + EM, n = 200 (k) CLD + EM, n = 200 (l) CLD + SSCS, n = 200
+
+Figure 11: Mixture of Normals: numerical simulation with analytical score function for different
+diffusions (VPSDE with EM vs. CLD with EM/SSCS) and number of synthesis steps n. A visualization of the data distribution can be found in Fig. 10a.
+
+
+-----
+
+Figure 12: Frobenius norm JF (t) of the neural network defining the score function for different t.
+
+**Complexity Experiment.** The setup of this experiment is equivalent to the setup in App. E.1 up
+to the training objective: in this experiment we do maximum likelihood learning, i.e., we train CLD
+models with the objective from Eq. (8) with λ(t) = Γβ.[10] Furthermore, we test CLD in this setup
+for three different values of γ. The results of this experiment can be found in Fig. 12. For CLD, we
+find that larger values of γ generally lead to less complex networks, in particular for smaller times
+_t. However, even for γ = 0.04 the learned neural network is still significantly smoother than the_
+network learned for the VPSDE when a mixed score parameterization is used.[11]
+
+**Challenging Toy Dataset.** Using the same simple ResNet architecture (less than 100k parameters)
+from the above experiment, we trained a VPSDE-based as well as a CLD-based SGM to maximize
+the likelihood of a more challenging toy dataset (the dataset is essentially “multi-scale”, as it involves
+both large scale—the placement of the swiss rolls—and fine scale—the swiss rolls themselves—
+structure). Similar to the other toy datasets, the models are trained for 1M iterations using fresh data
+synthesized from the data distribution in each batch at a batch size of 512.
+
+In Fig. 13, we compare samples of the models to the data distribution. Even with our simple model
+architecture, CLD is able to capture the multi-scale structure of the dataset: the five rolls are adequately resembled and only a few samples are in between modes. VPSDE, on the other hand, only
+captures the main modes, but not the fine structure. Furthermore, VPSDE has the undesired behavior
+of “connecting” the modes.
+
+Overall, we conclude that also in the maximum likelihood training setting CLD is a promising
+diffusion showing superior behavior compared to the VPSDE in our toy experiments.
+
+10For the ML objective of the VPSDE, we refer the reader to Song et al. (2021b).
+11The VPSDE-based model with mixed score parameterization did not converge to the target distribution,
+and therefore is not included in Fig. 12.
+
+
+-----
+
+(a) Data (b) VPSDE (c) CLD
+
+Figure 13: Data distribution and model samples for multi-scale toy experiment.
+
+Table 9: Performance using non-adaptive step size solvers. Extended version of Tab. 3.
+
+FID at n function evaluations ↓
+Model Sampler _n=50_ _n=150_ _n=275_ _n=500_ _n=1000_ _n=2000_
+
+CLD EM 143 31.5 10.9 3.96 2.50 2.27
+CLD EM-QS 52.7 7.00 3.24 2.41 **2.27** **2.23**
+CLD SSCS 81.1 10.5 2.86 2.30 2.32 2.29
+CLD SSCS-QS 20.5 **3.07** **2.38** **2.25** 2.30 2.29
+
+VPSDE EM 92.0 30.3 13.1 4.42 2.46 2.43
+VPSDE EM-QS 28.2 4.06 2.65 2.47 2.66 2.60
+VPSDE DDIM 6.04 4.04 3.53 3.26 3.09 3.01
+VPSDE DDIM-QS **3.78** 3.15 3.05 2.99 2.96 2.95
+
+VESDE PC 460 216 11.2 3.75 2.43 **2.23**
+VESDE PC-QS 461 388 155 5.47 11.4 11.2
+
+F.2 CIFAR-10 — EXTENDED RESULTS
+
+In this section, we provide additional results on the CIFAR-10 image modeling benchmark.
+
+An extended version of Tab. 3 (sampling the generative SDE with different fixed-step size solvers
+for different compute budgets) including additional baselines can be found in Tab. 9. Note that time
+stepping with quadratic striding (QS) improves sampling from VPSDE- and CLD-based models for
+all settings except for the combination of VPSDE and EM sampling in the setting n = {1000, 2000}.
+For the VESDE (using PC sampling), QS significantly worsens FID scores. The reason for this could
+be that the variance of the VESDE already follows an exponential schedule (see Fig. 5 in Song et al.
+(2021c)). We additionally present results for the VPSDE using the DDIM (Denoising Diffusion
+Implicit Models) sampler (Song et al., 2021a). As was observed by Song et al. (2021a), QS also helps
+for DDIM. Importantly, for any n ≥ 150, our CLD with our novel SSCS (and QS) even outperforms
+DDIM. Only for n = 50, DDIM performs better. It needs to be mentioned, however, that the
+DDIM sampler was specifically designed for few-step sampling, whereas our CLD with SSCS is
+derived in a general fashion without this particular regime in mind. In particular, DDIM sampling
+can be interpreted as a non-Markovian sampling method and it is not clear how to calculate the loglikelihood of hold-out validation data under this non-Markovian synthesis approach. Nevertheless,
+it would be interesting to also explore non-Markovian DDIM-inspired techniques for CLD-SGMs
+to further improve sampling speed in CLD-SGMs.
+
+Note that our DDIM results shown in Tab. 9 are better than those presented in Song et al. (2021a)
+itself, because we are relying on the DDPM++ model trained in Song et al. (2021c), whereas Song
+et al. (2021a) uses the DDPM model from Ho et al. (2020).
+
+Finally, we present additional generated samples from our CLD-SGM model: see Fig. 14 and Fig. 15
+for samples from EM-QS with 2000 evaluations and SSCS-QS with 150 evaluations, respectively.
+
+
+-----
+
+best FID score of 2.23.
+
+
+Figure 14: Additional samples using EM-QS with 2000 function evaluations. This setup gave us our
+
+
+-----
+
+only 150 function evaluations.
+
+
+Figure 15: Additional samples using SSCS-QS. This setup resulted in an FID score of 3.07 using
+
+
+-----
+
+F.3 CELEBA-HQ-256 — EXTENDED RESULTS
+
+In this section, we provide additional qualitative results on CelebA-HQ-256. For high quality samples using our new SSCS solver see Fig. 16.
+
+Samples generated with an adaptive step size Runge–Kutta 4(5) solver at different solver tolerances
+can be found in Fig. 17. We found that our model still generates very good samples even for a solver
+error tolerance of 10[−][3] using an average of 129 neural network evaluations.
+
+Lastly, we show “generation paths” of samples from our CelebA-HQ-256 model: see Fig. 18 and
+Fig. 19 for samples from the probability flow ODE and the generative SDE, respectively. We visualize the continuous generation paths via snapshots of data and velocity variables at eight different
+time steps. Interestingly, we can see that the velocity variables “encode” the data at intermediate t.
+On the other hand, at time t = 1.0, by construction, both data and velocity are distributed according
+to the “equilibrium distribution” of the diffusion, namely, pEQ(u) = N (x; 0d, Id) N (v; 0d, M **_Id)._**
+Furthermore, as t → 0 the data variables approximately converge to the data distribution, while the
+velocity variables approximately converge to another Normal distribution (v; 0d, γM **_Id) (with_**
+_N_
+_γ = 0.04 in our experiments)._
+
+Recall that for CLD, the neural network approximates the score ∇vt log pt(vt|xt). We believe that
+the generation paths are further evidence that CLD-SGMs need to learn simpler models: for fixed
+_t the velocity variable vt appears to be a “noisy” version of the data xt, and therefore we believe_
+_pt(vt_ **xt) to be relatively smooth and simple when compared to the marginal pt(xt).**
+_|_
+
+Finally, note that in Figs. 18 and 19, when visualizing the velocity variables, we used a colorization
+scheme that corresponds exactly to the inverse of the color scheme used for visualizing the images
+themselves. Alternatively, we could also interpret this in such a way that we are not actually visualizing velocities, but negative velocities with flipped signs. When using this inverse colorization
+scheme for the velocities, we see that at intermediate t, where the velocities encode the data, the
+color values visualizing image data and velocities are, apart from the additional noise in the velocities, similar (i.e. the velocities appear as noisy versions of the actual images). This implies that
+image pixel values xt translate into corresponding negative velocities vt that pull the pixel values
+back towards the mean of the equilibrium distribution. This is a consequence of the Hamiltonian
+coupling between the data and velocity variables. In other words, it is a result of the negative sign
+in front of xt in the H term in Eq. (5) (and analogously for the reverse-time generative SDE). Also
+[see the visualizations on our project page (https://nv-tlabs.github.io/CLD-SGM).](https://nv-tlabs.github.io/CLD-SGM)
+
+
+-----
+
+Figure 16: Samples generated by our model on the CelebA-HQ-256 dataset using our SSCS solver.
+
+
+-----
+
+(a) ODE solver error tolerance 10[−][5]; 273 average NFE.
+
+(b) ODE solver error tolerance 10[−][4]; 190 average NFE.
+
+(c) ODE solver error tolerance 10[−][3]; 129 average NFE.
+
+(d) ODE solver error tolerance 10[−][2]; 99.4 average NFE.
+
+Figure 17: Samples generated by our model on the CelebA-HQ-256 dataset using a Runge–Kutta
+4(5) adaptive ODE solver to solve the probability flow ODE. We show the effect of the ODE solver
+error tolerance on the quality of samples ((a), (b), (c) and (d) were generated using the same prior
+samples). Little visual differences can be seen between 10[−][5] and 10[−][4]. Low frequency artifacts can
+be observed at 10[−][3]. Deterioration starts to set in at 10[−][2].
+
+
+-----
+
+Figure 18: Generation paths of samples from our CelebA-HQ-256 model (Runge–Kutta 4(5) solver;
+mean NFE: 288). Odd and even rows visualize data and velocity variables, respectively. The eight
+columns correspond to times t ∈{1.0, 0.5, 0.3, 0.2, 0.1, 10[−][2], 10[−][3], 10[−][5]} (from left to right). The
+velocity distribution converges to a Normal (different variances) for both t → 0 and t → 1. See
+App. F.3 for visualization details and discussion.
+
+
+-----
+
+Figure 19: Generation paths of samples from our CelebA-HQ-256 model (SSCS-QS using only 150
+steps). Odd and even rows visualize data and velocity variables, respectively. The eight columns
+correspond to times t ∈{1.0, 0.5, 0.3, 0.2, 0.1, 10[−][2], 10[−][3], 10[−][5]} (from left to right). The velocity
+distribution converges to a Normal (different variances) for both t → 0 and t → 1. See App. F.3 for
+visualization details and discussion.
+
+
+-----
+
+G PROOFS OF PERTURBATION KERNELS
+
+In this section, we prove the correctness of the perturbation kernels of the forward diffusion
+(App. B.1) as well as for the analytical splitting term in our SSCS (App. D.2). All derivations
+are presented for general time-dependent β(t).
+
+G.1 FORWARD DIFFUSION
+
+We have the following ODEs describing the evolution of the mean and the covariance matrix
+_dµt_ (110)
+
+_dt_ [= (][f] [(][t][)][ ⊗] **_[I][d][)][µ][t][,]_**
+
+_dΣt_
+
+= (f (t) **_Id)Σt + [(f_** (t) **_Id)Σt][⊤]_** + _G(t)G[⊤](t)_ **_Id,_** (111)
+_dt_ _⊗_ _⊗_ _⊗_
+
+where   
+
+
+0 4β(t)Γ[−][2]
+_f_ (t) :=
+−β(t) _−4β(t)Γ[−][1]_
+
+0 0
+_G(t) :=_ _._
+0 2Γβ(t)
+ 
+
+In App. B.1, we claim the following solutions: p
+
+
+(112)
+
+(113)
+
+
+**_µt := Ct ˆµt,_** (114)
+
+
+**_µˆ_** _t :=_ **_µ[x]t_**
+**_µ[v]t_**
+
+
+
+(115)
+
+
+_Ct := e[−][2][B][(][t][)Γ][−][1]_ _,_ (116)
+
+**_µ[x]t_** [:= 2][B][(][t][)Γ][−][1][x][0] [+ 4][B][(][t][)Γ][−][2][v][0] [+][ x][0][,] (117)
+
+**_µ[v]t_** [:=][ −B][(][t][)][x][0] [+][ v][0][,] (118)
+
+_[−]_ [2][B][(][t][)Γ][−][1][v][0]
+
+
+and
+
+
+**Σt := Σt ⊗** **_Id,_** (119)
+
+Σt := DtΣ[ˆ] _t,_ (120)
+
+
+Σˆ _t :=_ Σ[xx]t Σ[xv]t
+Σ[xv]t Σ[vv]t
+
+
+
+(121)
+
+
+_Dt := e[−][4][B][(][t][)Γ][−][1]_ _,_ (122)
+
+Σ[xx]t := Σ[xx]0 [+][ e][4][B][(][t][)Γ][−][1][ −] [1 + 4][B][(][t][)Γ][−][1][ (Σ]0[xx] _[−]_ [1) + 4][B][2][(][t][)Γ][−][2][ (Σ]0[xx] _[−]_ [2) + 16][B][2][(][t][)Γ][−][4](123)[Σ]0[vv][,]
+
+Σ[xv]t := −B(t)Σ[xx]0 [+ 4][B][(][t][)Γ][−][2][Σ]0[vv] _[−]_ [2][B][2][(][t][)Γ][−][1][ (Σ]0[xx] _[−]_ [2)][ −] [8][B][2][(][t][)Γ][−][3][Σ]0[vv][,] (124)
+
+Σ[vv]t := [Γ]4[2] _e[4][B][(][t][)Γ][−][1]_ 1 + (t)Γ + Σ[vv]0 1 + 4 (t)Γ[−][2] 4 (t)Γ[−][1][] + (t) (Σ[xx]0
+
+_−_ _B_ _B[2]_ _−_ _B_ _B[2]_ _[−]_ [2)][,]
+    (125)
+
+_t_
+where B(t) = 0 _[β][(ˆ]t) dt[ˆ] and µ0 = [x0, v0][⊤]_ as well as Σ[xx]0 and Σ[vv]0 [are initial conditions.]
+R
+
+G.1.1 PROOF OF CORRECTNESS OF THE MEAN
+
+Plugging the claimed solution (Eqs. (114)-(118)) back into the ODE (Eq. 110), we obtain
+
+
+**_µˆ_** _t_ _dCt_ **_µt_** **_µt._** (126)
+
+_dt_ [+][ d]dt [ˆ] _[C][t][ =][ C][t][(][f]_ [(][t][)][ ⊗] **_[I][d][)ˆ]_**
+
+The above can be decomposed into two equations:
+
+2β(t)Γ[−][1]µ[x]t [+][ d][µ]t[x] = 4β(t)Γ[−][2]µ[v]t _[,]_ (127)
+_−_ _dt_
+
+2β(t)Γ[−][1]µ[v]t [+][ d][µ]t[v] = _β(t)µ[x]t_ _t_ _[,]_ (128)
+_−_ _dt_ _−_ _[−]_ [4][β][(][t][)Γ][−][1][µ][v]
+
+
+-----
+
+where we used the fact that _[dC]dt[t]_ [=][ −][2][β][(][t][)Γ][−][1][C][t][.]
+
+**Eq. (127): Plugging the claimed solution into Eq. (127), we obtain:**
+
+
+ (
+
+_−2β(t)Γ[−][1][ h]2B[](t)Γ[−][1]x0((+4B([(((]t)Γ[−][2]v0+x0_
+
+
+2β[](t)Γ[−][1]x0((+4β([(((]t)Γ[−][2]v(0 = 4β(t)Γ[−][2][ ][](t)x0((2 ([(((]t)Γ[−][1]v(0+v0
+
+_−B_ _−_ _B_
+
+i (129)
+
+
+**Eq. (128): After simplification, plugging in the claimed solution into Eq. (128), we obtain:**
+
+
+2β(t)Γ[−][1][ ][](t)x0((2 ([(((]t)Γ[−][1]v(0+v0
+
+_−B_ _−_ _B_
+
+
+ (
+β[](t)x0((2β([(((]t)Γ[−][1]v0 = _β(t)_
+_−_ _−_ _−_
+
+
+
+ (
+2B[](t)Γ[−][1]x0((+4B([(((]t)Γ[−][2]v0+x0 _._
+
+(130)i
+
+
+This completes the proof of the correctness of the mean.
+
+G.1.2 PROOF OF CORRECTNESS OF THE COVARIANCE
+
+Plugging the claimed solution (Eqs. (119)-(125)) back in the ODE (Eq. (111)), we obtain
+
+_dΣ[ˆ]_ _t_ _⊤_
+" _dt [D][t][ +][ dD]dt[t]_ [Σ][t]# _⊗_ **_Id = Dt(f_** (t) ⊗ **_Id)(Σ[ˆ]_** _t ⊗_ **_Id) + Dt_** (f (t) ⊗ **_Id)(Σ[ˆ]_** _t ⊗_ **_Id)_** + _G(t)G[⊤](t)_ _⊗_ **_Id._**
+
+h i  
+
+(131)
+
+
+Noting that
+
+
+(f (t) **_Id)(Σ[ˆ]_** _t_ **_Id) = (f_** (t)Σ[ˆ] _t)_ **_Id_**
+_⊗_ _⊗_ _⊗_
+
+= β(t) 4Γ[−][2]Σ[xv]t 4Γ[−][2]Σ[vv]t
+Σ[xx]t 4Γ[−][1]Σ[xv]t Σ[xv]t 4Γ[−][1]Σ[vv]
+− _−_ _−_ _−_
+
+0 0
+_G(t)G[⊤](t) =_ _,_
+0 2Γβ(t)
+ 
+
+
+(132)
+**_Id,_**
+_⊗_
+
+(133)
+
+
+and
+
+
+as well as the fact that _[dD]dt[t]_ [=][ −][4][β][(][t][)Γ][−][1][D][t][, we can decompose Eq. (131) into three equations:]
+
+4β(t)Γ[−][1]Σ[xx]t + _[d][Σ][xx]_ = 8β(t)Γ[−][2]Σ[xv]t _[,]_ (134)
+_−_ _dt_
+
+_−4β(t)Γ[−][1]Σ[xv]t_ + _[d][Σ]dt[xv]_ = β(t) _−Σ[xx]t_ _−_ 4Γ[−][1]Σ[xv]t + 4Γ[−][2]Σ[vv]t _,_ (135)
+
+ 
+
+4β(t)Γ[−][1]Σ[vv]t + _[d][Σ][vv]_ = β(t) 2Σ[xv]t 8Γ[−][1]Σ[vv]t + 2Γβ(t)Dt[−][1][.] (136)
+_−_ _dt_ _−_ _−_
+
+ 
+
+
+**Eq. (134): Plugging the claimed solution into Eq. (134), we obtain**
+
+ ( ( (
+
+_−_ 4β(t)Γ[−][1][ h]Σ[xx]0 + e[4][B][][(][t][)Γ][−][1]−1((((+4B(t)Γ[−][((((][1] (Σ[xx]0 _−_ 1)((((+4B[2](t)Γ[−][(((((][2] (Σ[xx]0 _−_ 2)(((+16B[2]([((((]t)Γ[−][4]Σ[vv]0
+
+( ( ( i
+
++ (4β[((((((](t)Γ[−][1]e[4][B][(][t][)Γ][−][1] + 4β(t)Γ[−][1] (Σ[xx]0 −1)((((+8β(t)B(t[((((((])Γ[−][2] (Σ[xx]0 _−_ 2)(((+32β(t[(((((])B(t)Γ[−][4]Σ[vv]0
+  ( ( ( 
+
+= 8β(t)Γ[−][2][ h]−B[](t)Σ[xx]0 (+4[(((((]B(t)Γ[−][2]Σ[vv]0 (((−2B[2](t[((((((])Γ[−][1] (Σ[xx]0 _−_ 2)(((−8B[2](t[(((])Γ[−][3]Σ[vv]0 _._
+
+i (137)
+
+**Eq. (135): After simplification, plugging the claimed solution into Eq. (135), we obtain**
+
+β[](t)Σ[xx]0 + 4β(t)Γ[][−][2]Σ[vv]0 Σ[xx]0 2)(((16β(t[(((((]) (t)Γ[−][3]Σ([vv]0
+
+h− ([−] [4][β][(][t][)][B][(][t][)Γ][−][1][ (] _−_ _−_ _B_ (i (
+
+= −β(t) Σ[xx]0 [((((((]+e[4][B][(][t][)Γ][−][1] _−_ 1 + 4B(t)Γ[−][1] (Σ[xx]0 −1)((((+4B[2](t)Γ[−][(((((][2] (Σ[xx]0 _−_ 2)(((+16B[2]([((((]t)Γ[−][4]Σ[vv]0
+h Γ[2]     (i
+
++ 4β(t)Γ[−][2][ h] 4 e[4][B][(][][t][)Γ][−][1] _−_ 1 +B[](t)Γ + Σ[vv]0 1+4B[2][](t)Γ[−][2]−4B([]t)Γ[−][1][](+B[((((((][2](t) (Σ[xx]0 _−_ 2) _._
+
+   i(138)
+
+
+-----
+
+**Eq. (136): After simplification, plugging the claimed solution into Eq. (136), we obtain**
+
+4β(t)Γ[−][1][ h] Γ4[2] e[4][B][][(][t][)Γ][−][1]1 + ([]t)Γ + Σ _[vv]0_ 1+4 [](t)Γ[−][2]4 ([]t)Γ[−][1][] + (((t) (Σ[((((][xx]0 (2)
+
+_−_ _B_ _B[2]_ _−_ _B_ _B[2]_ _−_
+
++ (Γ4[2][(((((((][4][β][(][t][)Γ][−][1][e][4][B][(][t][)Γ][−]([1]+β[](t)Γ + Σ _[vv]0_ (8 [((((](t)β(t)Γ[−]([2]4β([]t)Γ[−][1][] + 2β(t) (t) (Σ[xx]0 2) i
+
+_B_ _−_ _B_ _−_
+
+h  (  ( ( i
+
+= −2β(t) −B[](t)Σ[xx]0 (+4[(((((]B(t)Γ[−][2]Σ[vv]0 (((−2B[2](t[((((((])Γ[−][1] (Σ[xx]0 _−_ 2)(((−8B[2](t[(((])Γ[−][3]Σ[vv]0
+
+(
+
+h i
+
+(+2Γ[((((((]β(t)e[4][B][(][t][)Γ][−][1] _._
+
+This completes the proof of the correctness of the covariance.
+
+G.2 ANALYTICAL SPLITTING TERM OF SSCS
+
+We have the following ODEs describing the evolution of the mean and the covariance matrix
+
+
+(139)
+
+
+_dµ¯_ _t_
+
+**_µt,_** (140)
+_dt_ [= (][f] [(][T][ −] _[t][)][ ⊗]_ **_[I][d][)¯]_**
+
+_dΣ[¯]_ _t_ = (f (T _t)_ **_Id) Σ[¯]_** _t +_ (f (T _t)_ **_Id) Σ[¯]_** _t_ _⊤_ + _G(T_ _t)G[⊤](T_ _t)_ **_Id,_** (141)
+
+_dt_ _−_ _⊗_ _−_ _⊗_ _−_ _−_ _⊗_
+
+where     
+
+0 4β(T _t)Γ[−][2]_
+_f_ (T _t) :=_ _−_ _−_ _,_ (142)
+_−_ +β(T _t)_ 4β(T _t)Γ[−][1]_
+ _−_ _−_ _−_ 
+
+0 0
+_G(T_ _t) :=_ _._ (143)
+_−_ 0 2Γβ(T _t)_
+ _−_ 
+
+These ODEs are very similar to the ODEs of the forward diffusion in App. G.1, the only differencep
+being flipped signs in the off-diagonal terms of f (T − _t) (highlighted in red)._
+
+In App. D.2, we claim the following solutions
+
+**_µ¯_** _t = Ct ˜µt,_ (144)
+
+
+**_µ˜_** _t =_ **_µ¯_** _[x]t_
+**_µ¯_** _[v]t_
+
+
+
+(145)
+
+
+_Ct = e[−][2][B][(][t][)Γ][−][1]_ _,_ (146)
+
+**_µ¯_** _[x]t_ [= 2][B][(][t][)Γ][−][1]x[¯]t[′] _−4B(t)Γ[−][2]v¯t[′] + ¯xt[′]_ _,_ (147)
+
+**_µ¯_** _[v]t_ [=][ +][B][(][t][)¯]xt′ − 2B(t)Γ[−][1]v¯t′ + ¯vt′ _,_ (148)
+
+and
+**Σ¯** _t = Σ[¯]_ _t ⊗_ **_Id,_** (149)
+Σ¯ _t = DtΣ[˜]_ _t,_ (150)
+
+Σ˜ _t =_ ΣΣ¯¯ _[xx]t[xv]t_ ΣΣ¯¯ _[xv]t[vv]t_ _,_ (151)
+ 
+
+_Dt = e[−][4][B][(][t][)Γ][−][1]_ _,_ (152)
+
+Σ¯ _[xx]t_ = e[4][B][(][t][)Γ][−][1] 1 4 (t)Γ[−][1] 8 (t)Γ[−][2], (153)
+_−_ _−_ _B_ _−_ _B[2]_
+Σ¯ _[xv]t_ = 4 (t)Γ[−][1], (154)
+_−_ _B[2]_
+
+Σ¯ _[vv]t_ = [Γ]4[2] _e[4][B][(][t][)Γ][−][1]_ 1 + (t)Γ 2 (t), (155)
+
+_−_ _B_ _−_ _B[2]_
+
+_t_  
+where B(t) = _t[′][ β][(][T][ −]_ _t[ˆ]) dt[ˆ] and ¯µt′ = [¯xt′_ _, ¯vt′_ ][⊤] is an initial condition. Differences of the above
+solution to the solutions of the forward diffusion are again highlighted in red. Note that by conR
+struction the initial covariance for the analytical splitting term of SSCS is the zero matrix, i.e.,
+Σ¯ _[xx]t[′][ = ¯]Σ[xv]t[′][ = ¯]Σ[vv]t[′][ = 0][, since we always initialize from an “updated sample”, which itself does not]_
+have any uncertainty. Also note that in this derivation we use general initial t[′] (whereas in App. G.1
+we set t[′] = 0 for simplicity).
+
+
+-----
+
+G.2.1 PROOF OF CORRECTNESS OF THE MEAN
+
+Plugging the claimed solution (Eqs. (144)-(148)) into the ODE (Eq. (140)), we obtain
+
+**_µ˜_** _t_ _dCt_ **_µt_** **_µt._** (156)
+
+_dt_ [+][ d]dt [˜] _[C][t][ =][ C][t][(][f]_ [(][T][ −] _[t][)][ ⊗]_ **_[I][d][)˜]_**
+
+
+The above can be decomposed into two equations:
+
+2β(T _t)Γ[−][1]µ¯_ _[x]t_ [+][ d]µ[¯] _[x]t_ = 4β(T _t)Γ[−][2]µ¯_ _[v]t_ _[,]_ (157)
+_−_ _−_ _dt_ _−_ _−_
+
+2β(T _t)Γ[−][1]µ¯_ _[v]t_ [+][ d]µ[¯] _[v]t_ = β(T _t)¯µ[x]t_ **_µ[v]t_** _[,]_ (158)
+_−_ _−_ _dt_ _−_ _[−]_ [4][β][(][T][ −] _[t][)Γ][−][1][ ¯]_
+
+where we used the fact that _[dC]dt[t]_ [=][ −][2][β][(][T][ −] _[t][)Γ][−][1][C][t][.]_
+
+**Eq. (157): Plugging the claimed solution into Eq. (157), we obtain:**
+
+ ( ( (
+
+2β(T _t)Γ[−][1][ h]2_ [](t)Γ[−][1]x¯t′((4 ([(((]t)Γ[−][2]v¯t′+¯x[]t′ + (2β[(((((](T _t)Γ[−][1]x¯t′(((4β(T_ [((((]t)Γ[−][2]v¯t′
+_−=_ 4β( −T _t)Γ[−][2][ ]B([]t)¯xt′((2−([(((]tB)Γ[−][1]v¯(t′+¯v[]t′_ [] _._ i h _−_ _−_ _−_ i (159)
+
+_−_ _−_ _B_ _−_ _B_
+
+**Eq. (128): After simplification, plugging the claimed solution into Eq. (128), we obtain:**
+
+2β(T _t)Γ[−][1][ ]([]t)¯xt′((2_ ([(((]t)Γ[−][1]v¯(t′+¯v[]t′ [] + (β([(((]T _t)¯x(t′(((2β(T_ [((((]t)Γ[−][1]v¯(t′
+_−_ _B_ _−_ _B_ _−_ _−_ _−_
+
+= β(T _t)_ 2 [](t)Γ[−][1]x¯t′((4 ([(((]t)Γ[−][2]v¯(t′+¯x[]t′ h. i (160)
+_−_ _B_ _−_ _B_
+h i
+
+
+This completes the proof of the correctness of the mean.
+
+G.2.2 PROOF OF CORRECTNESS OF THE COVARIANCE
+
+Plugging the claimed solution (Eqs. (149)-(155)) into the ODE (Eq. (141)), we obtain
+_ddt Σ˜_ _t_ _[D][t][ +][ dD]dt[t]_ Σ˜ _t_ _⊗_ **_Id = Dt(f ⊗_** **_Id)(Σ[˜]_** _t ⊗_ **_Id) + Dt_** (f ⊗ **_Id)(Σ[˜]_** _t ⊗_ **_Id)_** _⊤_ + _GG[⊤][]_ _⊗_ **_Id (161)_**
+  h i 
+
+with f = f (T − _t) and G = G(T −_ _t)._
+
+Noting that
+
+
+(f (T _t)_ **_Id)(Σ[˜]_** _t_ **_Id) = (f_** (T _t)Σ[˜]_ _t)_ **_Id_**
+_−_ _⊗_ _⊗_ _−_ _⊗_
+
+= β(T − _t)_ Σ¯ _[xx]t−4Γ4Γ[−][2][ ¯][−]Σ[1][xv]t[ ¯]Σ[xv]t_ Σ¯ _[xv]t−4Γ4Γ[−][2][ ¯][−]Σ[1][vv]t[ ¯]Σ[vv]_
+ _−_ _−_
+
+
+(162)
+**_Id,_**
+_⊗_
+
+(163)
+
+
+and
+
+
+0 0
+_G(T_ _t)G[⊤](T_ _t) =_ _,_ (163)
+_−_ _−_ 0 2Γβ(T _t)_
+ _−_ 
+
+as well as the fact _[dD]dt[t]_ [=][ −][4][β][(][T][ −] _[t][)Γ][−][1][D][t][, we can decompose Eq. (161) into three equations:]_
+
+Σ[xx]
+4β(T _t)Γ[−][1][ ¯]Σ[xx]t_ + _[d]_ [¯] = 8β(T _t)Γ[−][2][ ¯]Σ[xv]t_ _[,]_ (164)
+_−_ _−_ _dt_ _−_ _−_
+
+Σ[xv]
+_−4β(T −_ _t)Γ[−][1][ ¯]Σ[xv]t_ + _[d]_ [¯]dt = β(T − _t)_ Σ¯ _[xx]t_ _−_ 4Γ[−][1][ ¯]Σ[xv]t _−_ 4Γ[−][2][ ¯]Σ[vv][] _,_ (165)
+
+Σ[vv] 
+4β(T _t)Γ[−][1][ ¯]Σ[vv]t_ + _[d]_ [¯] = β(T _t)_ 2Σ[¯] _[xv]t_ 8Γ[−][1][ ¯]Σ[vv]t + 2Γβ(T _t)Dt[−][1][.]_ (166)
+_−_ _−_ _dt_ _−_ _−_ _−_
+
+ 
+
+
+**Eq. (164): Plugging the claimed solution into Eq. (164), we obtain**
+
+  
+
+4β(T _t)Γ[−][1][ h]e[4][B][][(][t][)Γ][−][1]14_ ([]t)Γ[−][1]8 [](t)Γ[−][2][i]
+_−_ _−_ _−_ _−_ _B_ _−_ _B[2]_
+
+( ( (
+(4β[((((((((](T − _t)Γ[−][1]e[4][B][(][t][)Γ][−][1](−4[(((((]β(T −_ _t)Γ[−][1](−16[(((((((]β(T −_ _t)B(t)Γ[−][2]_
+
+
+
+
+
+= 8β(T _t)Γ[−][2][ h]4[](t)Γ[−][1][i]_ _._
+_−_ _−_ _−_ _B[2]_
+
+
+(167)
+
+
+-----
+
+**Eq. (165): After simplification, plugging the claimed solution into Eq. (165), we obtain**
+
+(
+(8[(((((((]β(T _t)_ (t)Γ[−][1]
+
+_−_ _−_ _B_
+
+  
+
+= β(T _t)_ e[4][B][][(][t][)Γ][−][1] 14 ([]t)Γ[−][1]8 [](t)Γ[−][2]
+_−_ _−_ _−_ _B_ _−_ _B[2]_
+  
+
+Γ[2]  
+_−_ 4Γ[−][2]β(T − _t)_ 4 e[4][B][(][][t][)Γ][−][1] _−_ 1 +B[](t)Γ−2[]B[2](t) _._
+h   i
+
+**Eq. (166): After simplification, plugging the claimed solution into Eq. (166), we obtain**
+
+4β(T _t)Γ[−][1][ h]_ Γ4[2] e[4][B][][(][t][)Γ][−][1]1 + [](t)Γ2[](t)
+_−_ _−_ _B_ _−_ _B[2]_
+
+(  ( i
+
+(Γβ[((((((](T _t)e[4][B][(][t][)Γ][−][1](+β[((((](T_ _t)Γ(((4β(T_ [(((]t) (t)
+
+_−_ _−_ _−_ _−_ _B_
+
+h i
+
+= (((((2β(T − _t)_ _−[(((((]4B[2](t)Γ[−][1][](+2Γ[((((((((]β(T −_ _t)e[4][B][(][t][)Γ][−][1]_ _._
+
+This completes the proof of the correctness of the covariance.
+
+
+(168)
+
+(169)
+
+
+To connect back to the SSCS as presented in App. D.2, recall that in practice we use constant β (and
+_T = 1) and that we solve for small time steps of size_ _[δt]2_ [, such that][ B][(][t][) =][ β][ δt]2 [, which leads to the]
+
+expressions presented in App. D.2.
+
+
+-----
+

@@ -1,0 +1,1910 @@
+# BDDM: BILATERAL DENOISING DIFFUSION MODELS
+## FOR FAST AND HIGH-QUALITY SPEECH SYNTHESIS
+
+
+**Max W. Y. Lam, Jun Wang, Dan Su**
+Tencent AI Lab
+Shenzhen, China
+_{maxwylam, joinerwang, dansu}@tencent.com_
+
+ABSTRACT
+
+
+**Dong Yu**
+Tencent AI Lab
+Bellevue WA, USA
+dyu@tencent.com
+
+
+Diffusion probabilistic models (DPMs) and their extensions have emerged as competitive generative models yet confront challenges of efficient sampling. We
+propose a new bilateral denoising diffusion model (BDDM) that parameterizes
+both the forward and reverse processes with a schedule network and a score
+network, which can train with a novel bilateral modeling objective. We show
+that the new surrogate objective can achieve a lower bound of the log marginal
+likelihood tighter than a conventional surrogate. We also find that BDDM allows inheriting pre-trained score network parameters from any DPMs and consequently enables speedy and stable learning of the schedule network and optimization of a noise schedule for sampling. Our experiments demonstrate that
+BDDMs can generate high-fidelity audio samples with as few as three sampling steps. Moreover, compared to other state-of-the-art diffusion-based neural vocoders, BDDMs produce comparable or higher quality samples indistinguishable from human speech, notably with only seven sampling steps (143x
+faster than WaveGrad and 28.6x faster than DiffWave). We release our code at
+[https://github.com/tencent-ailab/bddm.](https://github.com/tencent-ailab/bddm)
+
+1 INTRODUCTION
+
+Deep generative models have shown a tremendous advancement in speech synthesis (van den Oord
+et al., 2016; Kalchbrenner et al., 2018; Prenger et al., 2019; Kumar et al., 2019; Kong et al., 2020b;
+Chen et al., 2020; Kong et al., 2021). Successful generative models can be mainly divided into two
+categories: generative adversarial network (GAN) (Goodfellow et al., 2014) based and likelihoodbased. The former is based on adversarial learning, where the objective is to generate data indistinguishable from the training data. Yet, the training GANs can be very unstable, and the relevant training objectives are not suitable to compare against different GANs. The latter uses log-likelihood or
+surrogate objectives for training, but they also have intrinsic limitations regarding generation speed
+or quality. For example, the autoregressive models (van den Oord et al., 2016; Kalchbrenner et al.,
+2018), while being capable of generating high-fidelity data, are limited by their inherently slow
+sampling process and the poor scaling properties on high-dimensional data. Likewise, the flowbased models (Dinh et al., 2016; Kingma & Dhariwal, 2018; Chen et al., 2018; Papamakarios et al.,
+2021) rely on specialized architectures to build a normalized probability model, whose training is
+less parameter-efficient. Other prior works use surrogate objectives, such as the evidence lower
+bound in variational auto-encoders (Kingma & Welling, 2014; Rezende et al., 2014; Maaløe et al.,
+2019) and the contrastive divergence in energy-based models (Hinton, 2002; Carreira-Perpinan &
+Hinton, 2005). These models, despite showing improved speed, typically only work well for lowdimensional data, and, in general, the sample qualities are not competitive to the GAN-based and
+the autoregressive models (Bond-Taylor et al., 2021).
+
+An up-and-coming class of likelihood-based models is the diffusion probabilistic models (DPMs)
+(Sohl-Dickstein et al., 2015), which introduces the idea of using a forward diffusion process to
+sequentially corrupt a given distribution and learning the reversal of such diffusion process to restore
+the data distribution for sampling. From a similar perspective, Song & Ermon (2019) proposed
+the score-based generative models by applying the score matching technique (Hyvarinen & Dayan,
+
+
+-----
+
+2005) to train a neural network such that samples can be generated via Langevin dynamics. Along
+these two lines of research, Ho et al. (2020) proposed the denoising diffusion probabilistic models
+(DDPMs) for high-quality image syntheses. Dhariwal & Nichol (2021) demonstrated that improved
+DDPMs Nichol & Dhariwal (2021) are capable of generating high-quality images of comparable
+or even superior quality to the state-of-the-art (SOTA) GAN-based models. For speech syntheses,
+DDPMs were also applied in Wavegrad (Chen et al., 2020) and DiffWave (Kong et al., 2021) to
+produce higher-fidelity audio samples than the conventional non-autoregressive models (Yamamoto
+et al., 2020; Kumar et al., 2019; Yang et al., 2021; Bi´nkowski et al., 2020) and matched the quality
+of the SOTA autoregressive methods (Chen et al., 2020).
+
+Despite the compelling results, the diffusion generative models are two to three orders of magnitude
+slower than other generative models such as GANs and VAEs. Their primary limitation is that they
+require up to thousands of diffusion steps during training to learn the target distribution. Therefore a
+large number of reverse steps are often required at sampling time. Recently, extensive investigations
+have been conducted to reduce the sampling steps for efficiently generating high-quality samples,
+which we will discuss in the related work in Section 2. Distinctively, we conceived that we might
+train a neural network to efficiently and adaptively estimate a much shorter noise schedule for sampling while achieving generation performances comparable or superior to the conventional DPMs.
+With such an incentive, after introducing the conventional DPMs as our background in Section 3, we
+propose in Section 4 bilateral denoising diffusion models (BDDMs), named after a bilateral modeling perspective – parameterizing the forward and reverse processes with a schedule network and
+a score network, respectively. We theoretically derive that the schedule network should be trained
+after the score network is optimized. For training the schedule network, we propose a novel objective to minimize the gap between a newly derived lower bound and the log marginal likelihood. We
+describe the training algorithm as well as the fast and high-quality sampling algorithm in Section 5.
+The training of the schedule network converges very fast using our newly derived objective, and its
+training only adds negligible overhead to DDPM’s. In Section 6, our neural vocoding experiments
+demonstrated that BDDMs could generate high-fidelity samples with as few as three sampling steps.
+Moreover, our method can produce speech samples indistinguishable from human speech with only
+seven sampling steps (143x faster than WaveGrad and 28.6x faster than DiffWave).
+
+2 RELATED WORK
+
+Prior works showed that noise scheduling is crucial for efficient and high-fidelity data generation in
+DPMs. DDPMs (Ho et al., 2020) used a shared linear noise schedule for both training and sampling,
+which, however, requires thousands of sampling iterations to obtain competitive results. To speed
+up the sampling process, one class of related work, including (Chen et al., 2020; Kong et al., 2021;
+Nichol & Dhariwal, 2021), attempts to use a different, shorter noise schedule for sampling. For
+clarity, we thereafter denote the training noise schedule as β ∈ R[T] and the sampling noise schedule
+as **_β[ˆ] ∈_** R[N] with N < T . In particular, Chen et al. (2020) applied a grid search (GS) algorithm to
+select **_β[ˆ]. Unfortunately, GS becomes prohibitively slow when N grows large, e.g., N = 6 took more_**
+than a day on a single NVIDIA Tesla P40 GPU. This is because the time costs of GS algorithm grow
+exponentially with N, i.e., O(9[N] ) with 9 bins as the default setting in Chen et al. (2020). Instead
+of searching, Kong et al. (2021) devised a fast sampling (FS) algorithm based on an expert-defined
+6-step noise schedule for their score network. However, this specifically tuned noise schedule is
+hard to generalize to other score networks, tasks, or datasets.
+
+Another class of noise scheduling methods searches for a subsequence of time indices of the training
+noise schedule, which we call the time schedule. DDIMs (Song et al., 2021) introduced an accelerated reverse process that relies on a pre-specified time schedule. A linear and a quadratic time
+schedule were used in DDIMs and showed superior generation quality over DDPMs within 10 to
+100 sampling steps. Nichol & Dhariwal (2021) proposed a re-scaled noise schedule for fast sampling, but this also requires pre-specifying the time schedule and the training noise schedule. Nichol
+& Dhariwal (2021) also proposed learning variances for the reverse processes, whereas the variances
+of the forward processes, i.e., the noise schedule, which affected both the means and variances of
+the reverse processes, were not learnable. According to the results of (Song et al., 2021; Nichol &
+Dhariwal, 2021), using a linear or quadratic time schedule resulted in quite different performances
+in different datasets, implying that the optimal choice of schedule varies with the datasets. So, there
+remains a challenge in finding a short and effective schedule for fast sampling on different datasets.
+
+
+-----
+
+Notably, Kong & Ping (2021) proposed a method to map a noise schedule to a time schedule for
+fast sampling. In this sense, searching for a time schedule becomes a sub-set of the noise scheduling
+problem, which resembles the above category of methods.
+
+Although DPMs (Sohl-Dickstein et al., 2015) and DDPMs (Ho et al., 2019) mentioned that the noise
+schedule could be learned by re-parameterization, the approach was not investigated in their works.
+Closely related works that learn a noise schedule emerged until very recently. San-Roman et al.
+(2021) proposed a noise estimation (NE) method, which trained a neural net with a regression loss
+to estimate the noise scale from the noisy sample at each time point, and then predicted the next
+noise scale. However, NE requires a prior assumption of the noise schedule following a linear or
+Fibonacci rule. Most recently, a concurrent work to ours by Kingma et al. (2021) jointly trained a
+neural net to predict the signal-to-noise ratio (SNR) by maximizing the variational lower bound. The
+SNR was then used for noise scheduling. Different from ours, this scheduling neural net only took
+_t as input and is independent of the noisy sample generated during the loop of sampling process._
+Intrinsically, with limited information about the sampled data, the predicted SNR could deviate from
+the actual SNR of the noisy data during sampling.
+
+3 BACKGROUND
+
+3.1 DIFFUSION PROBABILISTIC MODELS (DPMS)
+
+abilistic models (DPMs) (Sohl-Dickstein et al., 2015) define a forward processGiven i.i.d. samples {x0 ∈ R[D]} from an unknown data distribution pdata(x0), diffusion prob- q(x1:T **_x0) =_**
+_T_ _|_
+_t=1_ _[q][(][x][t][|][x][t][−][1][)][ that converts any complex data distribution into a simple, tractable distribution af-]_
+terQ _T steps of diffusion. A reverse process pθ(xt−1|xt) parameterized by θ is used to model the data_
+distribution: pθ(x0) = _π(xT )_ _t=1_ _[p][θ][(][x][t][−][1][|][x][t][)][d][x][1:][T][, where][ π][(][x][T][ )][ is the prior distribution for]_
+starting the reverse process. Then, the variational parameters θ can be learned by maximizing the
+R
+standard log evidence lower bound (ELBO):
+
+[Q][T]
+
+
+_Felbo := Eq_
+
+
+log pθ(x0 **_x1)_**
+_|_ _−_
+
+
+_DKL (q(xt_ 1 **_xt, x0)_** _pθ(xt_ 1 **_xt))_** _DKL (q(xT_ **_x0)_** _π(xT ))_
+_t=2_ _−_ _|_ _||_ _−_ _|_ _−_ _|_ _||_
+
+X
+
+(1)
+
+
+3.2 DENOISING DIFFUSION PROBABILISTIC MODELS (DDPMS)
+
+As an extension to DPMs, denoising diffusion probabilistic models (DDPMs) (Ho et al., 2020)
+applied the score matching technique (Hyvarinen & Dayan, 2005; Song & Ermon, 2019) to define
+the reverse process. In particular, DDPMs considered a Gaussian diffusion process parameterized
+by a noise schedule β ∈ R[T] with 0 < β1, . . ., βT < 1:
+
+
+_qβt_ (xt|xt−1), where _qβt_ (xt|xt−1) := N (
+_t=1_
+
+Y
+
+
+1 − _βtxt−1, βtI)._ (2)
+
+
+_qβ(x1:T_ **_x0) :=_**
+_|_
+
+
+Based on the nice property of isotropic Gaussians, one can express xt directly conditioned on x0:
+
+
+_qβ(xt|x0) = N_ (αtx0, (1 − _αt[2][)][I][)][,]_ where _αt =_
+
+
+1 _βi._ (3)
+_−_
+
+
+_i=1_
+
+
+To revert this forward process, DDPMs employ a score network[1] **_ϵθ(xt, αt) to define_**
+
+
+_βt_
+**_xt_** **_ϵθ (xt, αt)_**
+_−_ 1 _αt[2]_
+
+_−_
+
+p
+
+
+(4)
+
+
+_pθ(xt−1|xt) := N_
+
+
+_√1_ _βt_
+_−_
+
+
+_, Σt_
+
+
+1Here, ϵθ(xt, αt) is conditioned on the continuous noise scale αt, as in (Song et al., 2020b; Chen et al.,
+2020). Alternatively, the score network can also be conditioned on a discrete time index ϵθ(xt, t), as in (Song
+et al., 2021; Ho et al., 2020). An approximate mapping of a noise schedule to a time schedule (Kong & Ping,
+2021) exists, therefore we consider conditioning on noise scales as the general case.
+
+
+-----
+
+Figure 1: A bilateral denoising diffusion model (BDDM) introduces a junctional variable xt and a
+schedule network φ. The schedule network can optimize the shortened noise schedule _β[ˆ]n(φ) if we_
+know the score of the distribution at the junctional step, using the KL divergence to directly compare
+_pθ∗_ (ˆxn−1|xˆn = xt) against the re-parameterized forward process posteriors.
+
+where Σt is the co-variance matrix defined for the reverse process. Ho et al. (2020) showed that
+
+1 _α[2]t_ 1
+setting Σt = β[˜]tI = _−1−α−[2]t_ _[β][t][I][ is optimal for a deterministic][ x][0][, while setting][ Σ][t][ =][ β][t][I][ is optimal]_
+
+for a white noise x0 (0, I). Alternatively, Nichol & Dhariwal (2021) proposed learnable
+variances by interpolating the two optimals with a jointly trained neural network, i.e., ∼N Σt,θ(x) :=
+diag(exp(vθ(x) log βt + (1 − **_vθ(x)) log β[˜]t)), where vθ(x) ∈_** R[D] is a trainable network.
+
+Note that the calculation of the complete ELBO in Eq. (1) requires T forward passes of the score
+network, which would make the training computationally prohibitive for a large T . To feasibly
+train the score network, instead of computing the complete ELBO, Ho et al. (2020) proposed an
+efficient training mechanism by sampling from a discrete uniform distribution: t ∼U{1, ..., T _},_
+**_x0 ∼_** _pdata(x0), ϵt ∼N_ (0, I) at each training iteration to compute the training loss:
+
+2
+
+ddpm[(][θ][) :=] _αtx0 +_ 1 _αt[2][ϵ][t][, α][t]_ _,_ (5)
+_L[(][t][)]_ _−_ 2
+
+ q 
+
+which is a re-weighted form of DKL (q[ϵ]β[t][ −](xt[ϵ]−[θ]1|xt, x0)||pθ(xt−1|xt)). Ho et al. (2020) reported that
+the re-weighting worked effectively for learning θ. Yet, we demonstrate it is deficient for learning
+the noise schedule β in our ablation experiment in Section 6.2.
+
+4 BILATERAL DENOISING DIFFUSION MODELS (BDDMS)
+
+4.1 PROBLEM FORMULATION
+
+
+For fast sampling with DPMs, we strive for a noise schedule **_β[ˆ] for sampling that is much shorter_**
+than the noise schedule β for training. As shown in Fig. 1, we define two separate diffusion
+processes corresponding to the noise schedules, β and **_β[ˆ], respectively. The upper diffusion pro-_**
+cess parameterized by β is the same as in Eq. (2), whereas the lower process is defined as
+_q ˆβ[(ˆ]x1:N_ _|xˆ0) =_ _n=1_ _[q][ ˆ]βn_ [(ˆ]xn|xˆn−1) with much fewer diffusion steps (N ≪ _T_ ). In our prob
+lem formulation, β is given, but **_β[ˆ] is unknown. The goal is to find a_** **_β[ˆ] for the reverse process_**
+_pθ(ˆxn_ 1 **_xˆn; β[ˆ]n)[Q] such that[N]_** ˆx0 can be effectively recovered from ˆxN with N reverse steps.
+_−_ _|_
+
+4.2 MODEL DESCRIPTION
+
+Although many prior arts (Ho et al., 2020; Chen et al., 2020; Song et al., 2021; San-Roman et al.,
+2021) directly applied a shortened linear or Fibonacci noise schedule to the reverse process, we
+argue that these are sub-optimal solutions. Theoretically, the diffusion process specified by a new
+shortened noise schedule is essentially different from the one used to train the score network θ.
+Therefore, θ is not guaranteed suitable for reverting the shortened diffusion process. This issue
+motivated a novel modeling perspective to establish a link between the shortened schedule **_β[ˆ] and_**
+the score network θ, i.e., to have **_β[ˆ] optimized according to θ._**
+
+
+-----
+
+As a starting point, we consider an N = ⌊T/τ _⌋, where 1 ≤_ _τ < T is a hyperparameter controlling_
+the step size such that each diffusion step between two consecutive variables in the shorter diffusion
+process corresponds to τ diffusion steps in the longer one. Based on Eq. (2), we define the following:
+
+
+_αt[2]+τ_ **_xt,_** 1 _t+τ_
+
+_αt[2]_ _−_ _[α]α[2]_ _t[2]_
+
+
+
+_q ˆβn+1_ [(ˆ]xn+1 **_xˆn = xt) := qβ(xt+τ_** **_xt) =_** _αt+τ_ **_xt,_** 1 _t+τ_ **_I_** _,_ (6)
+_|_ _|_ _N_ s _αt[2]_ _−_ _[α]αt[2]_ 
+
+ 
+
+ 
+
+where xt is an intermediate diffused variable we introduced to link the two differently indexed
+diffusion sequences. We call it a junctional variable, which can be easily generated given x0 and β
+during training: xt = αtx0 + 1 − _αt[2][ϵ][n][.]_
+
+Unfortunately, for the reverse process whenp **_x0 is not given, the junctional variable is intractable._**
+However, our key observation is that while using the score by a score network θ[∗] trained for the
+long β-parameterized diffusion process, a short noise schedule **_β[ˆ](φ) can be optimized accordingly_**
+by introducing a schedule network φ. We provide its mathematical derivations in Appendix A.3.
+Next, we present a formal definition of BDDM and derive its training objectives, Lscore[(][n][)] [(][θ][)][ and]
+_Lstep[(][n][)][(][φ][;][ θ][∗][)][, for the score network and the schedule network, respectively, in more detail.]_
+
+4.3 SCORE NETWORK
+
+Recall that a DDPM starts the reverse process with a white noise xT (0, I) and takes T steps
+to recover the data distribution: _∼N_
+
+DDPM
+_pθ(x0)_ := EN (0,I) Epθ(x1:T −1|xT ) [pθ(x0|x1:T )] _._ (7)
+
+A BDDM, in contrast, starts from the junctional variable xt, and reverts a shorter sequence of
+diffusion random variables with only n steps:
+
+BDDM
+_pθ(ˆx0)_ := Eq ˆβ[(ˆ]xn−1;xt,ϵn) Epθ(ˆx1:n−2|xˆn−1) [[][p]θ[(ˆ]x0|xˆ1:n−1)] _,_ 2 ≤ _n ≤_ _N,_ (8)
+
+where q ˆβ[(ˆ]xn 1; xt, ϵn) is defined as a re-parameterization on the posterior: 
+_−_
+
+1 _αˆn[2]_ **_[ϵ][n]_**
+
+_q ˆβ[(ˆ]xn_ 1; xt, ϵn) :=q ˆβ **_xˆn_** 1 **_xn = xt, ˆx0 =_** **_[x][t][ −]_** _−_ (9)
+_−_ _−_ pαˆn !
+
+= 1 [ˆ] **_xt_** _βˆn_ **_ϵn,_** [1][ −] _α[ˆ]n[2]_ _−1_ _βˆnI_ _,_ (10)
+_N_  _−_ 1 _αˆn[2]_ 
+
+1 − _β[ˆ]n_ (1 − _β[ˆ]n)(1 −_ _αˆn[2]_ [)] _−_
+
+ q q 
+
+where ˆαn = _i=1_ 1 _βi, xt = αtx0 +_ 1 _αt[2][ϵ][n]_ [is the][ junctional][ variable that maps][ x][t]
+
+_−_ [ˆ] _−_
+
+to ˆxn given an approximate indexq _t_ (n 1)τ, ..., nτ 1, nτ and a sampled white noise
+_∼U{_ p − _−_ _}_
+**_ϵn_** (0, I)[Q]. Detailed derivation from Eq. (9) to (10) is provided in Appendix A.2.[n]
+_∼N_
+
+4.3.1 TRAINING OBJECTIVE FOR SCORE NETWORK
+
+With the above definition, a new form of lower bound to the log marginal likelihood can be derived
+such that log pθ(ˆx0) ≥Fscore[(][n][)] [(][θ][) :=][ −L][(]score[n][)] [(][θ][)][ −R]θ[(ˆ]x0, xt), where
+
+score[(][θ][) :=][D][KL] _pθ(ˆxn_ 1 **_xˆn = xt)_** _q ˆβ[(ˆ]xn_ 1; xt, ϵn) _,_ (11)
+_L[(][n][)]_ _−_ _|_ _||_ _−_
+
+_θ(ˆx0, xt) :=_ Epθ(ˆx1 **_xˆn=xt)_** [[log][ p]θ[(ˆ]x0 **_xˆ1)] ._**  (12)
+_R_ _−_ _|_ _|_
+
+See detailed derivation in Proposition 1 in Appendix A.2. In the following Proposition 2, we prove
+that via the junctional variable xt, the solution θ[∗] for optimizing the objective L[(]ddpm[t][)] [(][θ][)][,][ ∀][t][ ∈]
+
+_{1, ..., T_ _} is also the solution for optimizing Lscore[(][n][)]_ [(][θ][)][,][ ∀][n][ ∈{][2][, ..., N] _[}][. Thereby, we show that the]_
+score network θ can be trained with Lddpm[(][t][)] [(][θ][)][ and re-used for reverting the short diffusion process]
+over ˆxN :0. Although the newly derived lower bound result in the same objective as the conventional
+score network, it for the first time establishes a link between the score network θ and ˆxN :0. The
+connection is essential for learning **_β[ˆ], which we will describe next._**
+
+
+**_x[ˆ]n = xt, ˆx0 =_** **_[x][t][ −]_**
+
+
+1 _αˆn[2]_ **_[ϵ][n]_**
+_−_
+
+_αˆn_
+
+p
+
+
+-----
+
+4.4 SCHEDULE NETWORK
+
+In BDDMs, a schedule network is introduced to the forward process by re-parameterizing _β[ˆ]n as_
+_βˆn(φ) = fφ_ **_xt; β[ˆ]n+1_**, and recall that during training, we can use xt = αtx0 + 1 _αt[2][ϵ][n]_ [and]
+
+_−_
+
+_βˆn+1 = 1 −αα[2]t+[2]t_ _τ_ [. Through the re-parameterization, the task of noise scheduling, i.e., searching] p
+
+for **_β[ˆ], can now be reformulated as training a schedule network fφ that ancestrally estimates data-_**
+dependent variances. The schedule network learns to predict _β[ˆ]n based on the current noisy sample_
+**_xt – this makes our method fundamentally different from existing and concurrent work, includ-_**
+ing Kingma et al. (2021) – as we reveal that, aside from _β[ˆ]n+1, t, or n that reflects diffusion step_
+information, xt is also essential for noise scheduling from a reverse direction at inference time.
+
+Specifically, we adopt the ancestral step information (β[ˆ]n+1) to derive an upper bound for the current
+step while leaving the schedule network only to take the current noisy sample xt as input to predict
+a relative change of noise scales against the ancestral step. First, we derive an upper bound of _β[ˆ]n_
+by proving 0 < _β[ˆ]n < min_ 1 − 1−αˆ[2]nβ[ˆ]+1n+1 _[,][ ˆ]βn+1_ in Appendix A.1. Then, by multiplying the upper
+
+bound by a ratio estimated by a neural networkn _σoφ : R[D]_ _7→_ (0, 1), we define
+
+_fφ(xt; β[ˆ]n+1) := min_ 1 _αˆn[2]_ +1 _,_ _β[ˆ]n+1_ _σφ(xt),_ (13)
+_−_ 1 _βn+1_
+ _−_ [ˆ] 
+
+where the network parameter set φ is learned to estimate the ratio between two consecutive noise
+scales (β[ˆ]n and _β[ˆ]n+1) from the current noisy input xt._
+
+Finally, at inference time for noise scheduling, starting from a maximum reverse steps (N ) and two
+hyperparameters (ˆαN _,_ _β[ˆ]N_ ), we ancestrally predict the noise scale _β[ˆ]n(φ) = fφ_ **_xˆn; β[ˆ]n+1_**, for n
+
+_αˆn+1_
+from N to 1, and cumulatively update the product ˆαn =  
+_√1−β[ˆ]n+1_ [.]
+
+4.4.1 TRAINING OBJECTIVE FOR SCHEDULE NETWORK
+
+Here we describe how to learn the network parameters φ effectively. First, we demonstrated that
+_φ should be trained after θ is well-optimized, referring to Proposition 3 in Appendix A.3. The_
+Proposition also shows that we are minimizing the gap between the lower bound Fscore[(][n][)] [(][θ][∗][)][ and]
+log pθ∗ (ˆx0), i.e., log pθ∗ (ˆx0) score[(][θ][∗][)][, by minimizing the following objective]
+_−F_ [(][n][)]
+
+_Lstep[(][n][)][(][φ][;][ θ][∗][) :=][D][KL]_ _pθ∗_ (ˆxn−1|xˆn = xt)||q ˆβn(φ)[(ˆ]xn−1; x0, αt) _,_ (14)
+ 
+
+which is defined as a KL divergence to directly compare pθ∗ (ˆxn−1|xˆn = xt) against the reparameterized forward process posteriors, which are tractable when conditioned on the junctional
+noise scale αt and x0.
+
+The detailed derivation of Eq. (14) is also provided in the proof of Proposition 3 to get its concrete
+formulas as shown in Step (8-10) in Alg. 2.
+
+5 ALGORITHMS: TRAINING, NOISE SCHEDULING, AND SAMPLING
+
+5.1 TRAINING SCORE AND SCHEDULE NETWORKS
+
+Following the theoretical result in Appendix A.3, θ should be optimized before learning φ. Thereby
+first, to train the score network ϵθ, we refer to the settings in (Ho et al., 2020; Chen et al., 2020; Song
+et al., 2021) to define β as a linear noise schedule: βt = βstart + _T[t]_ [(][β][end][ −] _[β][start][)][,]_ for 1 ≤ _t ≤_ _T,_
+
+where βstart and βend are two hyperparameter that specifies the start value and the end value. This
+results in Algorithm 1, which resembles the training algorithm in (Ho et al., 2020).
+
+Next, based on the converged score network θ[∗], we train the schedule network φ. We draw an
+_n ∼U{2, . . ., N_ _} at each training step, and then draw a t ∼U{(n −_ 1)τ, ..., nτ _}. These together_
+can be re-formulated as directly drawing t ∼U{τ, ..., T − _τ_ _} for a finer-scale time step. Then, we_
+
+
+-----
+
+**Algorithm 1 Training Score Network (θ)**
+
+1: Given T, _βt_ _t=1_
+_{_ _}[T]_ _T_
+
+2: _αt_ _t=1_ [=][ {][Q][t]i=1 _√1_ _βt_ _t=1_
+_{_ _}[T]_ _−_ _}_
+
+3: repeat
+4:5: **_xt ∼U{0 ∼_** _p1data, . . ., T(x0)_ _}_
+
+6: **_ϵt ∼N_** (0, I)
+
+7: **_xt = αtx0 +_** 1 _αt[2][ϵ][t]_
+
+_−_
+
+8: _L[(]ddpm[t][)]_ [=][ ∥][ϵ][t][ −]p[ϵ][θ][(][x][t][, α][t][)][∥]2[2]
+
+9: Take a gradient descent step on _θ_ ddpm
+_∇_ _L[(][t][)]_
+
+10: until converged
+
+**Algorithm 3 Noise Scheduling**
+
+
+**Algorithm 2 Training Schedule Network (φ)**
+
+
+1: Given θ[∗], τ, T, _αt, βt_ _t=1_
+_{_ _}[T]_
+
+2: repeat
+3:4: **_xt ∼U{0 ∼_** _pτ, . . ., Tdata(x0)_ _−_ _τ_ _}_
+
+5: _δt = 1 −_ _αt[2]_
+
+6: **_ϵn ∼N_** (0, I)
+
+7: **_xt = αtx0 +_** _δtϵn_
+
+8: _βˆn = min_ _δt[√], 1 −_ _αα[2]t+[2]t_ _τ_
+
+
+
+_σφ(xt)_
+
+
+10:9: _CL = 4step[(][n][)]_ [=][−][1]2(log(δtδ−t _βδ[ˆ]nt/)β[ˆ]nϵ) + 2n −_ _β[−]ˆδnt[1][ϵ]D[θ][∗][(]β[x]ˆn[t]/δ[, α]t[t] −[)]_ 221[+][ C]
+
+11: Take a gradient descent step on _φ_ step
+_∇_ _L[(][n][)]_
+
+12: until converged
+**Algorithm 4 Sampling**
+
+1: Given θ[∗], {β[ˆ]n}n[N]=1[s] _[,][ ˆ]xNs ∼N_ (0N, Is )
+
+2: {αˆn}n[N]=1[s] [=] _ni=1_ 1 − _β[ˆ]n_ _n=1_
+
+q 
+
+3: for n = Ns toQ 1 do
+4:5: end forxˆn−1 ∼ _pθ[∗]_ (ˆxn−1|xˆn; ˆαn, _β[ˆ]n)_
+
+6: return ˆx0
+
+
+2:1: Given for n = θ[∗] N, ˆα toN 2, _β[ˆ] doN_ _, xN ∼N_ (0, I)
+3:4: **_xαˆˆnn−11 = ∼_** _pθ[∗]αˆ(ˆnxn−1|xˆn; ˆαn,_ _β[ˆ]n)_
+
+_−_ _√1−β[ˆ]n_
+
+5: _βˆn_ 1 = min 1 _αˆn[2]_ 1[,][ ˆ]βn _σφ(ˆxn_ 1)
+_−_ _{_ _−_ _−_ _}_ _−_
+
+6: **if** _β[ˆ]n−1 < β1 then_
+
+7: **return** _β[ˆ]n, . . .,_ _β[ˆ]N_
+
+8: **end if**
+
+9: end for
+
+10: return _β[ˆ]1, . . .,_ _β[ˆ]N_
+
+
+sequentially compute the variables needed for calculating Lstep[(][n][)][(][φ][;][ θ][∗][)][, as presented in Algorithm 2.]
+We observed that, although a linear schedule is used to define β, the noise schedule of **_β[ˆ] predicted_**
+by fφ is not limited to but rather different from a linear one.
+
+5.2 NOISE SCHEDULING FOR FAST AND HIGH-QUALITY SAMPLING
+
+After the score network and the schedule network are trained, the inference procedure can divide
+into two phases: (1) the noise scheduling phase and (2) the sampling phase.
+
+First, we run the noise scheduling process similarly to a sampling process with N iterations maximum. Different from training, where αt is forward-computed, ˆαn is instead a backward-computed
+variable (from N to 1) that may deviate from the forward one because _βi_ _i_ are unknown in the
+_{_ [ˆ] _}[n][−][1]_
+noise scheduling phase during inference. To start noise scheduling, we first set two hyperparameters: ˆαN and _β[ˆ]N_ . We use β1, the smallest noise scale seen in training, as a threshold to early stop
+the noise scheduling process so that we can ignore small noise scales (< β1) that were never seen
+by the score network. Overall, the noise scheduling process presents in Algorithm 3.
+
+In practice, we apply a grid search algorithm of M bins to Algorithm 3, which takes O(M [2]) time, to
+find proper values for (ˆαN _,_ _β[ˆ]N_ ). We used M = 9 as in (Chen et al., 2020). The grid search for our
+noise scheduling algorithm can be evaluated on a small subset of the training samples. Empirically,
+even as few as 1 sample for evaluation works well in our algorithm. Finally, given the predicted
+noise schedule **_β[ˆ] ∈_** R[N][s], we generate samples with Ns sampling steps, as shown in Algorithm 4.
+
+6 EXPERIMENTS
+
+We conducted a series of experiments on neural vocoding tasks to evaluate the proposed BDDMs.
+First, we compared BDDMs against several strongest models that have been published: the mixture
+of logistics (MoL) WaveNet (Oord et al., 2018) implemented in (Yamamoto, 2020), the WaveGlow
+(Prenger et al., 2019) implemented in (Valle, 2020), the MelGAN (Kumar et al., 2019) implemented
+in (Kumar, 2019), the HiFi-GAN (Kong et al., 2020b) implemented in (Kong et al., 2020a) and
+the two most recently proposed diffusion-based vocoders, i.e., WaveGrad (Chen et al., 2020) and
+DiffWave (Kong et al., 2021), both re-implemented in our code. The hyperparameter settings of
+BDDMs and all these models are detailed in Appendix B.
+
+In addition, we also compared BDDMs to a variety of scheduling and acceleration techniques applicable to DDPMs, including the grid search (GS) approach in WaveGrad, the fast sampling (FS)
+
+
+-----
+
+Table 1: Comparison of neural vocoders in terms of MOS with 95% confidence intervals, real-time
+factor (RTF) and model size in megabytes (MB) for inference. The highest score and the scores that
+are not significantly different from the highest score (p-values ≥ 0.05) are bold-faced.
+
+**Neural Vocoder** **MOS** **RTF** **Size**
+
+Ground-truth 4.64 ± 0.08 — —
+
+WaveNet (MoL) (Oord et al., 2018) 3.52 ± 0.16 318.6 282MB
+WaveGlow (Prenger et al., 2019) 3.03 ± 0.15 0.0198 645MB
+MelGAN (Kumar et al., 2019) 3.48 ± 0.14 0.00396 17MB
+HiFi-GAN (Kong et al., 2020b) 4.33 ± 0.12 0.0134 54MB
+WaveGrad - 1000 steps (Chen et al., 2020) 4.36 ± 0.13 38.2 183MB
+DiffWave - 200 steps (Kong et al., 2021) **4.49 ± 0.13** 7.30 27MB
+
+BDDM - 3 steps (αˆN = 0.68, _β[ˆ]N = 0.53)_ 3.64 ± 0.13 0.110 27MB
+BDDM - 7 steps (αˆN = 0.62, _β[ˆ]N = 0.42)_ **4.43 ± 0.11** 0.256 27MB
+BDDM - 12 steps (αˆN = 0.67, _β[ˆ]N = 0.12)_ **4.48 ± 0.12** 0.438 27MB
+
+
+Table 2: Comparison of sampling acceleration methods with the same score network and the same
+number of steps. The highest score and the scores that are not significantly different from the highest
+score (p-values ≥ 0.05) are bold-faced.
+
+**Steps** **Acceleration Method** **STOI** **PESQ** **MOS**
+
+GS (Chen et al., 2020) **0.965 ± 0.009** **3.66 ± 0.20** **3.61 ± 0.12**
+FS (Kong et al., 2021) 0.939 ± 0.023 3.09 ± 0.23 3.10 ± 0.12
+
+3 DDIM (Song et al., 2021) 0.943 ± 0.015 3.42 ± 0.27 3.25 ± 0.13
+
+NE (San-Roman et al., 2021) **0.966 ± 0.010** **3.62 ± 0.18** 3.55 ± 0.12
+BDDM **0.966 ± 0.011** **3.63 ± 0.24** **3.64 ± 0.13**
+
+FS (Kong et al., 2021) **0.981 ± 0.006** 3.68 ± 0.24 3.70 ± 0.14
+DDIM (Song et al., 2021) 0.974 0.008 3.85 0.12 3.94 0.12
+
+7 _±_ _±_ _±_
+
+NE (San-Roman et al., 2021) 0.978 ± 0.007 3.75 ± 0.18 4.02 ± 0.11
+BDDM **0.983 ± 0.006** **3.96 ± 0.09** **4.43 ± 0.11**
+
+DDIM (Song et al., 2021) 0.979 ± 0.006 3.90 ± 0.10 4.16 ± 0.12
+12 NE (San-Roman et al., 2021) 0.981 ± 0.007 3.82 ± 0.13 3.98 ± 0.14
+BDDM **0.987 ± 0.006** **3.98 ± 0.12** **4.48 ± 0.12**
+
+
+approach based on a user-defined 6-step schedule in DiffWave, the DDIMs (Song et al., 2021) and
+a noise estimation (NE) approach (San-Roman et al., 2021). For fair and reproducible comparison
+with other models and approaches, we used the LJSpeech dataset (Ito & Johnson, 2017), which
+consists of 13,100 22kHz audio clips of a female speaker. All diffusion models were trained on the
+same training split as in (Chen et al., 2020). We also replicated the comparative experiment of neural
+vocoding using a multi-speaker VCTK dataset (Yamagishi et al., 2019) as presented in Appendix C
+and obtained a result consistent with that obtained from the LJSpeech dataset.
+
+6.1 SAMPLING QUALITY IN OBJECTIVE AND SUBJECTIVE METRICS
+
+To assess the quality of each generated audio sample, we used both objective and subjective measures for comparing different neural vocoders given the same ground-truth spectrogram s as the
+condition, i.e., ϵθ(x, s, αt). Specifically, we used two scale-invariant metrics: the perceptual evaluation of speech quality (PESQ) (Rix et al., 2001) and the short-time objective intelligibility (STOI)
+(Taal et al., 2010) to measure the noisiness and the distortion of the generated speech relative to the
+reference speech. Mean opinion score (MOS) was also used as a subjective metric for evaluating the
+naturalness of the generated speech. The assessment scheme of MOS is included in Appendix B.
+
+In Table 1, we compared BDDMs against the state-of-the-art (SOTA) vocoders. To predict noise
+schedules with different sampling steps (3, 7, and 12), we set three pairs of _αˆN_ _,_ _β[ˆ]N_ for BDDMs
+_{_ _}_
+by running on Algorithm 3 a quick hyperparameter grid search, which is detailed in Appendix B.
+Among the 9 evaluated vocoders, only our proposed BDDMs with 7 and 12 steps and DiffWave with
+200 steps showed no statistic-significant difference from the ground-truth in terms of MOS. Moreover, BDDMs significantly outspeeded DiffWave in terms of RTFs. Notably, previous diffusion
+
+-----
+
+Figure 2: Different training losses for σφ Figure 3: Different lower bounds to log pθ(x0)
+
+based vocoders achieved high MOS scores at the cost of an unacceptable RTF for industrial deployment. In contrast, BDDMs managed to achieve a high standard of generation quality with only 7
+sampling steps (143x faster than WaveGrad and 28.6x faster than DiffWave).
+
+In Table 2, we evaluated BDDMs and alternative accelerated sampling methods, which used the
+same score network for a pair-to-pair comparison. The GS method performed stably when the
+step number was small (i.e., N ≤ 6) but not scalable to more step numbers, which were therefore
+bypassed in the comparisons of 7 and 12 steps. The FS method by Song et al. (2021) was linearly
+interpolated to 3 and 7 steps for a fair comparison. Comparing its 7-step and 3-step results, we
+observed that the FS performance degraded drastically. Both the DDIM and the NE methods were
+stable across all the steps but were not performing competitively enough. In comparison, BDDMs
+consistently attained the leading scores across all the steps. This evaluation confirmed that BDDM
+was superior to other acceleration methods for DPMs in terms of both stability and quality.
+
+6.2 ABLATION STUDY AND ANALYSIS
+
+We attribute the primary advantage of BDDMs to the newly derived objective Lstep[(][n][)] [for learning][ φ][.]
+To better reason about this, we performed an ablation study, where we substituted the proposed loss
+with the standard negative ELBO for learning φ as mentioned by Sohl-Dickstein et al. (2015). We
+plotted the network outputs with different training losses in Fig. 2. It turned out that, when using
+_Lelbo[(][n][)]_ [to learn][ φ][, the network output rapidly collapsed to zero within several training steps; whereas,]
+the network trained with Lstep[(][n][)] [produced fluctuating outputs. The fluctuation is a desirable property]
+showing the network properly predicts t-dependent noise scales, as t is a random time step drawn
+from a uniform distribution in training.
+
+By settingvalues at t ∈β[ˆ] =[20 β,, we empirically validated that 180] using the same optimized F θbddm[(][t][∗][)]. Each value is provided with 95% confidence[:=][ F]score[(][t][)] [+][L][(]step[t][)] _[≥F]elbo[(][t][)]_ [with their respective]
+intervals, as shown in Fig. 3. In this experiment, we used the LJ speech dataset and set T = 200 and
+_τ = 20. Notably, we dropped their common entropy term_ _θ(ˆx0, xt) < 0 to mainly compare their_
+_R_
+KL divergences. This explains those positive lower bound values in the plot. The graph shows that
+our proposed bound Fbddm[(][t][)] [is always a tighter lower bound than the standard one across all examined]
+_t. Moreover, we found that Fbddm[(][t][)]_ [attained low values with a relatively much lower variance for]
+_t ≤_ 50, where Felbo[(][t][)] [was highly volatile. This implies that][ F]bddm[(][t][)] [better tackles the difficult training]
+part, i.e., when the score becomes more challenging to estimate as t → 0.
+
+7 CONCLUSIONS
+
+BDDMs parameterize the forward and reverse processes with a schedule network and a score network, of which the former’s optimization is tied with the latter by introducing a junctional variable.
+We derived a new lower bound that leads to the same training loss for the score network as in DDPMs
+(Ho et al., 2020), which thus enables inheriting any pre-trained score networks in DDPMs. We also
+showed that training the schedule network after a well-optimized score network can be viewed as
+tightening the lower bound. Followed from the theoretical results, an efficient training algorithm and
+a noise scheduling algorithm were respectively designed for BDDMs. Finally, in our experiments,
+BDDMs showed a clear edge over the previous diffusion-based vocoders.
+
+
+-----
+
+REFERENCES
+
+Mikołaj Bi´nkowski, Jeff Donahue, Sander Dieleman, Aidan Clark, Erich Elsen, Norman
+Casagrande, Luis C. Cobo, and Karen Simonyan. High fidelity speech synthesis with adversarial
+networks. International conference on learning representations, 2020.
+
+S Bond-Taylor, A Leach, Y Long, and CG Willcocks. Deep generative modelling: A comparative
+review of vaes, gans, normalizing flows, energy-based and autoregressive models. IEEE Transac_tions on Pattern Analysis and Machine Intelligence, 2021._
+
+Miguel A Carreira-Perpinan and Geoffrey E Hinton. On contrastive divergence learning. AISTATS,
+pp. 33–40, 2005.
+
+Nanxin Chen, Yu Zhang, Heiga Zen, Ron J Weiss, Mohammad Norouzi, and William Chan. Wavegrad: Estimating gradients for waveform generation. In International conference on learning
+_representations, 2020._
+
+Tian Qi Chen, Yulia Rubanova, Jesse Bettencourt, and David K Duvenaud. Neural ordinary differential equations. Advances in neural information processing systems, pp. 6571–6583, 2018.
+
+Prafulla Dhariwal and Alexander Nichol. Diffusion models beat gans on image synthesis. Advances
+_in neural information processing systems, 34, 2021._
+
+Laurent Dinh, Jascha Sohl-Dickstein, and Samy Bengio. Density estimation using real nvp. arXiv
+_preprint arXiv:1605.08803, 2016._
+
+Brendan J Frey. Local probability propagation for factor analysis. Advances in neural information
+_processing systems, 12:442–448, 1999._
+
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair,
+Aaron Courville, and Yoshua Bengio. Generative adversarial nets. Advances in neural information
+_processing systems, 27, 2014._
+
+G. E. Hinton. Training products of experts by minimizing contrastive divergence. neural computation. Neural computation, pp. 14(8):1771–1800, 2002.
+
+Jonathan Ho, Xi Chen, Aravind Srinivas, Yan Duan, and Pieter Abbeel. Flow++: Improving flowbased generative models with variational dequantization and architecture design. ICML, 2019.
+
+Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. Advances in
+_neural information processing systems, 33:6840–6851, 2020._
+
+Aapo Hyvarinen and Peter Dayan. Estimation of non-normalized statistical models by score matching. Journal of Machine Learning Research, pp. 6(4), 2005.
+
+Keith Ito and Linda Johnson. The lj speech dataset. https://keithito.com/LJ-Speech-Dataset/, 2017.
+
+Nal Kalchbrenner, Erich Elsen, Karen Simonyan, Seb Noury, Norman Casagrande, Edward Lockhart, Florian Stimberg, Aaron Oord, Sander Dieleman, and Koray Kavukcuoglu. Efficient neural
+audio synthesis. In International Conference on Machine Learning, pp. 2410–2419. PMLR, 2018.
+
+Diederik P Kingma and Prafulla Dhariwal. Glow: Generative flow with invertible 1x1 convolutions.
+_Advances in neural information processing systems, pp. 10215–10224, 2018._
+
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes. stat, 1050:1, 2014.
+
+Diederik P Kingma, Tim Salimans, Ben Poole, and Jonathan Ho. Variational diffusion models. In
+_Advances in neural information processing systems, 2021._
+
+Jungil Kong, Jaehyeon Kim, and Jaekyoung Bae. Hifi-gan: Generative adversarial networks for
+[efficient and high fidelity speech synthesis. https://github.com/jik876/hifi-gan,](https://github.com/jik876/hifi-gan)
+2020a.
+
+Jungil Kong, Jaehyeon Kim, and Jaekyoung Bae. Hifi-gan: Generative adversarial networks for
+efficient and high fidelity speech synthesis. Advances in neural information processing systems,
+33, 2020b.
+
+
+-----
+
+Zhifeng Kong and Wei Ping. On fast sampling of diffusion probabilistic models. In ICML Workshop
+_on Invertible Neural Networks, Normalizing Flows, and Explicit Likelihood Models, 2021._
+
+Zhifeng Kong, Wei Ping, Jiaji Huang, Kexin Zhao, and Bryan Catanzaro. Diffwave: A versatile
+diffusion model for audio synthesis. International conference on learning representations, 2021.
+
+Kundan Kumar, Rithesh Kumar, Thibault de Boissiere, Lucas Gestin, Wei Zhen Teoh, Jose Sotelo,
+Alexandre de Br´ebisson, Yoshua Bengio, and Aaron C Courville. Melgan: Generative adversarial
+networks for conditional waveform synthesis. Advances in neural information processing systems,
+32, 2019.
+
+Rithesh Kumar. Official repository for the paper melgan: Generative adversarial networks for condi[tional waveform synthesis. https://github.com/descriptinc/melgan-neurips,](https://github.com/descriptinc/melgan-neurips)
+2019.
+
+Max WY Lam, Jun Wang, Dan Su, and Dong Yu. Effective low-cost time-domain audio separation
+using globally attentive locally recurrent networks. In 2021 IEEE Spoken Language Technology
+_Workshop (SLT), pp. 801–808. IEEE, 2021._
+
+Lars Maaløe, Marco Fraccaro, Valentin Li´evin, and Ole Winther. Biva: A very deep hierarchy of
+latent variables for generative modeling. Advances in neural information processing systems, pp.
+6548–6558, 2019.
+
+Alexander Quinn Nichol and Prafulla Dhariwal. Improved denoising diffusion probabilistic models.
+In International Conference on Machine Learning, pp. 8162–8171. PMLR, 2021.
+
+Aaron Oord, Yazhe Li, Igor Babuschkin, Karen Simonyan, Oriol Vinyals, Koray Kavukcuoglu,
+George Driessche, Edward Lockhart, Luis Cobo, Florian Stimberg, et al. Parallel wavenet: Fast
+high-fidelity speech synthesis. In International conference on machine learning, pp. 3918–3926.
+PMLR, 2018.
+
+George Papamakarios, Eric Nalisnick, Danilo Jimenez Rezende, Shakir Mohamed, and Balaji Lakshminarayanan. Normalizing flows for probabilistic modeling and inference. JMLR, pp. 22(57):1–
+64, 2021.
+
+Ryan Prenger, Rafael Valle, and Bryan Catanzaro. Waveglow: A flow-based generative network
+for speech synthesis. In ICASSP 2019-2019 IEEE International Conference on Acoustics, Speech
+_and Signal Processing (ICASSP), pp. 3617–3621. IEEE, 2019._
+
+Flavio Protasio Ribeiro, Dinei Florencio, Cha Zhang, and Mike Seltzer. CROWDMOS: An approach
+for crowdsourcing mean opinion score studies. In ICASSP. IEEE, 2011. Edition: ICASSP.
+
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic backpropagation and
+approximate inference in deep generative models. ICML, pp. 1278–1286, 2014.
+
+Antony W Rix, John G Beerends, Michael P Hollier, and Andries P Hekstra. Perceptual evaluation
+of speech quality (pesq)-a new method for speech quality assessment of telephone networks and
+codecs. In 2001 IEEE International Conference on Acoustics, Speech, and Signal Processing.
+_Proceedings (Cat. No. 01CH37221), volume 2, pp. 749–752. IEEE, 2001._
+
+Robin San-Roman, Eliya Nachmani, and Lior Wolf. Noise estimation for generative diffusion models. arXiv preprint arXiv:2104.02600, 2021.
+
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image
+recognition. arXiv preprint arXiv:1409.1556, 2014.
+
+Jascha Sohl-Dickstein, Eric Weiss, Niru Maheswaranathan, and Surya Ganguli. Deep unsupervised
+learning using nonequilibrium thermodynamics. In International Conference on Machine Learn_ing, pp. 2256–2265, 2015._
+
+Jiaming Song, Chenlin Meng, and Stefano Ermon. Denoising diffusion implicit models. Interna_tional conference on learning representations, 2021._
+
+
+-----
+
+Yang Song and Stefano Ermon. Generative modeling by estimating gradients of the data distribution.
+_Advances in neural information processing systems, 32, 2019._
+
+Yang Song and Stefano Ermon. Improved techniques for training score-based generative models.
+_Advances in neural information processing systems, 33:12438–12448, 2020._
+
+Yang Song, Sahaj Garg, Jiaxin Shi, and Stefano Ermon. Sliced score matching: A scalable approach
+to density and score estimation. UAI, pp. 574–584, 2020a.
+
+Yang Song, Jascha Sohl-Dickstein, Diederik P Kingma, Abhishek Kumar, Stefano Ermon, and Ben
+Poole. Score-based generative modeling through stochastic differential equations. In Interna_tional conference on learning representations, 2020b._
+
+Cees H Taal, Richard C Hendriks, Richard Heusdens, and Jesper Jensen. A short-time objective
+intelligibility measure for time-frequency weighted noisy speech. In 2010 IEEE international
+_conference on acoustics, speech and signal processing, pp. 4214–4217. IEEE, 2010._
+
+Rafael Valle. Waveglow: a flow-based generative network for speech synthesis. [https://](https://github.com/NVIDIA/waveglow)
+[github.com/NVIDIA/waveglow, 2020.](https://github.com/NVIDIA/waveglow)
+
+Aaron van den Oord, Sander Dieleman, Heiga Zen, Karen Simonyan, Oriol Vinyals, Alex Graves,
+Nal Kalchbrenner, Andrew Senior, and Koray Kavukcuoglu. Wavenet: A generative model for
+raw audio. Proc. 9th ISCA Speech Synthesis Workshop, pp. 125–125, 2016.
+
+Daniel Watson, Jonathan Ho, Mohammad Norouzi, and William Chan. Learning to efficiently sample from diffusion probabilistic models. arXiv preprint arXiv:2106.03802, 2021.
+
+Junichi Yamagishi, Christophe Veaux, and Kirsten MacDonald. CSTR VCTK Corpus: English
+multi-speaker corpus for CSTR voice cloning toolkit (version 0.92), 2019.
+
+[Ryuichi Yamamoto. Wavenet vocoder. https://github.com/r9y9/wavenet_vocoder,](https://github.com/r9y9/wavenet_vocoder)
+2020.
+
+Ryuichi Yamamoto, Eunwoo Song, and Jae-Min Kim. Parallel. Wavegan: A fast waveform generation model based on generative adversarial networks with multi-resolution spectrogram. ICASSP,
+2020.
+
+Geng Yang, Shan Yang, Kai Liu, Peng Fang, Wei Chen, and Lei Xie. Multi-band melgan: Faster
+waveform generation for high-quality text-to-speech. In 2021 IEEE Spoken Language Technology
+_Workshop (SLT), pp. 492–498. IEEE, 2021._
+
+
+-----
+
+A THEORETICAL DERIVATIONS FOR BDDMS
+
+In this section, we provide the theoretical supports for the following:
+
+-  The derivation for upper bounding _β[ˆ]n (see Appendix A.1)._
+
+-  The score network θ trained with L[(]ddpm[t][)] [(][θ][)][ for the reverse process][ p][θ][(][x][t][−][1][|][x][t][)][ can be]
+re-used for the reverse process pθ(ˆxn−1|xˆn) (see Appendix A.2).
+
+-  The schedule network φ can be trained with Lstep[(][n][)][(][φ][;][ θ][∗][)][ after the score network][ θ][ is opti-]
+mized. (see Appendix A.3).
+
+A.1 DERIVING AN UPPER BOUND FOR NOISE SCALE
+
+Since monotonic noise schedules have been successfully applied to in many prior arts including
+DPMs (Ho et al., 2020; Kingma et al., 2021) and score-based methods (Song et al., 2020a; Song
+& Ermon, 2020), we also follow the monotonic assumption and derive an upper bound for _β[ˆ]n as_
+below:
+**Remark 1. Suppose the noise schedule for sampling is monotonic, i.e., 0 <** _β[ˆ]1 < . . . <_ _β[ˆ]N < 1,_
+_then, for 1 ≤_ _n < N_ _,_ _β[ˆ]n satisfies the following inequality:_
+
+0 < _β[ˆ]n < min_ 1 − 1 _αˆn[2]β+1n+1_ _,_ _β[ˆ]n+1_ _._ (15)
+ _−_ [ˆ] 
+
+_Proof. By the general definition of noise schedule, we know that 0 <_ _β[ˆ]1, . . .,_ _β[ˆ]N < 1 (Note: no_
+
+inequality sign in between). Given that ˆαn = _i=1_ 1 _βi, we also have 0 < ˆα1, . . ., ˆαt < 1._
+
+_−_ [ˆ]
+
+_αˆ[2]n+1_ q
+First, we show that _β[ˆ]n < 1 −_ 1−β[ˆ]n+1 [:] [Q][n]
+
+
+_αˆn_ 1 = _αˆn_ _< 1_ _βn < 1_ _αˆn[2]_ [= 1][ −] _αˆn[2]_ +1 _._ (16)
+_−_ 1 _βn_ _⇐⇒_ [ˆ] _−_ 1 − _β[ˆ]n+1_
+
+_−_ [ˆ]
+
+q
+
+
+Next, we show that _β[ˆ]n < 1 −_ _αˆn+1:_
+
+_αˆn_ _αˆn_ 1 _βn_ _αˆn+1_
+
+= _−_ [ˆ] = _< 1_ _βn < 1_ _αˆn+1._ (17)
+1 _βn_ 1q − _β[ˆ]n_ 1 − _β[ˆ]n_ _⇐⇒_ [ˆ] _−_
+_−_ [ˆ]
+
+q
+
+
+Now, we have _β[ˆ]n < min_ 1 − 1−αˆ[2]nβ[ˆ]+1n+1 _[,][ 1][ −]_ _α[ˆ]n+1_ . When 1 − _αˆn+1 < 1 −_ 1−αˆ[2]nβ[ˆ]+1n+1 [, we can show]
+
+that _β[ˆ]n+1 < 1 −_ _αˆn+1:_ n o
+
+1 − _αˆn+1 < 1 −_ 1 _αˆn[2]β+1n+1_ = 1 − _αˆn[2]_ _[⇐]⇒_ _αˆn+1 > ˆαn[2]_ _[⇐]⇒_ _α[ˆ]αˆn[2]_ +1n[2] _> ˆαn+1_ (18)
+
+_−_ [ˆ]
+
+1 _αn[2]_ +1 _< 1_ _αˆn+1_ _βn+1 < 1_ _αˆn+1._ (19)
+_⇐⇒_ _−_ [ˆ]αˆn[2] _−_ _⇐⇒_ [ˆ] _−_
+
+By the assumption of monotonic sequence, we also have _β[ˆ]n <_ _β[ˆ]n+1. Knowing that_ _β[ˆ]n+1 <_
+
+1−αˆn+1 is always true, we obtain a tighter bound for _β[ˆ]n: 0 <_ _β[ˆ]n < min_ 1 − 1−αˆ[2]nβ[ˆ]+1n+1 _[,][ ˆ]βn+1_ .
+n o
+
+A.2 DERIVING THE TRAINING OBJECTIVE FOR SCORE NETWORK
+
+First, followed from the data distribution modeling of BDDMs as proposed in Eq. (8):
+
+_pθ(ˆx0) := Exˆn−1∼q ˆβ[(ˆ]xn−1;xt,ϵn)_ Exˆ1:n−2∼pθ(ˆx1:n−2|xˆn−1) [[][p]θ[(ˆ]x0|xˆ1:n−1)] _,_ (20)
+
+we can derive a new lower bound to the log marginal likelihood as follows: 
+
+
+-----
+
+**Proposition 1. Given xt ∼** _qβ(xt|x0), the following lower bound holds for n ∈{2, . . ., N_ _}:_
+
+log pθ(ˆx0) ≥Fscore[(][n][)] [(][θ][) :=][ −L][(]score[n][)] [(][θ][)][ −R][θ][(ˆ]x0, xt), (21)
+
+_where_
+
+_score[(][θ][) :=][ D][KL]_ _pθ(ˆxn_ 1 **_xˆn = xt)_** _q ˆβ[(ˆ]xn_ 1; xt, ϵn) _,_ (22)
+_L[(][n][)]_ _−_ _|_ _||_ _−_
+
+_θ(ˆx0, xt) :=_ Epθ(ˆx1 **_xˆn=xt)_** [[log][ p]θ[(ˆ]x0 **_xˆ1)] ._**  (23)
+_R_ _−_ _|_ _|_
+
+_Proof._
+
+log pθ(ˆx0) = log _pθ(ˆx0:n_ 2 **_xˆn_** 1)q ˆβ[(ˆ]xn 1; xt, ϵn)dxˆ1:n 1 (24)
+_−_ _|_ _−_ _−_ _−_
+Z
+
+**_x1:n_** 1 **_xˆn = xt)_**
+= log _pθ(ˆx0:n_ 2 **_xˆn_** 1)q ˆβ[(ˆ]xn 1; xt, ϵn) _[p][θ][(ˆ]_ _−_ _|_ **_x1:n_** 1
+_−_ _|_ _−_ _−_ _pθ(ˆx1:n_ 1 **_xˆn = xt)_** _[d]_ [ˆ] _−_
+Z _−_ _|_
+
+(25)
+
+
+_pθ(ˆx0_ **_xˆ1)q ˆβ[(ˆ]xn_** 1; xt, ϵn)
+_|_ _−_
+
+_pθ(ˆxn_ 1 **_xˆn = xt)_**
+_−_ _|_
+
+
+= log Epθ(ˆx1,n 1 **_xˆn=xt)_**
+_−_ _|_
+
+
+(26)
+
+(27)
+
+
+_pθ(ˆx0_ **_xˆ1)q ˆβ[(ˆ]xn_** 1; xt, ϵn)
+log _|_ _−_
+
+_pθ(ˆxn_ 1 **_xˆn = xt)_**
+_−_ _|_
+
+
+
+[Jensen’s Inequality] Epθ(ˆx1,xˆn 1 **_xˆn=xt)_**
+_≥_ _−_ _|_
+
+
+=Epθ(ˆx1 **_xˆn=xt)_** [[log][ p]θ[(ˆ]x0 **_xˆ1)]_** _DKL_ _pθ(ˆxn_ 1 **_xˆn = xt)_** _q ˆβ[(ˆ]xn_ 1; xt, ϵn)
+_|_ _|_ _−_ _−_ _|_ _||_ _−_
+ (28)
+
+= −L[(]score[n][)] [(][θ][)][ −R][θ][(ˆ]x0, xt) (29)
+
+Next, we show that the score network θ trained with L[(]ddpm[t][)] [(][θ][)][ can be re-used in BDDMs. We first]
+provide the derivation for Eq. (9- 10). We have
+
+
+1 _αˆn[2]_ **_[ϵ][n]_**
+_−_
+
+_αˆn_
+
+
+**_xˆn_** 1 **_xˆn = xt, ˆx0 =_** **_[x][t][ −]_**
+_−_ _|_
+
+
+(30)
+
+(31)
+
+(32)
+
+
+_q ˆβ[(ˆ]xn_ 1; xt, ϵn) := q ˆβ
+_−_
+
+
+1 − _β[ˆ]n(1 −_ _αˆn[2]_ _−1[)]_ **_xt,_** [1][ −] _α[ˆ]n[2]_ _−1_ _βˆnI_
+
+1 _αˆn[2]_ 1 _αˆn[2]_
+_−_ _−_
+
+
+_αn_ 1β[ˆ]n **_xt_** 1 _αˆn[2]_ **_[ϵ][n]_** 1 _β_
+_−_ _−_ _−_ + _−_ [ˆ]
+
+ 1 _αˆn[2]_ _αˆn_ q 1
+
+_−_ p
+
+ [ˆ]
+
+_αˆn_ 1β[ˆ]n 1 _βn(1_ _αˆn[2]_ 1[)]
+_−_ _−_ [ˆ] _−_ _−_
+
+ _αˆn(1_ _αˆn[2]_ [) +] q 1 _αˆn[2]_
+
+_−_ _−_
+
+
+
+
+= N
+
+= N
+
+= N
+
+
+= _αˆn−1β[ˆ]n_ 1 − _β[ˆ]n(1 −_ _αˆn[2]_ _−1[)]_ **_xt_** _αˆn−1β[ˆ]n_ **_ϵn,_** [1][ −] _α[ˆ]n[2]_ _−1_ _βˆnI_ (32)
+_N_  _αˆn(1_ _αˆn[2]_ [) +] q 1 _αˆn[2]_  _−_ _αˆn_ 1 _αˆn[2]_ 1 _αˆn[2]_ 
+
+_−_ _−_ _−_ _−_
+
+  p 
+
+= 1 **_xt_** _βˆn_ **_ϵn,_** [1][ −] _α[ˆ]n[2]_ _−1_ _βˆnI_ _._ (33)
+_N_  _−_ 1 _αˆn[2]_ 
+
+1 − _β[ˆ]n_ (1 − _β[ˆ]n)(1 −_ _αˆn[2]_ [)] _−_
+
+ q q 
+
+**Proposition 2. Suppose xt ∼** _qβ(xt|x0), then any solution satisfying θ[∗]_ = argminθL[(]ddpm[t][)] [(][θ][)][,][ ∀][t][ ∈]
+
+1, ..., T _, also satisfies θ[∗]_ = argminθ _score[(][θ][)][,][ ∀][n][ ∈{][2][, ..., N]_ _[}][.]_
+_{_ _}_ _L[(][n][)]_
+
+
+_Proof. By the definition in Eq. (4), we have_
+
+
+_,_ [1][ −] _α[ˆ]n[2]_ _−1_ _βˆnI_
+
+1 _αˆn[2]_
+_−_
+
+
+_βˆn_
+**_xt_** **_ϵθ (xt, ˆαn)_**
+_−_ 1 _αˆn[2]_
+
+_−_
+
+p
+
+
+_pθ(ˆxn_ 1 **_xˆn = xt) =_** 1 **_xt_** _βn_ **_ϵθ (xt, ˆαn)_** _,_ [1][ −] _α[ˆ]n−1_ _βˆnI_ _._ (34)
+_−_ _|_ _N_  1 _βn_ _−_ 1 − _αˆn[2]_ ! 1 − _αˆn[2]_ 
+
+_−_ [ˆ]
+
+ q p 
+
+Here, from the training objective in Eq. (5), since xt = αtx0+ 1 − _αt[2][ϵ][n][, the noise scale argument]_
+
+for the score network is known to be αt. Therefore, we can use ϵθ (xt, αt) instead of ϵθ (xt, ˆαn) for
+
+p
+
+
+_pθ(ˆxn_ 1 **_xˆn = xt) =_**
+_−_ _|_ _N_
+
+
+1 _βn_
+_−_ [ˆ]
+
+
+-----
+
+expanding score[(][θ][)][. Since][ p]θ[(ˆ]xn 1 **_xˆn = xt) and q ˆβ[(ˆ]xn_** 1; xt, ϵn) are two isotropic Gaussians
+_L[(][n][)]_ _−_ _|_ _−_
+with the same variance, the KL divergence is a scaled ℓ2-norm of their means’ difference:
+
+score[(][θ][) :=][D][KL] _pθ(ˆxn_ 1 **_xˆn = xt)_** _q ˆβ[(ˆ]xn_ 1; xt, ϵn) (35)
+_L[(][n][)]_ _−_ _|_ _||_ _−_
+ 
+
+
+= 1 − _αˆn[2]_
+
+2(1 _αˆn[2]_ 1[)ˆ]βn
+_−_ _−_
+
+= [(1][ −] _β[ˆ]n)(1 −_ _αˆn[2]_ [)]
+
+2(1 − _β[ˆ]n −_ _αˆn[2]_ [)ˆ]βn
+
+
+_βˆn_
+**_xt_** **_ϵθ (xt, αt)_**
+_−_ 1 _αˆn[2]_
+
+_−_
+
+p
+
+
+(36)
+
+(37)
+
+(38)
+
+
+1 _βn_
+_−_ [ˆ]
+
+
+1 _βˆn_
+
+**_xt_** **_ϵn_**
+_−_
+1 − _β[ˆ]n_ (1 − _β[ˆ]n)(1 −_ _αˆn[2]_ [)]
+
+q q 2
+
+_βˆn_
+
+(ϵn − **_ϵθ (xt, αt))_**
+(1 _βn)(1_ _αˆn[2]_ [)]
+_−_ [ˆ] _−_ 2
+
+
+= [(1][ −] _β[ˆ]n)(1 −_ _αˆn[2]_ [)] _βˆn[2]_ **_ϵn_** **_ϵθ (xt, αt)_** 2 (39)
+
+2(1 − _ββ[ˆ]ˆnn −_ _αˆn[2]_ [)ˆ]βn (1 − _αˆn[2]_ [)(1][ −] _β[ˆ]n)_ _∥_ _−_ 2∥[2]
+
+= _αtx0 +_ 1 _αt[2][ϵ][n][, α][t]_ _,_ (40)
+
+2(1 − _β[ˆ]n −_ _αˆn[2]_ [)]  q _−_ 2 2
+
+which is proportional to ddpm [:=] **_ϵn[ϵ][n][ −]ϵθ[ϵ][θ]_** _αtx0 +_ 1 _αt[2][ϵ][n][, α][t]_
+_L[(][t][)]_ _−_ _−_ 2 [as defined in Eq. (5).]
+
+Thus,  p 
+
+argminθLddpm[(][t][)] [(][θ][)][ ≡] [argmin]θ[L][(]score[n][)] [(][θ][)][.] (41)
+
+Next, we can simplify _θ(ˆx0, xt) to a reconstruction loss for ˆx0:_
+_R_
+_θ(ˆx0, xt) :=_ Epθ(ˆx1 **_xˆn=xt)_** [[log][ p]θ[(ˆ]x0 **_xˆ1)]_** (42)
+_R_ _−_ _|_ _|_
+
+=Epθ(ˆx1 **_xˆn=xt)_** log 1 **_xˆ1_** _βˆ1_ **_ϵθ(ˆx1, ˆα1),_** _β[ˆ]1I_ (43)
+_|_  _N_  1 _β1_ _−_ 1 − _αˆ1[2]_ ![]
+
+_−_ [ˆ]
+
+  q p  2
+
+=Epθ(ˆx1|xˆn=xt)  2 [log 2][π][ ˆ]β1 + 2β1[ˆ]1 **_xˆ0 −_** 1 1 _β1_ xˆ1 − _βˆβ1ˆ1_ **_ϵθ(ˆx1, ˆα1)_** 
+
+ _−_ [ˆ] 2
+ _[D]_ q  q  (44)
+
+2
+
+1 1
+
+= _[D]2 [log 2][π][ ˆ]β1 +_ 2β[ˆ]1 Epθ(ˆx1|xˆn=xt)  **_xˆ0 −_** 1 _β1_ xˆ1 − qβˆ1ϵθ(ˆx1, ˆα1)  _,_
+
+ _−_ [ˆ] 2
+ q (45)
+
+where pθ(ˆx1|xˆn = xt) can be efficiently sampled using the reverse process in (Song et al., 2021).
+Yet, in practice, similar to the training in (Song et al., 2021; Chen et al., 2020; Kong et al., 2021),
+we dropped _θ(ˆx0, xt) when training θ. In theory, we know that_ _θ(ˆx0, xt) achieves its optimal_
+_R_ _R_
+value at θ[∗] = argminθ∥ϵθ(ˆx1, ˆα1)−ϵ1∥2[2][, which shares a similar objective as][ L][(]ddpm[t][)] [. By minimizing]
+
+_Lddpm[(][t][)]_ [, we train a score network][ θ][∗] [that best minimizes][ ∆][ϵ][t][ :=][ ∥][ϵ][t][ −] **_[ϵ][θ][∗]_** [(][α][t][x][0][ +] 1 − _αt[2][ϵ][t][, α][t][)][∥]2[2]_
+
+for all 1 _t_ _T_ . Since the first diffusion step has the smallest effect on corrupting ˆx0 (i.e.,
+_≤_ _≤_ p
+_β1_ 0), it suffices to consider a ˆα1 = 1 _β1 = α1, in which case we can jointly minimize_
+_≈_ _[√]_ _−_
+_Rθ(ˆx0, xt) by minimizing Lddpm[(1)]_ [.]
+
+In this sense, during training, given xt _qβ(xt_ **_x0), we can train the score network with the same_**
+training objective as in DDPMs and DDIMs. Practically, it is beneficial for BDDMs as we can re-use ∼ _|_
+the score network θ of any well-trained DDPM or DDIM.
+
+
+-----
+
+A.3 DERIVING THE TRAINING OBJECTIVE FOR SCHEDULE NETWORK
+
+Given that θ can be trained to maximize the log evidence with the pre-specified noise schedule β for
+training, the consequent question of interest in BDDMs is how to find a fast and good enough noise
+schedule **_β[ˆ] ∈_** R[N] for sampling given an optimized θ[∗]. In BDDMs, this problem is reduced to how
+to effectively learn the network parameters φ .
+
+**Proposition 3. Suppose θ has been optimized and hypothetically converged to the optimal θ[∗],**
+_where by optimal it means that with θ[∗]_ _we have pθ∗_ (ˆxn 1 **_xˆn = xt) = q ˆβ[(ˆ]xn_** 1; xt, ϵn) given
+_−_ _|_ _−_
+
+**_xt ∼_** _qβ(xt|x0). When_ **_β[ˆ] is unknown but we have x0 = ˆx0 and ˆαn = αt, we can minimize the_**
+_gap between the optimal lower bound_ _score[(][θ][∗][)][ and][ log][ p]θ[∗]_ [(ˆ]x0), i.e, log pθ∗ (ˆx0) _score[(][θ][∗][)][, by]_
+_F_ [(][n][)] _−F_ [(][n][)]
+_minimizing the following objective with respect to_ _β[ˆ]n:_
+
+_L[(]step[n][)][(ˆ]βn; θ[∗]) :=DKL_ _pθ∗_ (ˆxn−1|xˆn = xt)||q ˆβn [(ˆ]xn−1|x0; αt) (46)
+ 
+
+
+_δt_ _βˆn_
+
+**_ϵθ∗_** _αtx0 +_
+
+2(δt _βn)_ _δt_
+_−_ [ˆ] 
+
+**_[ϵ][n][ −]_**
+
+
++ C, (47)
+
+(48)
+
+
+_δtϵn, αt_
+
+
+_where_
+
+
+_δt = 1_ _αt[2][,]_ _C = [1]_ + _[D]_
+_−_ 4 [log][ δ]βˆn[t] 2
+
+
+_βˆn_
+
+1
+_δt_ _−_
+
+
+_Proof. Note that ˆx0 = x0, ˆαn = αt, xt = αtx0 +_ 1 − _αt[2][ϵ][n]_ [and][ p][θ][∗] [(ˆ]xn−1|xˆn = xt) =
+
+_q ˆβ[(ˆ]xn_ 1; xt, ϵn). When x0 is given to pθ∗, we can express the probability as follows:
+_−_ p
+
+_pθ∗_ (ˆxn−1|xˆn = xt(x0), ˆx0 = x0) (49)
+
+
+1 − _αt[2][z][)][d][z]_ (50)
+
+1 _αt[2][z][,][ ϵ][n]_ [=][ z][)][d][z] (51)
+_−_
+
+
+_N_ (z; 0, I)pθ∗ (ˆxn−1|xˆn = αtx0 +
+
+(z; 0, I)q ˆβ[(ˆ]xn 1; xt = αtx0 +
+_N_ _−_
+
+
+xˆn−1; _[α][t][x][0][ +]1p −1β[ˆ] −n_ _αt[2][z]_ _−_ (1 − _β[ˆ]βnˆn)(1 −_ _αˆn[2]_ [)] **_z,_** [1][ −]1 −α[ˆ]αˆn[2] _−n[2]_ 1 _βˆnI_
+
+ q q
+
+
+_dz_
+
+
+
+ (52)
+
+
+_N_ (z; 0, I)N
+
+
+
+[See Eq. (2) in (Frey, 1999)]
+
+
++ [1][ −] _[α]t[2][/][(1][ −]_ _β[ˆ]n)_ _βˆn_
+
+1 _αt[2]_
+_−_
+
+
+1 _αt[2]_ _βˆn_
+_−_
+
+_−_
+1 − _β[ˆ]n_ (1 − _β[ˆ]n)(1 −_ _αt[2][)]_
+q
+
+
+_αtx0_
+**_xn_** 1;
+
+ _−_
+
+1 _βn_
+
+ _−_ [ˆ]
+ [ˆ] q
+
+
+=N
+
+=N
+
+
+**_I_**
+ 
+ (53)
+
+
+xˆn−1; _α1tx0βn_ _,_ [1][ −]1 −[α]t[2] _β[ˆ][−]nβ[ˆ]n_
+
+_−_ [ˆ]
+
+ q
+
+
+ =: q ˆβn [(ˆ]xn−1; x0, αt), (54)
+
+
+
+
+where, different from pθ∗ (ˆxn−1|xˆn = xt), from Eq. (49) to Eq. (50), instead of conditioning on a
+specific xt, when x0 is given xt can be generated using any z ∼N (0, I).
+
+
+-----
+
+From this, we can express the gap between log pθ∗ (ˆx0) and score[(][θ][∗][)][ in the following form:]
+_F_ [(][n][)]
+
+log pθ∗ (ˆx0 = x0) −Fscore[(][n][)] [(][θ][∗][)] (55)
+
+_pθ(ˆx0_ **_xˆ1)q ˆβ[(ˆ]xn_** 1; xt, ϵn)
+
+= log pθ[∗] (ˆx0 = x0) − Epθ∗ (ˆx1,n−1|xˆn=xt) "log _pθ|(ˆxn−1|xˆn =−_ **_xt)_** # (56)
+
+**_x0:n_** 1 **_xˆn = xt)_**
+
+= log pθ∗ (ˆx0 = x0) − Epθ∗ (ˆx1:n−1|xˆn=xt) log _[p]p[θ]θ[∗]∗_ [(ˆ](ˆx1:n−−1||xˆn = xt)  (57)
+
+=Epθ∗ (ˆx1:n−1|xˆn=xt) log _pθ[∗]_ (ˆxp1:θ∗n(ˆx11:xˆn−n =1|xˆ xn =t, ˆx x0 =t) **_x0)_** (58)
+
+ _−_ _|_ 
+
+**_xn_** 1 **_xˆn = xt)_**
+
+=Epθ∗ (ˆxn−1|xˆn=xt) "log _[p]q[θ] ˆβ[∗]n[(ˆ][(ˆ]xn−−|1; x0, αt)_ # (59)
+
+=DKL _pθ∗_ (ˆxn−1|xˆn = xt)||q ˆβn [(ˆ]xn−1; x0, αt) (60)
+ 
+
+Next, we evaluate the above KL divergence term. By definition, we have
+
+
+_,_ [1][ −] _α[ˆ]n[2]_ _−1_ _βˆnI_
+
+1 _αˆn[2]_
+_−_
+
+
+_βˆn_
+**_xt_** **_ϵθ∗_** (xt, ˆαn)
+_−_ 1 _αˆn[2]_
+
+_−_
+
+p
+
+
+(61)
+
+
+_pθ∗_ (ˆxn−1|xˆn = xt) = N 
+
+Together with Eq. (54), we have
+
+
+1 _βn_
+_−_ [ˆ]
+
+
+_Lstep[(][n][)][(ˆ]βn; θ[∗]) := DKL_ _pθ∗_ (ˆxn−1|xˆn = xt)||q ˆβn [(ˆ]xn−1; x0, αt) (62)
+ 
+
+
+1 _βn_
+_−_ [ˆ]
+
+2(1 − _β[ˆ]n −_ _αt[2][)]_
+
+1 _βn_
+_−_ [ˆ]
+
+2(1 − _β[ˆ]n −_ _αt[2][)]_
+
+
+_αt_
+
+**_x0_**
+_−_
+1 _βn_
+_−_ [ˆ]
+
+_αt_
+
+**_x0_**
+_−_
+1 _βn_
+_−_ [ˆ]
+
+
+_βˆn_
+**_xt_** **_ϵθ[∗]_** (xt, αt)
+_−_ 1 _αt[2]_
+
+_−_
+
+p
+
+
++ C (63)
+
+
+1 _βn_
+_−_ [ˆ]
+
+1
+
+1 _βn_
+_−_ [ˆ]
+
+
+_βˆn_
+1 _αt[2][ϵ][n]_ **_ϵθ∗_** (xt, αt)
+_−_ _[−]_ 1 _αt[2]_
+
+_−_
+
+p
+
+
+_αtx0 +_
+
+
++ C
+
+!
+
+2
+
+(64)
+
+
+1 _βn_
+_−_ [ˆ]
+
+2(1 − _β[ˆ]n −_ _αt[2][)]_
+
+1 _αt[2]_
+_−_
+
+2(1 − _β[ˆ]n −_ _αt[2][)]_
+
+
+1 − _αt[2]_ **_ϵn_** _βˆn_ **_ϵθ∗_** (xt, αt)
+
+1 − _βn_ _−_ (1 − _βn)(1 −_ _αt[2][)]_
+p
+
+
++ C (65)
+
+
+_βˆn_
+
+**_ϵθ∗_** (xt, αt) + C (66)
+
+_αt[2][)]_ 1 − _αt[2]_ 2
+
+2
+
+_βˆn_
+
+**_[ϵ][n][ −]ϵθ∗_** _αtx0 +_ _δtϵn, αt_ + C, (67)
+
+_δt_
+
+2
+
+ p 
+
+**_[ϵ][n][ −]_**
+
+
+_δt_
+=
+
+2(δt _βn)_
+_−_ [ˆ]
+
+where
+
+
+_δt = 1_ _αt[2][,]_ _C = [1]_ + _[D]_
+_−_ 4 [log][ δ]βˆn[t] 2
+
+
+_βˆn_
+
+1
+_δt_ _−_
+
+
+(68)
+
+
+As we use a schedule network φ to estimate _β[ˆ]n from (ˆαn+1,_ _β[ˆ]n+1) as defined in Eq. (13), we obtain_
+the final step loss for learning φ:
+
+
+_δt_
+_Lstep[(][n][)][(][φ][;][ θ][∗][) =]_ 2(δt _βn(φ))_
+
+_−_ [ˆ]
+
+
+_βˆn(φ)_
+
+**_ϵθ∗_** (xt, αt)
+_δt_
+
+**_[ϵ][n][ −]_**
+
+
+_δt_
+
++ [1] + _[D]_
+
+4 [log] _βˆn(φ)_ 2
+
+
+_βˆn(φ)_
+
+1
+_δt_ _−_
+
+
+(69)
+
+
+-----
+
+This proposed objective for training the schedule network can be interpreted as to better model
+the data distribution (i.e., maximizing log pθ(ˆx0)) by correcting the gradient scale _β[ˆ]n for the next_
+reverse step (from ˆxn to ˆxn 1) given the gradient vector ϵθ∗ estimated by the score network θ[∗].
+_−_
+
+B EXPERIMENTAL DETAILS
+
+B.1 CONVENTIONAL GRID SEARCH ALGORITHM FOR DDPMS
+
+We reproduced the grid search algorithm in (Chen et al., 2020), in which a 6-step noise schedule was
+searched. In our paper, we generalized the grid search algorithm by similarly sweeping the N -step
+noise schedule over the following possibilities with a bin width M = 9:
+
+_{1, 2, 3, 4, 5, 6, 7, 8, 9} ⊗{10[−][6][·][N/N]_ _, 10[−][6][·][(][N]_ _[−][1)][/N]_ _, ..., 10[−][6][·][1][/N]_ _},_ (70)
+
+where ⊗ denotes the cartesian product applied on two sets. LS-MSE was used as a metric to select
+the solution during the search. When N = 6, we resemble the GS algorithm in (Chen et al., 2020).
+Note that above searching method normally does not scale up to N > 6 steps for its exponential
+computational cost O(9[N] ).
+
+B.2 HYPERPARAMETER SETTING IN BDDMS
+
+Algorithm 2 took a skip factor τ to control the stride for training the schedule network. The value
+of τ would affect the coverage of step sizes when training the schedule network, hence affecting
+the predicted number of steps N for inference – the higher τ is, the shorter the predicted inference
+schedule tends to be. We set τ = 66 for training the BDDM vocoders in this paper.
+
+For initializing Algorithm 3 for noise scheduling, we could take as few as 1 training sample for
+validation, perform a grid search on the hyperparameters {(ˆαN = 0.1αT i, _β[ˆ]N = 0.1j)} for i, j =_
+1, ..., 9, i.e., 81 possibilities in total, and use the PESQ measure as the selection metric. Then, the
+predicted noise schedule corresponding to the maximum PESQ was stored and applied to the online
+inference afterward, as shown in Algorithm 4. Note that this searching has a complexity of only
+_O(M_ [2]) (e.g., M = 9 in this case), which is much more efficient than O(M _[N]_ ) in the conventional
+grid search algorithm in (Chen et al., 2020), as discussed in Section B.1.
+
+B.3 IMPLEMENTATION DETAILS
+
+Our proposed BDDMs and the baseline methods were all implemented with the Pytorch library. The
+score networks for the LJ and VCTK speech datasets were trained from scratch on a single NVIDIA
+Tesla P40 GPU with batch size 32 for about 1M steps, which took about 3 days.
+
+For the model architecture, we used the same architecture as in DiffWave (Kong et al., 2021) for
+the score network with 128 residual channels; we adopted a lightweight GALR network (Lam et al.,
+2021) for the schedule network. GALR was originally proposed for speech enhancement, so we considered it well suited for predicting the noise scales. For the configuration of the GALR network, we
+used a window length of 8 samples for encoding, a segment size of 64 for segmentation and only two
+GALR blocks of 128 hidden dimensions, and other settings were inherited from (Lam et al., 2021).
+To make the schedule network output with a proper range and dimension, we applied a sigmoid function to the last block’s output of the GALR network. Then the result was averaged over the segments
+and the feature dimensions to obtain the predicted ratio: σφ(x) = AvgPool2D(σ(GALR(x))),
+where GALR(·) denotes the GALR network, AvgPool2D(·) denotes the average pooling operation
+applied to the segments and the feature dimensions, and σ(x) := 1/(1 + e[−][x]). The same network architecture was used for the NE approach for estimating αt[2] [and was shown better than the]
+ConvTASNet used in the original paper (San-Roman et al., 2021). It is also notable that the computational cost of a schedule network is indeed fractional compared to the cost of a score network,
+as predicting a noise scalar variable is intrinsically a relatively much easier task. Our GALR-based
+schedule network, while being able to produce stable and reliable results, was about 3.6 times faster
+than the score network. The training of schedule networks for BDDMs took only 10k steps to
+converge, which consumed no more than an hour on a single GPU.
+
+
+-----
+
+Table 3: Ratings that have been used in evaluation of speech naturalness of synthetic samples.
+
+Rating Naturalness Definition
+
+1 Unsatisfactory Very annoying, distortion is objectionable.
+2 Poor Annoying distortion, but not objectionable.
+3 Fair Perceptible distortion, slightly annoying.
+4 Good Slight perceptible level of distortion, but not annoying.
+5 Excellent Imperceptible level of distortion.
+
+Table 4: Performances of different noise schedules on the multi-speaker VCTK speech dataset, each
+of which used the same score network (Chen et al., 2020) ϵθ( ) that was trained on VCTK for about
+
+_·_
+1M iterations.
+
+**Noise schedule** **LS-MSE (↓)** **MCD (↓)** **STOI (↑)** **PESQ (↑)** **MOS (↑)**
+
+**DDPM (Ho et al., 2020; Chen et al., 2020)**
+8 steps (Grid Search) 101 **2.09** **0.787** **3.31** **4.22 ± 0.04**
+1,000 steps (Linear) 85.0 2.02 0.798 3.39 4.40 ± 0.05
+
+**DDIM (Song et al., 2021)**
+8 steps (Linear) 553 3.20 0.701 2.81 3.83 ± 0.04
+16 steps (Linear) 412 2.90 0.724 3.04 3.88 ± 0.05
+21 steps (Linear) 355 2.79 0.739 3.12 4.12 ± 0.05
+100 steps (Linear) 259 2.58 0.759 3.30 4.27 ± 0.04
+
+**NE (San-Roman et al., 2021)**
+8 steps (Linear) 208 2.54 0.740 3.10 4.18 ± 0.04
+16 steps (Linear) 183 2.53 0.742 3.20 4.26 ± 0.04
+21 steps (Linear) 852 3.57 0.699 2.66 3.70 ± 0.03
+
+**BDDM (ˆαN** _,_ _β[ˆ]N_ )
+8 steps (0.2, 0.9) **98.4** 2.11 0.774 3.18 4.20 ± 0.04
+16 steps (0.5, 0.5) **73.6** **1.93** **0.813** **3.39** **4.35 ± 0.05**
+21 steps (0.5, 0.1) **76.5** **1.83** **0.827** **3.43** **4.48 ± 0.06**
+
+
+Regarding the image generation task, to demonstrate the generalizability of our method, we directly
+[adopted a score network pre-trained on the CIFAR-10 dataset implemented by a third-party open-](https://heibox.uni-heidelberg.de/d/01207c3f6b8441779abf/)
+[source repository. Regarding the schedule network, to demonstrate that it does not have to use](https://github.com/pesser/pytorch_diffusion)
+specialized architecture, we replaced GALR by the VGG11 (Simonyan & Zisserman, 2014), which
+was also used by as a noise estimator in (San-Roman et al., 2021). The output dimension (number
+of classes) of VGG11 was set to 1. Similar to the setting for GALR in speech synthesis, we added
+a sigmoid activation to the last layer to ensure a [0, 1] output. Similar to the training in speech
+domain, we trained the VGG11-based schedule networks while freezing the score networks for 10k
+steps, which normally can be finished in about two hours.
+
+Our code for the speech vocoding and the image generation experiments will be uploaded to Github
+after the final decision of ICLR is released.
+
+B.4 CROWD-SOURCED SUBJECTIVE EVALUATION
+
+All our Mean Opinion Score (MOS) tests were crowd-sourced. We refer to the MOS scores in (Protasio Ribeiro et al., 2011), and the scoring criteria have been included in Table 3 for completeness.
+The samples were presented and rated one at a time by the testers.
+
+C ADDITIONAL EXPERIMENTS
+
+A demonstration page at [https://bilateral-denoising-diffusion-model.](https://bilateral-denoising-diffusion-model.github.io)
+[github.io shows some samples generated by BDDMs trained on LJ speech and VCTK datasets.](https://bilateral-denoising-diffusion-model.github.io)
+
+
+-----
+
+C.1 MULTI-SPEAKER SPEECH SYNTHESIS
+
+In addition to the single-speaker speech synthesis, we evaluated BDDMs on the multi-speaker
+speech synthesis benchmark VCTK (Yamagishi et al., 2019). VCTK consists of utterances sampled at 48 KHz by 108 native English speakers with various accents. We split the VCTK dataset for
+training and testing: 100 speakers were used for training the multi-speaker model and 8 speakers
+for testing. We trained on a 44257-utterance subset (40 hours) and evaluated on a held-out 100utterance subset. For the score network, we used the Wavegrad architecture (Chen et al., 2020) so
+as to examine whether the superiority of BDDMs remains in a different dataset and with a different
+score network architecture.
+
+Results are presented in Table 4. For this multi-speaker VCTK dataset, we obtained consistent
+observations with that for the single-speaker LJ dataset presented in the main paper. Again, the
+proposed BDDM with only 16 or 21 steps outperformed the DDPM with 1,000 steps. To the best
+of our knowledge, ours was the first work that reported this degree of superior. When reducing
+to 8 steps, BDDM obtained performance on par with (except for a worse PESQ) the costly gridsearched 8 steps (which were unscalable to more steps) in DDPM. For NE, we could again observe
+a degradation from its 16 steps to 21 steps, indicating the instability of NE for the VCTK dataset
+likewise. In contrast, BDDM gave continuously improved performance while increasing the step
+number.
+
+C.2 COMPARING DIFFERENT REVERSE PROCESSES FOR BDDMS
+
+This section demonstrates that BDDMs do not restrict the sampling procedure to a specialized reverse process in Algorithm 4. In particular, we evaluated different reverse processes, including that
+of DDPMs as shown in Eq. (4) and DDIMs (Song et al., 2021), for BDDMs and compared the objective scores on the generated samples. DDIMs (Song et al., 2021) formulate a non-Markovian generative process that accelerates the inference while keeping the same training procedure as DDPMs.
+The original generative process in Eq. (4) in DDPMs is modified into
+
+
+_p[(]θ[τ]_ [)][(][x][0:][T][ ) :=][ π][(][x][T][ )] _p[(]θ[γ][i][)](xγi−1_ _|xγi_ ) × _p[(]θ[t][)][(][x][0][|][x][t][)][,]_ (71)
+
+_iY=1_ _tY∈γ¯_
+
+where γ is a sub-sequence of length N of [1, ..., T ] with γN = T, and ¯γ := {1, ..., T _} \ γ is defined_
+as its complement; Therefore, only part of the models are used in the sampling process.
+
+To achieve the above, DDIMs defined a prediction function fθ[(][t][)][(][x][t][)][ that depends on][ ϵ][θ][ to predict]
+the observation x0 given xt directly:
+
+
+_p[(]θ[τ]_ [)][(][x][0:][T][ ) :=][ π][(][x][T][ )]
+
+
+_p[(]θ[γ][i][)](xγi−1_ _|xγi_ ) ×
+_i=1_
+
+Y
+
+
+_fθ[(][t][)][(][x][t][) := 1]_
+
+_αt_
+
+
+1 − _αt[2][ϵ][θ][(][x][t][, α][t][)]_ _._ (72)
+
+
+
+**_xt_**
+_−_
+
+
+By leveraging this prediction function, the conditionals in Eq. (71) are formulated as
+
+_p[(]θ[γ][i][)](xγi−1_ _|xγi_ ) = N _ααγiγ−i_ 1 (xγi − _ςϵθ(xγi_ _, αγi_ )), σγ[2]i **_[I]_** ifi ∈ [N ], i > 1 (73)
+ 
+
+_p[(]θ[t][)][(][x][0][|][x][t][) =][ N]_ [(][f][ (]θ[t][)][(][x][t][)][, σ]t[2][I][)] otherwise, (74)
+
+where the detailed derivation of σt and ς can be referred to (Song et al., 2021). In the original
+DDIMs, the accelerated reverse process produces samples over the subsequence of β indexed by γ:
+**_βˆ =_** _βn_ _n_ **_γ_** . In BDDMs, to apply the DDIM reverse process, we use the **_β[ˆ] predicted by the_**
+_{_ _|_ _∈_ _}_
+schedule network in place of a subsequence of the training schedule β.
+
+Finally. the objective scores are given in Table 5. Note that the subjective evaluation (MOS) is
+omitted here since the other assessments above have shown that the MOS scores are highly correlated with the objective measures, including STOI and PESQ. They indicate that applying BDDMs
+to either DDPM or DDIM reverse process leads to comparable and competitive results. Meanwhile,
+the results show some subtle differences: BDDMs over a DDPM reverse process gave slightly better
+samples in terms of signal error and consistency metrics (i.e., LS-MSE and MCD), while BDDM
+over a DDIM reverse process tended to generate better samples in terms of intelligibility and perceptual metrics (i.e., STOI and PESQ).
+
+
+-----
+
+Table 5: Performances of different reverse processes for BDDMs on the VCTK speech dataset, each
+of which used the same score network (Chen et al., 2020) ϵθ( ) and the same noise schedule.
+
+_·_
+
+**Noise schedule** **LS-MSE (↓)** **MCD (↓)** **STOI (↑)** **PESQ (↑)**
+
+**BDDM (DDPM reverse process)**
+8 steps (0.3, 0.9, 1e[−][5]) **91.3** **2.19** 0.936 3.22
+16 steps (0.7, 0.1, 1e[−][6]) **73.3** **1.88** 0.949 3.32
+21 steps (0.5, 0.1, 1e[−][6]) **72.2** **1.91** 0.950 3.33
+
+**BDDM (DDIM reverse process)**
+8 steps (0.3, 0.9, 1e[−][5]) 91.8 **2.19** **0.938** **3.26**
+16 steps (0.7, 0.1, 1e[−][6]) 77.7 1.96 **0.953** **3.37**
+21 steps (0.5, 0.1, 1e[−][6]) 77.6 1.96 **0.954** **3.39**
+
+Table 6: Comparing sampling methods for DDPM with different number of sampling steps in terms
+of FIDs in CIFAR10.
+
+|Sampling method|Sampling steps|FID|
+|---|---|---|
+
+
+|DDPM (baseline) (Ho et al., 2020)|1000|3.17|
+|---|---|---|
+
+
+|DDPM (sub-VP) (Song et al., 2020b)|100 ∼|3.69|
+|---|---|---|
+
+
+|DDPM (DP + reweighting) (Watson et al., 2021)|128 64|5.24 6.74|
+|---|---|---|
+
+
+|DDIM (quadratic) (Song et al., 2021)|100 50|4.16 4.67|
+|---|---|---|
+
+
+|FastDPM (approx. STEP) (Kong & Ping, 2021)|100 50|2.86 3.20|
+|---|---|---|
+
+
+|2Improved DDPM (hybrid) (Nichol & Dhariwal, 2021)|100 50|4.63 5.09|
+|---|---|---|
+
+
+|VDM (augmented) (Kingma et al., 2021)|1000|7.413|
+|---|---|---|
+
+
+|Ours BDDM|100 50|2.38 2.93|
+|---|---|---|
+
+
+
+C.3 UNCONDITIONAL IMAGE GENERATION
+
+For the unconditional image generation task, we evaluated the proposed BDDMs on the benchmark
+CIFAR-10 (32 × 32) dataset. The score functions, including those initially proposed in DDPMs
+(Ho et al., 2020) or DDIMs (Song et al., 2021) and those pre-trained in the above third-party implementations, are all conditioned on a discrete step-index. We estimated the noise schedule **_β[ˆ] in_**
+continuous space using the VGG11 schedule network and then mapped it to discrete time schedule
+using the approximation method in (Kong & Ping, 2021).
+
+Table 6 shows the performances of different sampling methods for DDPMs in CIFAR-10. By setting the maximum number of sampling steps (N ) for noise scheduling, we can fairly compare the
+improvements achieved by BDDMs against related methods in the literature in terms of FID. Remarkably, BDDMs with 100 sampling steps not only surpassed the 1000-step DDPM baseline, but
+also produced the SOTA FID performance amongst all generative models using less than or equal to
+100 sampling steps.
+
+[2Our implementation was based on https://github.com/openai/improved-diffusion](https://github.com/openai/improved-diffusion)
+3The authors of VDM claimed that they tuned the hyperparameters only for minimizing the likelihood and
+did not pursue further tuning of the model to improve FID.
+
+
+-----
+
+## 𝑛= 3
+
+ 𝑛= 2
+
+ 𝑛= 1
+
+ 𝑛= 0
+
+Figure 4: Spectrum plots of the speech samples produced by BDDM within 3 sampling steps. The
+first row shows the spectrum of a random signal for starting the reverse process. Then, from the top
+to the bottom, we show the spectrum of the resultant signal after each step of the reverse process
+performed by the BDDM. We also provide the corresponding WAV files on our demo page.
+
+
+-----
+

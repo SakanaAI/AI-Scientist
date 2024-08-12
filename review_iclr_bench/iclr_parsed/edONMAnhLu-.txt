@@ -1,0 +1,2163 @@
+# SURROGATE GAP MINIMIZATION IMPROVES SHARPNESS-AWARE TRAINING
+
+**Juntang Zhuang[1][ ∗]** **Boqing Gong[2], Liangzhe Yuan[2], Yin Cui[2], Hartwig Adam[2]**
+j.zhuang@yale.edu _{bgong, lzyuan, yincui, hadam}@google.com_
+
+**Nicha C. Dvornek[1], Sekhar Tatikonda[1], James S. Duncan[1]**
+_{nicha.dvornek, sekhar.tatikonda, james.duncan}@yale.edu_
+
+**Ting Liu[2]**
+
+liuti@google.com 1 Yale University, 2 Google Research
+
+ABSTRACT
+
+The recently proposed Sharpness-Aware Minimization (SAM) improves generalization by minimizing a perturbed loss defined as the maximum loss within a
+neighborhood in the parameter space. However, we show that both sharp and flat
+minima can have a low perturbed loss, implying that SAM does not always prefer
+flat minima. Instead, we define a surrogate gap, a measure equivalent to the dominant eigenvalue of Hessian at a local minimum when the radius of neighborhood
+(to derive the perturbed loss) is small. The surrogate gap is easy to compute and
+feasible for direct minimization during training. Based on the above observations,
+we propose Surrogate Gap Guided Sharpness-Aware Minimization (GSAM), a
+novel improvement over SAM with negligible computation overhead. Conceptually, GSAM consists of two steps: 1) a gradient descent like SAM to minimize
+the perturbed loss, and 2) an ascent step in the orthogonal direction (after gradient decomposition) to minimize the surrogate gap and yet not affect the perturbed
+loss. GSAM seeks a region with both small loss (by step 1) and low sharpness (by
+step 2), giving rise to a model with high generalization capabilities. Theoretically,
+we show the convergence of GSAM and provably better generalization than SAM.
+Empirically, GSAM consistently improves generalization (e.g., +3.2% over SAM
+and +5.4% over AdamW on ImageNet top-1 accuracy for ViT-B/32). Code is
+released at https://sites.google.com/view/gsam-iclr22/home.
+
+1 INTRODUCTION
+
+Modern neural networks are typically highly over-parameterized and easy to overfit to training data,
+yet the generalization performances on unseen data (test set) often suffer a gap from the training
+performance (Zhang et al., 2017a). Many studies try to understand the generalization of machine
+learning models, including the Bayesian perspective (McAllester, 1999; Neyshabur et al., 2017),
+the information perspective (Liang et al., 2019), the loss surface geometry perspective (Hochreiter
+& Schmidhuber, 1995; Jiang et al., 2019) and the kernel perspective (Jacot et al., 2018; Wei et al.,
+2019). Besides analyzing the properties of a model after training, some works study the influence
+of training and the optimization process, such as the implicit regularization of stochastic gradient
+descent (SGD) (Bottou, 2010; Zhou et al., 2020), the learning rate’s regularization effect (Li et al.,
+2019), and the influence of the batch size (Keskar et al., 2016).
+
+These studies have led to various modifications to the training process to improve generalization.
+Keskar & Socher (2017) proposed to use Adam in early training phases for fast convergence and
+then switch to SGD in late phases for better generalization. Izmailov et al. (2018) proposed to
+average weights to achieve a wider local minimum, which is expected to generalize better than sharp
+minima. A similar idea was later used in Lookahead (Zhang et al., 2019). Entropy-SGD (Chaudhari
+
+_∗Work was done during an internship at Google_
+
+
+-----
+
+et al., 2019) derived the gradient of local entropy to avoid solutions in sharp valleys. Entropy-SGD
+has a nested Langevin iteration, inducing much higher computation costs than vanilla training.
+
+The recently proposed Sharpness-Aware Minimization (SAM) (Foret et al., 2020) is a generic training scheme that improves generalization and has been shown especially effective for Vision Transformers (Dosovitskiy et al., 2020) when large-scale pre-training is unavailable (Chen et al., 2021).
+Suppose vanilla training minimizes loss f (w) (e.g., the cross-entropy loss for classification), where
+_w is the parameter. SAM minimizes a perturbed loss defined as fp(w) ≜_ max _δ_ _ρ f_ (w + δ),
+_||_ _||≤_
+which is the maximum loss within radius ρ centered at the model parameter w. Intuitively, vanilla
+training seeks a single point with a low loss, while SAM searches for a neighborhood within which
+the maximum loss is low. However, we show that a low perturbed loss fp could appear in both flat
+and sharp minima, implying that only minimizing fp is not always sharpness-aware.
+
+Although the perturbed loss fp(w) might disagree with sharpness, we find a surrogate gap defined
+as h(w) ≜ _fp(w) −_ _f_ (w) agrees with sharpness — Lemma 3.3 shows that the surrogate gap h is
+an equivalent measure of the dominant eigenvalue of Hessian at a local minimum. Inspired by this
+observation, we propose the Surrogate Gap Guided Sharpness Aware Minimization (GSAM) which
+jointly minimizes the perturbed loss fp and the surrogate gap h: a low perturbed loss fp indicates
+a low training loss within the neighborhood, and a small surrogate gap h avoids solutions in sharp
+valleys and hence narrows the generalization gap between training and test performances (Thm. 5.3).
+When both criteria are satisfied, we find a generalizable model with good performances.
+
+GSAM consists of two steps for each update: 1) descend gradient _fp(w) to minimize the perturbed_
+_∇_
+loss fp (this step is exactly the same as SAM), and 2) decompose gradient ∇f (w) of the original
+loss f (w) into components that are parallel and orthogonal to ∇fp(w), i.e., ∇f (w) = ∇∥f (w) +
+_f_ (w), and perform an ascent step in _f_ (w) to minimize the surrogate gap h(w). Note that
+_∇⊥_ _∇⊥_
+this ascent step does not change the perturbed loss fp because _f_ (w) _fp(w) by construction._
+_∇_ _⊥_ _⊥∇_
+
+We summarize our contribution as follows:
+
+_• We define surrogate gap, which measures the sharpness at local minima and is easy to compute._
+
+_• We propose the GSAM method to improve the generalization of neural networks. GSAM is_
+widely applicable and incurs negligible computation overhead compared to SAM.
+
+_• We demonstrate the convergence of GSAM and its provably better generalization than SAM._
+
+_• We empirically validate GSAM over image classification tasks with various neural architec-_
+tures, including ResNets (He et al., 2016), Vision Transformers (Dosovitskiy et al., 2020), and
+MLP-Mixers (Tolstikhin et al., 2021).
+
+2 PRELIMINARIES
+
+2.1 NOTATIONS
+
+_• f_ (w): A loss function f with parameter w ∈ R[k], where k is the parameter dimension.
+
+_• ρt ∈_ R: A scalar value controlling the amplitude of perturbation at step t.
+
+_• ϵ ∈_ R: A small positive constant (to avoid division by 0, ϵ = 10[−][12] by default).
+
+_wt[adv]_ ≜ _wt + ρt_ _∇f_ (fw(wt)t)+ϵ [: The solution to][ max][||][w][′][−][w][t][||≤][ρ][t] _[f]_ [(][w][′][)][ when][ ρ][t][ is small.]
+
+_•_ _||∇_ _||_
+
+_fp(wt) ≜_ max _δ_ _ρt f_ (wt + δ) _f_ (wt[adv]): The perturbed loss induced by f (wt). For each
+
+_•_ _||_ _||≤_ _≈_
+_wt, fp(wt) returns the worst possible loss f within a ball of radius ρt centered at wt. When_
+_ρt is small, by Taylor expansion, the solution to the maximization problem is equivalent to a_
+gradient ascent from wt to wt[adv].
+
+_• h(w) ≜_ _fp(w) −_ _f_ (w): The surrogate gap defined as the difference between fp(w) and f (w).
+
+_• ηt ∈_ R: Learning rate at step t.
+
+_• α ∈_ R: A constant value that controls the scaled learning rate of the ascent step in GSAM.
+
+_• g[(][t][)], gp[(][t][)]_ _∈_ R[k]: At the t-th step, the noisy observation of the gradients ∇f (wt), ∇fp(wt) of
+the original loss and perturbed loss, respectively.
+
+
+-----
+
+Figure 1: Consider original loss f (solid line), perturbed loss fp ≜ max||δ||≤ρ f (w+δ) (dashed line),
+and surrogate gap h(w) ≜ _fp(w) −_ _f_ (w). Intuitively, fp is approximately a max-pooled version of
+_f with a pooling kernel of width 2ρ, and SAM minimizes fp. From left to right are the local minima_
+centered at w1, w2, w3, and the valleys become flatter. Since fp(w1) = fp(w3) < fp(w2), SAM
+prefers w1 and w3 to w2. However, a low fp could appear in both sharp (w1) and flat (w3) minima,
+_so fp might disagree with sharpness. On the contrary, a smaller surrogate gap h indicates a flatter_
+loss surface (Lemma 3.3). From w1 to w3, the loss surface is flatter, and h is smaller.
+
+_• ∇f_ (wt) = ∇f∥(wt) + ∇f⊥(wt): Decompose ∇f (wt) into parallel component ∇f∥(wt) and
+vertical component ∇f⊥(wt) by projection ∇f (wt) onto ∇fp(wt).
+
+2.2 SHARPNESS-AWARE MINIMIZATION
+
+Conventional optimization of neural networks typically minimizes the training loss f (w) by gradient
+descent w.r.t. ∇f (w) and searches for a single point w with a low loss. However, this vanilla training
+often falls into a sharp valley of the loss surface, resulting in inferior generalization performance
+(Chaudhari et al., 2019). Instead of searching for a single point solution, SAM seeks a region with
+low losses so that small perturbation to the model weights does not cause significant performance
+degradation. SAM formulates the problem as:
+
+minw fp(w) where fp(w) ≜ max _δ_ _ρ f_ (w + δ) (1)
+_||_ _||≤_
+
+where ρ is a predefined constant controlling the radius of a neighborhood. This perturbed loss
+_fp induced by f_ (w) is the maximum loss within the neighborhood. When the perturbed loss is
+minimized, the neighborhood corresponds to low losses (below the perturbed loss). For a small ρ,
+using Taylor expansion around w, the inner maximization in Eq. 1 turns into a linear constrained
+optimization with solution
+
+arg max _δ_ _ρ f_ (w + δ) = arg max _δ_ _ρ f_ (w) + δ[⊤] _f_ (w) + O(ρ[2]) = ρ (2)
+_||_ _||≤_ _||_ _||≤_ _∇_ _[∇][f]f_ [(]([w]w[)])
+
+_||∇_ _||_
+
+As a result, the optimization problem of SAM reduces to
+
+_f_ (w)
+minw fp(w) minw f (w[adv]) where w[adv] ≜ _w + ρ_ _∇_ (3)
+_≈_ _f_ (w) + ϵ
+
+_||∇_ _||_
+
+where ϵ is a scalar (default: 1e-12) to avoid division by 0, and w[adv] is the “perturbed weight” with
+the highest loss within the neighborhood. Equivalently, SAM seeks a solution on the surface of the
+perturbed loss fp(w) rather than the original loss f (w) (Foret et al., 2020).
+
+3 THE SURROGATE GAP MEASURES THE SHARPNESS AT A LOCAL MINIMUM
+
+3.1 THE PERTURBED LOSS IS NOT ALWAYS SHARPNESS-AWARE
+
+Despite that SAM searches for a region of low losses, we show that a solution by SAM is not
+guaranteed to be flat. Throughout this paper we measure the sharpness at a local minimum of loss
+_f_ (w) by the dominant eigenvalue σmax (eigenvalue with the largest absolute value) of Hessian. For
+simplicity, we do not consider the influence of reparameterization on the geometry of loss surfaces,
+which is thoroughly discussed in (Laurent & Massart, 2000; Kwon et al., 2021).
+
+
+-----
+
+4) Update weights:
+
+**Algorithm 1 GSAM Algorithm**
+
+**For t = 1 to T**
+0) ρt schedule: ρt = ρmin + [(][ρ][max]lr[−]max[ρ][min]−[)(]lr[lr]min[−][lr][min][)]
+
+1a) ∆wt = ρt _||∇∇f_ [(]f[t][(][)][t]||[)]+ϵ
+
+1b) wt[adv] = wt + ∆wt
+2) Get _fp[(][t][)]_ by back-propagation at wt[adv].
+_∇_
+3) ∇f [(][t][)] = ∇f∥[(][t][)] + ∇f⊥[(][t][)] [Decompose][ ∇][f][ (][t][)][ into compo-]
+
+nents that are parallel and orthogonal to ∇fp[(][t][)][.]
+
+Vanilla wt+1 = wt − _ηt∇f_ [(][t][)]
+
+SAM _wt+1 = wt −_ _ηt∇fp[(][t][)]_
+
+GSAM wt+1 = wt − _ηt(∇fp[(][t][)]_ _−_ _α∇f⊥[(][t][)][)]_
+
+
+Figure 2: ∇f is decomposed into
+parallel and vertical ( _f_ ) com_∇_ _⊥_
+ponents by projection onto _fp._
+_∇_
+_∇f_ _[GSAM]_ = ∇fp − _α∇f⊥_
+
+
+**Lemma 3.1. For some fixed ρ, consider two local minima w1 and w2, fp(w1) ≤** _fp(w2)_ =⇒
+_σmax(w1) ≤_ _σmax(w2), where σmax is the dominant eigenvalue of the Hessian._
+
+We leave the proof to Appendix. Fig. 1 illustrates Lemma 3.1 with an example. Consider three
+local minima denoted as w1 to w3, and suppose the corresponding loss surfaces are flatter from w1
+tosolution. Comparing w3. For some fixed w ρ2, we plot the perturbed loss with w3: Suppose their vanilla losses are equal, fp and surrogate gap h f ≜(wfp2 −) =f f around each(w3), then
+_fp(w2) > fp(w3) because the loss surface is flatter around w3, implying that SAM will prefer w3_
+to w2. Comparing w1 and w2: fp(w1) < fp(w2), and SAM will favor w1 over w2 because it only
+cares about the perturbed loss fp, even though the loss surface is sharper around w1 than w2.
+
+3.2 THE SURROGATE GAP AGREES WITH SHARPNESS
+
+We introduce the surrogate gap that agrees with sharpness, defined as:
+
+_h(w) ≜_ max _δ_ _ρ f_ (w + δ) _f_ (w) _f_ (w[adv]) _f_ (w) (4)
+_||_ _||≤_ _−_ _≈_ _−_
+
+Intuitively, the surrogate gap represents the difference between the maximum loss within the neighborhood and the loss at the center point. The surrogate gap has the following properties.
+**Lemma 3.2. Suppose the perturbation amplitude ρ is sufficiently small, then the approximation to**
+_the surrogate gap in Eq. 4 is always non-negative, h(w) ≈_ _f_ (w[adv]) − _f_ (w) ≥ 0, ∀w.
+**Lemma 3.3. For a local minimum w[∗], consider the dominate eigenvalue σmax of the Hessian of**
+_loss f as a measure of sharpness. Considering the neighborhood centered at w[∗]_ _with a small radius_
+_ρ, the surrogate gap h(w[∗]) is an equivalent measure of the sharpness: σmax_ 2h(w[∗])/ρ[2].
+_≈_
+
+The proof is in Appendix. Lemma 3.2 tells that the surrogate gap is non-negative, and Lemma 3.3
+shows that the loss surface is flatter as h gets closer to 0. The two lemmas together indicate that we
+can find a region with a flat loss surface by minimizing the surrogate gap h(w).
+
+4 SURROGATE GAP GUIDED SHARPNESS-AWARE MINIMIZATION
+
+4.1 GENERAL IDEA: SIMULTANEOUSLY MINIMIZE THE PERTURBED LOSS AND SURROGATE
+GAP
+
+Inspired by the analysis in Section 3, we propose Surrogate Gap Guided Sharpness-Aware
+**Minimzation (GSAM) to simultaneously minimize two objectives, the perturbed loss fp and the**
+surrogate gap h:
+minw _fp(w), h(w)_ (5)
+Intuitively, by minimizng fp we search for a region with a low perturbed loss similar to SAM, and
+  
+by minimizing h we search for a local minimum with a flat surface. A low perturbed loss implies
+
+
+-----
+
+low training losses within the neighborhood, and a flat loss surface reduces the generalization gap
+between training and test performances (Chaudhari et al., 2019). When both are minimized, the
+solution gives rise to high accuracy and good generalization.
+
+**Potential caveat in optimization It is tempting and yet sub-optimal to combine the objectives in**
+Eq. 5 to arrive at minw fp(w)+λh(w), where λ is some positive scalar. One caveat when solving this
+weighted combination is the potential conflict between the gradients of the two terms, i.e., _fp(w)_
+_∇_
+and _h(w). We illustrate this conflict by Fig. 2, where_ _h(w) =_ _fp(w)_ _f_ (w) (the grey
+_∇_ _∇_ _∇_ _−∇_
+dashed arrow) has a negative inner product with _fp(w) and_ _f_ (w). Hence, the gradient descent
+_∇_ _∇_
+for the surrogate gap could potentially increase the loss fp, harming the model’s performance. We
+empirically validate this argument in Sec. 6.4.
+
+4.2 GRADIENT DECOMPOSITION AND ASCENT FOR THE MULTI-OBJECTIVE OPTIMIZATION
+
+Our primary goal is to minimize fp because otherwise a flat solution of high loss is meaningless,
+and the minimization of h should not increase fp. We propose to decompose _f_ (wt) and _h into_
+_∇_ _∇_
+components that are parallel and orthogonal to _fp(wt), respectively (see Fig. 2):_
+_∇_
+
+_∇f_ (wt) = ∇f∥(wt) + ∇f⊥(wt)
+
+_∇h(wt) = ∇h∥(wt) + ∇h⊥(wt)_ (6)
+
+_∇h⊥(wt) = −∇f⊥(wt)_
+
+
+The key is that updating in the direction of ∇h⊥(wt) does not change the value of the perturbed loss
+_fp(wt) because_ _h_ _fp by construction. Therefore, we propose to perform a descent step in_
+_∇_ _⊥_ _⊥∇_
+**the** _h_ (wt) direction, which is equivalent to an ascent step in the _f_ (wt) direction (because
+_∇_ _⊥_ _∇_ _⊥_
+_h_ = _f_ by the definition of h), and achieve two goals simultaneously — it keeps the value
+_∇_ _⊥_ _−∇_ _⊥_
+of fp(wt) intact and meanwhile decreases the surrogate gap h(wt) = fp(wt) _f_ (wt) (by increasing
+_−_
+_f_ (wt) and not affect fp(wt)).
+
+**The full GSAM Algorithm is shown in Algo. 1 and Fig. 2, where g[(][t][)], gp[(][t][)]** are noisy observations of
+_f_ (wt) and _fp(wt), respectively, and g[(][t][)]_
+_∇_ _∇_ _∥_ _[, g]⊥[(][t][)]_ [are noisy observations of][ ∇][f][∥][(][w][t][)][ and][ ∇][f][⊥][(][w][t][)][,]
+
+respectively, by projecting g[(][t][)] onto gp[(][t][)][. We introduce a constant][ α][ to scale the stepsize of the]
+ascent step. Steps 1) to 2) are the same as SAM: At current point wt, step 1) takes a gradient ascent
+to wt[adv] followed by step 2) evaluating the gradient gp[(][t][)] at wt[adv]. Step 3) projects g[(][t][)] onto gp[(][t][)][,]
+which requires negligible computation compared to the forward and backward passes. In step 4),
+_ηtgp[(][t][)]_ is the same as in SAM and minimizes the perturbed loss fp(wt) with gradient descent, and
+_−_
+_αηtg⊥[(][t][)]_ [performs an][ ascent][ step in the orthogonal direction of][ g]p[(][t][)] to minimize the surrogate gap
+_h(wt) ( equivalently increase f_ (wt) and keep fp(wt) intact). In coding, GSAM feeds the “surrogate
+gradient” ∇ft[GSAM] ≜ _gp[(][t][)]_ _−_ _αg⊥[(][t][)]_ [to first-order gradient optimizers such as SGD and Adam.]
+
+**The ascent step along g[(][t][)]**
+_⊥_ **[does not harm convergence][ SAM demonstrates that minimizing][ f][p]**
+makes the network generalize better than minimizing f . Even though our ascent step along g[(][t][)]
+_⊥_
+increases f (w), it does not affect fp(w), so GSAM still decreases the perturbed loss fp in a way
+similar to SAM. In Thm. 5.1, we formally prove the convergence of GSAM. In Sec. 6 and Appendix
+C, we empirically validate that the loss decreases and accuracy increases with training.
+
+**Illustration with a toy example We demonstrate different algorithms by a numerical toy example**
+shown in Fig. 3. The trajectory of GSAM is closer to the ridge and tends to find a flat minimum.
+Intuitively, since the loss surface is smoother along the ridge than in sharp local minima, the surrogate gap h(w) is small near the ridge, and the ascent step in GSAM minimizes h to pushes the
+trajectory closer to the ridge. More concretely, _f_ (wt) points to a sharp local solution and deviates
+_∇_
+from the ridge; in contrast, wt[adv] is closer to the ridge and _f_ (wt[adv]) is closer to the ridge descent
+_∇_
+direction than _f_ (wt). Note that _ft[GSAM]_ and _f_ (wt) always lie at different sides of _fp(wt)_
+_∇_ _∇_ _∇_ _∇_
+by construction (see Fig. 2), hence _ft[GSAM]_ pushes the trajectory closer to the ridge than _fp(wt)_
+_∇_ _∇_
+does. The trajectory of GSAM is like descent along the ridge and tends to find flat minima.
+
+
+-----
+
+Figure 3: Consider the loss surface with a few sharp local minima. Left: Overview of the procedures
+of SGD, SAM and GSAM. SGD takes a descent step at wt using ∇f (wt) (orange), which points to
+a sharp local minima. SAM first performs gradient ascent in the direction of _f_ (wt) to reach wt[adv]
+_∇_
+with a higher loss, followed by descent with gradient _f_ (wt[adv]) (green) at the perturbed weight.
+_∇_
+Based on _f_ (wt) and _f_ (wt[adv]), GSAM updates in a new direction (red) that points to a flatter
+_∇_ _∇_
+region. Right: Trajectories by different methods. SGD and SAM fall into different sharp local
+minima, while GSAM reaches a flat region. A video is in the supplement for better visualization.
+
+5 THEORETICAL PROPERTIES OF GSAM
+
+5.1 CONVERGENCE DURING TRAINING
+
+**Theorem 5.1. Consider a non-convex function f** (w) with Lipschitz-smooth constant L and lower
+_bound fmin. Suppose we can access a noisy, bounded observation g[(][t][)]_ _(_ _g[(][t][)]_ 2 _G,_ _t) of the_
+_true gradient ∇f_ (wt) at the t-th step. For some constant α, with learning rate|| _|| η ≤t = η0 ∀/√t, and_
+
+_perturbation amplitude ρt proportional to the learning rate, e.g., ρt = ρ0/√t, we have_
+
+
+_T_
+
+1 2
+
+E _fp(wt)_
+
+_T_ _t=1_ _∇_ 2 _√T_
+
+X _[≤]_ _[C][1][ +][ C][2][ log][ T]_
+
+_where C1, C2, C3, C4 are some constants._
+
+
+2
+
+2 _√T_
+
+_[≤]_ _[C][3][ +][ C][4][ log][ T]_
+
+
+E _∇f_ (wt)
+_t=1_
+
+X
+
+
+Thm. 5.1 implies both fp and f converge in GSAM at rate O(log T/√T ) for non-convex stochastic
+
+optimization, matching the convergence rate of first-order gradient optimizers like Adam.
+
+5.2 GENERALIZATION OF GSAM
+
+In this section, we show the surrogate gap in GSAM is provably lower than SAM’s, so GSAM is
+expected to find a smoother minimum with better generalization.
+**Theorem 5.2 (PAC-Bayesian Theorem (McAllester, 2003)). Suppose the training set has m ele-**
+_ments drawn i.i.d. from the true distribution, and denote the loss on the training set as_ _f_ (w) =
+1 _m_
+
+_m_ _i=1_ _[f]_ [(][w, x][i][)][,][ where we use][ x][i][ to denote the (input, target) pair of the][ i][-th element. Let][ w][ be]
+_learned from the training set. Suppose w is drawn from posterior distribution_ _. Denote the prior_
+_distribution (independent of training) asP_ _P, then_ _Q_ [b]
+
+Ew Exf (w, x) Ew _f_ (w) + 4 _KL(_ ) + log [2][m] _/m with probability at least 1_ _a_
+_∼Q_ _≤_ _∼Q_ _Q||P_ _a_ _−_
+
+r 
+
+**Corollary 5.2.1. Suppose perturbation δ is drawn from distribution δ** (0, b[2]I _[k]), δ_ R[k], k is
+
+_the dimension of w, then with probability at least[b]_ 1 − _a_ 1 − _e[−]_ _√ρ2b ∼N[−]√k_ 2 _∈_
+ h    i
+
+Ew Exf (w, x) _h + C + 4_ _KL(_ ) + log [2][m] _/m_ (7)
+_∼Q_ _≤_ [b] _Q||P_ _a_
+
+r _m_ 
+
+_h ≜_ max _δ_ 2 _ρ_ _f_ (w + δ) _f_ (w) = [1] max _δ_ 2 _ρ f_ (w + δ, xi) _f_ (w, xi) (8)
+_||_ _||_ _≤_ _−_ [b] _m_ _||_ _||_ _≤_ _−_
+
+_i=1_
+
+X h i
+
+b [b]
+
+
+-----
+
+_where C =_ _f_ (w) is the empirical training loss, and _h is the surrogate gap evaluated on the training_
+_set._
+
+[b] [b]
+
+Corollary 5.2.1 implies that minimizing _h (right hand side of Eq. 7) is expected to achieve a tighter_
+upper bound of the generalization performance (left hand side of Eq. 7). The third term on the right
+of Eq. 7 is typically hard to analyze and often simplified to L2 regularization (Foret et al., 2020).
+
+[b]
+Note that fp = C + _h only holds when ρtrain (the perturbation amplitude specified by users during_
+training) equals ρtrue (the ground truth value determined by underlying data distribution); when
+_ρtrain_ = ρtrue, min[b](fp, [b]h) is more effective than min(fp) in terms of minimizing generalization
+loss. A detailed discussion is in Appendix A.7. ̸
+**Theorem 5.3 (Unlike SAM, GSAM decreases the surrogate gap). Under the assumption in**
+_Thm. 5.1, Thm. 5.2 and Corollary 5.2.1, we assume the Hessian has a lower-bound |σ|min on the_
+_absolute value of eigenvalue, and the variance of noisy observation g[(][t][)]_ _is lower-bounded by c[2]. The_
+_surrogate gap h can be minimized by the ascent step along the orthogonal direction g[(][t][)]_
+_⊥_ _[. During]_
+_training we minimize the sample estimate of h. We use ∆[b]ht to denote the amount that the ascent_
+_step in GSAM decreases_ _h for the t-th step. Compared to SAM, the proposed method generates a_
+_total decrease in surrogate gap_ _t=1_ [∆][b]ht, which is bounded by
+
+[b] _T_
+
+_αc[2]ρ[2]0[η][0][|][σ][|][2]min_
+
+[P][T] lim ∆[b]ht 2.7αL[2]η0ρ[2]0 (9)
+
+_G[2]_ _≤_ _T →∞_ _t=1_ _≤_
+
+X
+
+We provide proof in the appendix. The lower-bound of _t=1_ [∆][b]ht indicates that GSAM achieves a
+provably non-trivial decrease in the surrogate gap. Combined with Corollary 5.2.1, GSAM provably
+improves the generalization performance over SAM.
+
+[P][T]
+
+6 EXPERIMENTS
+
+6.1 GSAM IMPROVES TEST PERFORMANCE ON VARIOUS MODEL ARCHITECTURES
+
+We conduct experiments with ResNets (He et al., 2016), Vision Transformers (ViTs) (Dosovitskiy
+et al., 2020) and MLP-Mixers (Tolstikhin et al., 2021). Following the settings by Chen et al. (2021),
+we train on the ImageNet-1k (Deng et al., 2009) training set using the Inception-style (Szegedy
+et al., 2015) pre-processing without extra training data or strong augmentation. For all models, we
+search for the best learning rate and weight decay for vanilla training, and then use the same values
+for the experiments with SAM and GSAM. For ResNets, we search for ρ from 0.01 to 0.05 with
+a stepsize 0.01. For ViTs and Mixers, we search for ρ from 0.05 to 0.6 with a stepsize 0.05. In
+GSAM, we search for α in {0.01, 0.02, 0.03} for ResNets and α in {0.1, 0.2, 0.3} for ViTs and
+Mixers. Considering that each step in SAM and GSAM requires twice the computation of vanilla
+training, we experiment with the vanilla training for twice the epochs of SAM and GSAM, but we
+observe no significant improvements from the longer training (Table 5 in appendix). We summarize
+the best hyper-parameters for each model in Appendix B.
+
+We report the performances on ImageNet (Deng et al., 2009), ImageNet-v2 (Recht et al., 2019) and
+ImageNet-Real (Beyer et al., 2020) in Table 1. GSAM consistently improves over SAM and vanilla
+training (with SGD or AdamW): on ViT-B/32, GSAM achieves +5.4% improvement over AdamW
+and +3.2% over SAM in top-1 accuracy; on Mixer-B/32, GSAM achieves +11.1% over AdamW
+and +1.2% over SAM. We ignore the standard deviation since it is typically negligible (< 0.1%)
+compared to the improvements. We also test the generalization performance on out-of-distribution
+data (ImageNet-R and ImageNet-C), and the observation is consistent with that on ImageNet, e.g.,
++5.1% on ImageNet-R and +5.9% on ImageNet-C for Mixer-B/32.
+
+6.2 GSAM FINDS A MINIMUM WHOSE HESSIAN HAS SMALL DOMINANT EIGENVALUES
+
+Lemma 3.3 indicates that the surrogate gap h is an equivalent measure of the dominant eigenvalue
+of the Hessian, and minimizing h equivalently searches for a flat minimum. We empirically validate
+this in Fig. 4. As shown in the left subfigure, for some fixed ρ, increasing α decreases the dominant
+value and improves generalization (test accuracy). In the middle subfigure, we plot the dominant
+
+
+-----
+
+Table 1: Top-1 Accuracy (%) on ImageNet datasets for ResNets, ViTs and MLP-Mixers trained with
+Vanilla SGD or AdamW, SAM, and GSAM optimizers.
+
+ResNet
+
+|Model|Training|ImageNet-v1 ImageNet-Real ImageNet-V2|ImageNet-R ImageNet-C|
+|---|---|---|---|
+
+
+Vision Transformer
+
+|ResNet50|Vanilla (SGD) SAM GSAM|76.0 82.4 63.6 76.9 83.3 64.4 77.2 83.9 64.6|22.2 44.6 23.8 46.5 23.6 47.6|
+|---|---|---|---|
+|ResNet101|Vanilla (SGD) SAM GSAM|77.8 83.9 65.3 78.6 84.8 66.7 78.9 85.2 67.3|24.4 48.5 25.9 51.3 26.3 51.8|
+|ResNet152|Vanilla (SGD) SAM GSAM|78.5 84.2 66.3 79.3 84.9 67.3 80.0 85.9 68.6|25.3 50.0 25.7 52.2 27.3 54.1|
+
+
+
+MLP-Mixer
+
+|ViT-S/32|Vanilla (AdamW) SAM GSAM|68.4 75.2 54.3 70.5 77.5 56.9 73.8 80.4 60.4|19.0 43.3 21.4 46.2 22.5 48.2|
+|---|---|---|---|
+|ViT-S/16|Vanilla (AdamW) SAM GSAM|74.4 80.4 61.7 78.1 84.1 65.6 79.5 85.3 67.3|20.0 46.5 24.7 53.0 25.3 53.3|
+|ViT-B/32|Vanilla (AdamW) SAM GSAM|71.4 77.5 57.5 73.6 80.3 60.0 76.8 82.7 63.0|23.4 44.0 24.0 50.7 25.1 51.7|
+|ViT-B/16|Vanilla (AdamW) SAM GSAM|74.6 79.8 61.3 79.9 85.2 67.5 81.0 86.5 69.2|20.1 46.6 26.4 56.5 27.1 55.7|
+
+|Mixer-S/32|Vanilla (AdamW) SAM GSAM|63.9 70.3 49.5 66.7 73.8 52.4 68.6 75.8 55.0|16.9 35.2 18.6 39.3 22.6 44.6|
+|---|---|---|---|
+|Mixer-S/16|Vanilla (AdamW) SAM GSAM|68.8 75.1 54.8 72.9 79.8 58.9 75.0 81.7 61.9|15.9 35.6 20.1 42.0 23.7 48.5|
+|Mixer-S/8|Vanilla (AdamW) SAM GSAM|70.2 76.2 56.1 75.9 82.5 62.3 76.8 83.4 64.0|15.4 34.6 20.5 42.4 24.6 47.8|
+|Mixer-B/32|Vanilla (AdamW) SAM GSAM|62.5 68.1 47.6 72.4 79.0 58.0 73.6 80.2 59.9|14.6 33.8 22.8 46.2 27.9 52.1|
+|Mixer-B/16|Vanilla (AdamW) SAM GSAM|66.4 72.1 50.8 77.4 83.5 63.9 77.8 84.0 64.9|14.5 33.8 24.7 48.8 28.3 54.4|
+
+
+Top-1 Accuracy
+
+0.05 0.10 0.15 0.20 0.25 0.30
+
+
+Estimation of dominant eigenvalue
+
+4.5
+
+4.0
+
+3.5
+
+3.0
+
+2.5
+
+
+Measured dominant eigenvalue
+
+0.05 0.10 0.15 0.20 0.25 0.30
+
+
+76
+
+75
+
+74
+
+73
+
+72
+
+71
+
+
+0.05 0.10 0.15 0.20 0.25 0.30
+
+
+= 0.05
+= 0.15
+= 0.2
+
+
+= 0.05
+= 0.15
+= 0.2
+
+
+= 0.05
+= 0.15
+= 0.2
+
+
+Figure 4: Influence of ρ (set as constant for ease of comparison, other experiments use decayed
+_ρt schedule) and α on the training of ViT-B/32. Left: Top-1 accuracy on ImageNet. Middle:_
+eigenvalues of the Hessian calculated via the power iteration. Middle and right figures match inEstimation of the dominant eigenvalues from the surrogate gap, σmax ≈ 2h/ρ[2]. Right: Dominant
+the trend of curves, validating that the surrogate gap can be viewed as a proxy of the dominant
+eigenvalue of Hessian.
+
+
+-----
+
+ImageNet accuracy
+
+
+ImageNet-Real accuracy
+
+
+ImageNet-v2 accuracy
+
+
+72
+
+
+58
+
+56
+
+54
+
+52
+
+
+
+
+|Dataset|min(f+ λh) GSAM|
+|---|---|
+|Dataset|min(f + λh) GSAM p|
+|ImageNet ImageNet-Real ImageNet-v2 ImageNet-R|75.4 76.8 81.1 82.7 60.9 63.0 23.9 25.1|
+
+|Col1|ViT-B/16|ViT-S/16|
+|---|---|---|
+||Vanilla SAM GSAM|Vanilla SAM GSAM|
+|Cifar10 Cifar100 Flowers Pets|98.1 98.6 98.8 87.6 89.1 89.7 88.5 91.8 91.2 91.9 93.1 94.4|97.6 98.2 98.4 85.7 87.6 88.1 86.4 91.5 90.3 90.4 92.9 93.5|
+|mean|91.5 93.2 93.5|90.0 92.6 92.6|
+
+
+
+
+Vanilla
+Entropy
+SAM
+SAM+ascent
+ASAM
+ASAM+ascent
+
+“+ascent” represents
+Note that our GSAM is described as
+
+Table 3: Transfer learning results (top-1 accuracy, %)
+
+ViT-S/16
+
+GSAM Vanilla SAM GSAM
+
+**98.8** 97.6 98.2 **98.4**
+**89.7** 85.7 87.6 **88.1**
+91.2 86.4 **91.5** 90.3
+**94.4** 90.4 92.9 **93.5**
+
+**93.5** 90.0 **92.6** **92.6**
+
+(Lemma 3.3). In the right subfigure, we
+
+_σmax (right) in_
+_h is derived over_
+
+_ρ between 1 and 7 (10×_
+
+
+
+Vanilla 78 Vanilla
+Entropy Entropy
+
+70 SAM SAM
+
+SAM+ascent 76 SAM+ascent
+
+68 ASAM ASAM
+
+ASAM+ascent 74 ASAM+ascent
+
+66
+
+72
+
+Top-1 Accuracy (%)64 Top-1 Accuracy (%)
+
+70
+
+Figure 5: Top-1 accuracy of Mixer-S/32 trained with different methods.
+applying the ascent step in Algo. 1 to an optimizer.
+SAM+ascent(=GSAM) for consistency.
+
+Table 2: Results (%) of GSAM and
+min(fp + λh) on ViT-B/32
+
+Vanilla
+
+Dataset min(fp + λh) GSAM Cifar10 98.1
+
+ImageNet 75.4 **76.8** Cifar100 87.6
+ImageNet-Real 81.1 **82.7** Flowers 88.5
+ImageNet-v2 60.9 **63.0** Pets 91.9
+ImageNet-R 23.9 **25.1** mean 91.5
+
+eigenvalues estimated by the surrogate gap, σmax 2h/ρ[2]
+directly calculate the dominant eigenvalues using the power-iteration (Mises & Pollaczek-Geiringer, ≈
+1929). The estimated dominant eigenvalues (middle) match the real eigenvalues
+terms of the trend that σmax decreases with α and ρ
+the whole training set, while the measured eigenvalues are over a subset to save computation. These
+results show that the ascent step in GSAM minimizes the dominant eigenvalue by minimizing the
+surrogate loss, validating Thm 5.3.
+
+6.3 COMPARISON WITH METHODS IN THE LITERATURE
+
+Section 6.1 compares GSAM to SAM and vanilla training. In this subsection, we further compare
+GSAM against Entropy-SGD (Chaudhari et al., 2019) and Adaptive-SAM (ASAM) (Kwon et al.,
+2021), which are designed to improve generalization. Note that Entropy-SGD uses SGD in the inner
+Langevin iteration and can be combined with other base optimizers such as AdamW as the outer
+loop. For Entropy-SGD, we find the hyper-parameter “scope” from 0.0 and 0.9, and search for the
+inner-loop iteration number between 1 and 14. For ASAM, we search for
+larger than in SAM) as recommended by the ASAM authors. Note that the only difference between
+ASAM and SAM is the derivation of the perturbation, so both can be combined with the proposed
+ascent step. As shown in Fig. 5, the proposed ascent step increases test accuracy when combined
+with both SAM and ASAM and outperforms Entropy-SGD and vanilla training.
+
+6.4 ADDITIONAL STUDIES
+
+**GSAM outperforms a weighted combination of the perturbed loss and surrogate gap**
+example in Fig. 2, we demonstrate that directly minimizing fp(w
+is sub-optimal because _h(w) could conflict with_ _fp(w) and_
+_∇_ _∇_
+this argument on ViT-B/32. We search for λ
+the same grid as SAM and GSAM. We report the best accuracy of each method. Top-1 accuracy in
+Table 2 show the superior performance of GSAM, validating our analysis.
+
+min(min(min(fffppp, h, h, h))) vs. min(min(min(f, hf, hf, h))) GSAM solves min(fp, h) by descent in
+and an ascent step in the orthogonal direction to increase f while keep
+can also optimize min(f, h) by descent in ∇f , decomposing ∇f
+the orthogonal direction to decrease fp while keep f
+similarly (see Fig. 6, right). We choose min(fp, h)
+
+**GSAM benefits transfer learning**
+SGD on downstream tasks including the CIFAR10/CIFAR100 (Krizhevsky et al., 2009), Oxford-
+
+
+-----
+
+min(fp, h) v.s. min(f, h)
+
+
+Influence of augmentations
+
+
+Influence of base optimizers
+
+
+80
+
+78
+
+76
+
+74
+
+72
+
+
+78
+
+76
+
+74
+
+72
+
+70
+
+
+80
+
+75
+
+70
+
+65
+
+60
+
+55
+
+50
+
+
+
+min(fp, h)
+
+min(f, h)
+
+ImageNet ImageNet-Real ImageNet-v2
+
+**Left: from left to right**
+
+**Right**
+
+We plot the top-1 accuracy of a
+
+
+
+
+
+
+
+Vanilla
+SAM
+GSAM
+
+Adam AdaBelief
+
+Figure 6: Top-1 accuracy of ViT-B/32 for the additional studies (Section 6.4).
+are performances under different data augmentations (details in Appendix B.3) , where the vanilla
+**Middle**
+min(f, h).
+
+flowers (Nilsback & Zisserman, 2008) and Oxford-IITPets (Parkhi et al., 2012). Results in Table 3
+shows that GSAM leads to better transfer performance than vanilla training and SAM.
+
+ViT-B/32 model under various Mixup (Zhang et al., 2017b) augmentations in Fig. 6 (left subfigure).
+Under different augmentations, GSAM consistently outperforms SAM and vanilla training.
+
+base optimizers. We compare vanilla training, SAM and GSAM using AdamW (Loshchilov &
+Hutter, 2017) and AdaBelief (Zhuang et al., 2020) with default hyper-parameters. Fig. 6 (middle
+subfigure) shows that GSAM performs the best, and SAM improves over vanilla training.
+
+We propose the surrogate gap as an equivalent measure of sharpness which is easy to compute and
+feasible to optimize. We propose the GSAM method, which improves the generalization over SAM
+at negligible computation cost. We show the convergence and provably better generalization of
+GSAM compared to SAM, and validate the superior performance of GSAM on various models.
+
+We would like to thank Xiangning Chen (UCLA) and Hossein Mobahi (Google) for discussions, Yi
+Tay (Google) for help with datasets, and Yeqing Li, Xianzhi Du, and Shawn Wang (Google) for help
+
+This paper focuses on the development of optimization methodologies and can be applied to the
+training of different deep neural networks for a wide range of applications. Therefore, the ethical
+impact of our work would primarily be determined by the specific models that are trained using our
+
+We provide the detailed proof of theoretical results in Appendix A and provide the data pre-
+processing and hyper-parameter settings in Appendix B. Together with the references to existing
+works and public codebases, we believe the paper contains sufficient details to ensure reproducibil-
+ity. We plan to release the models trained by using GSAM upon publication.
+
+Randall Balestriero, Jerome Pesenti, and Yann LeCun. Learning in high dimension always amounts
+
+
+Vanilla
+SAM
+GSAM
+
+Light Medium Strong
+
+method is trained for 2× the epochs.
+Comparison between min(fp, h
+
+**GSAM is compatible with different base optimizers**
+
+CONCLUSION
+
+CKNOWLEDGEMENT
+
+with TensorFlow implementation.
+
+THICS STATEMENT
+
+new optimization strategy.
+
+EPRODUCIBILITY S
+
+EFERENCES
+
+to extrapolation.
+
+
+-----
+
+Lucas Beyer, Olivier J. Henaff, Alexander Kolesnikov, Xiaohua Zhai, and Aaron van den Oord. Are
+we done with imagenet? arXiv preprint arXiv:2002.05709, 2020.
+
+L´eon Bottou. Large-scale machine learning with stochastic gradient descent. In Proceedings of
+_COMPSTAT’2010, pp. 177–186. Springer, 2010._
+
+Pratik Chaudhari, Anna Choromanska, Stefano Soatto, Yann LeCun, Carlo Baldassi, Christian
+Borgs, Jennifer Chayes, Levent Sagun, and Riccardo Zecchina. Entropy-sgd: Biasing gradient
+descent into wide valleys. Journal of Statistical Mechanics: Theory and Experiment, 2019(12):
+124018, 2019.
+
+Xiangning Chen, Cho-Jui Hsieh, and Boqing Gong. When vision transformers outperform resnets
+without pretraining or strong data augmentations, 2021.
+
+Ekin D Cubuk, Barret Zoph, Dandelion Mane, Vijay Vasudevan, and Quoc V Le. Autoaugment:
+Learning augmentation policies from data. arXiv preprint arXiv:1805.09501, 2018.
+
+Alex Damian, Tengyu Ma, and Jason Lee. Label noise sgd provably prefers flat global minimizers.
+_arXiv preprint arXiv:2106.06530, 2021._
+
+Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. Imagenet: A large-scale hierarchical image database. In 2009 IEEE conference on computer vision and pattern recognition,
+pp. 248–255. Ieee, 2009.
+
+Terrance DeVries and Graham W Taylor. Improved regularization of convolutional neural networks
+with cutout. arXiv preprint arXiv:1708.04552, 2017.
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas
+Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An
+image is worth 16x16 words: Transformers for image recognition at scale. _arXiv preprint_
+_arXiv:2010.11929, 2020._
+
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and
+stochastic optimization. Journal of machine learning research, 12(Jul):2121–2159, 2011.
+
+Pierre Foret, Ariel Kleiner, Hossein Mobahi, and Behnam Neyshabur. Sharpness-aware minimization for efficiently improving generalization. arXiv preprint arXiv:2010.01412, 2020.
+
+Xavier Gastaldi. Shake-shake regularization. arXiv preprint arXiv:1705.07485, 2017.
+
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp.
+770–778, 2016.
+
+Byeongho Heo, Sanghyuk Chun, Seong Joon Oh, Dongyoon Han, Sangdoo Yun, Gyuwan Kim,
+Youngjung Uh, and Jung-Woo Ha. Adamp: Slowing down the slowdown for momentum optimizers on scale-invariant weights. arXiv preprint arXiv:2006.08217, 2020.
+
+Sepp Hochreiter and J¨urgen Schmidhuber. Simplifying neural nets by discovering flat minima. In
+_Advances in neural information processing systems, pp. 529–536, 1995._
+
+Pavel Izmailov, Dmitrii Podoprikhin, Timur Garipov, Dmitry Vetrov, and Andrew Gordon Wilson. Averaging weights leads to wider optima and better generalization. _arXiv preprint_
+_arXiv:1803.05407, 2018._
+
+Arthur Jacot, Franck Gabriel, and Cl´ement Hongler. Neural tangent kernel: Convergence and generalization in neural networks. arXiv preprint arXiv:1806.07572, 2018.
+
+Yiding Jiang, Behnam Neyshabur, Hossein Mobahi, Dilip Krishnan, and Samy Bengio. Fantastic
+generalization measures and where to find them. arXiv preprint arXiv:1912.02178, 2019.
+
+Nitish Shirish Keskar and Richard Socher. Improving generalization performance by switching from
+adam to sgd. arXiv preprint arXiv:1712.07628, 2017.
+
+
+-----
+
+Nitish Shirish Keskar, Dheevatsa Mudigere, Jorge Nocedal, Mikhail Smelyanskiy, and Ping Tak Peter Tang. On large-batch training for deep learning: Generalization gap and sharp minima. arXiv
+_preprint arXiv:1609.04836, 2016._
+
+Alex Krizhevsky, Geoffrey Hinton, et al. Learning multiple layers of features from tiny images.
+2009.
+
+Jungmin Kwon, Jeongseop Kim, Hyunseo Park, and In Kwon Choi. Asam: Adaptive sharpnessaware minimization for scale-invariant learning of deep neural networks. _arXiv preprint_
+_arXiv:2102.11600, 2021._
+
+Beatrice Laurent and Pascal Massart. Adaptive estimation of a quadratic functional by model selection. Annals of Statistics, pp. 1302–1338, 2000.
+
+Yuanzhi Li, Colin Wei, and Tengyu Ma. Towards explaining the regularization effect of initial large
+learning rate in training neural networks. arXiv preprint arXiv:1907.04595, 2019.
+
+Tengyuan Liang, Tomaso Poggio, Alexander Rakhlin, and James Stokes. Fisher-rao metric, geometry, and complexity of neural networks. In The 22nd International Conference on Artificial
+_Intelligence and Statistics, pp. 888–896. PMLR, 2019._
+
+Tao Lin, Lingjing Kong, Sebastian Stich, and Martin Jaggi. Extrapolation for large-batch training in
+deep learning. In International Conference on Machine Learning, pp. 6094–6104. PMLR, 2020.
+
+Liyuan Liu, Haoming Jiang, Pengcheng He, Weizhu Chen, Xiaodong Liu, Jianfeng Gao, and Jiawei
+Han. On the variance of the adaptive learning rate and beyond. arXiv preprint arXiv:1908.03265,
+2019.
+
+Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. _arXiv preprint_
+_arXiv:1711.05101, 2017._
+
+Liangchen Luo, Yuanhao Xiong, Yan Liu, and Xu Sun. Adaptive gradient methods with dynamic
+bound of learning rate. arXiv preprint arXiv:1902.09843, 2019.
+
+David McAllester. Simplified pac-bayesian margin bounds. In Learning theory and Kernel ma_chines, pp. 203–215. Springer, 2003._
+
+David A McAllester. Pac-bayesian model averaging. In Proceedings of the twelfth annual confer_ence on Computational learning theory, pp. 164–170, 1999._
+
+RV Mises and Hilda Pollaczek-Geiringer. Praktische verfahren der gleichungsaufl¨osung. ZAMM_Journal of Applied Mathematics and Mechanics/Zeitschrift f¨ur Angewandte Mathematik und_
+_Mechanik, 9(1):58–77, 1929._
+
+Rafael M¨uller, Simon Kornblith, and Geoffrey Hinton. When does label smoothing help? _arXiv_
+_preprint arXiv:1906.02629, 2019._
+
+Behnam Neyshabur, Srinadh Bhojanapalli, and Nathan Srebro. A pac-bayesian approach to
+spectrally-normalized margin bounds for neural networks. _arXiv preprint arXiv:1707.09564,_
+2017.
+
+Maria-Elena Nilsback and Andrew Zisserman. Automated flower classification over a large number
+of classes. In 2008 Sixth Indian Conference on Computer Vision, Graphics & Image Processing,
+pp. 722–729. IEEE, 2008.
+
+Omkar M Parkhi, Andrea Vedaldi, Andrew Zisserman, and CV Jawahar. Cats and dogs. In 2012
+_IEEE conference on computer vision and pattern recognition, pp. 3498–3505. IEEE, 2012._
+
+Benjamin Recht, Rebecca Roelofs, Ludwig Schmidt, and Vaishaal Shankar. Do imagenet classifiers
+generalize to imagenet? In International Conference on Machine Learning, pp. 5389–5400, 2019.
+
+Sashank J Reddi, Satyen Kale, and Sanjiv Kumar. On the convergence of adam and beyond. arXiv
+_preprint arXiv:1904.09237, 2019._
+
+
+-----
+
+David E Rumelhart, Geoffrey E Hinton, and Ronald J Williams. Learning internal representations
+by error propagation. Technical report, California Univ San Diego La Jolla Inst for Cognitive
+Science, 1985.
+
+Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov.
+Dropout: a simple way to prevent neural networks from overfitting. The journal of machine
+_learning research, 15(1):1929–1958, 2014._
+
+Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet, Scott Reed, Dragomir Anguelov, Dumitru Erhan, Vincent Vanhoucke, and Andrew Rabinovich. Going deeper with convolutions. In
+_Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 1–9, 2015._
+
+Ilya Tolstikhin, Neil Houlsby, Alexander Kolesnikov, Lucas Beyer, Xiaohua Zhai, Thomas Unterthiner, Jessica Yung, Daniel Keysers, Jakob Uszkoreit, Mario Lucic, et al. Mlp-mixer: An
+all-mlp architecture for vision. arXiv preprint arXiv:2105.01601, 2021.
+
+Colin Wei, Jason Lee, Qiang Liu, and Tengyu Ma. Regularization matters: Generalization and
+optimization of neural nets vs their induced kernel. 2019.
+
+Zeke Xie, Li Yuan, Zhanxing Zhu, and Masashi Sugiyama. Positive-negative momentum: Manipulating stochastic gradient noise to improve generalization. arXiv preprint arXiv:2103.17182,
+2021.
+
+Xubo Yue, Maher Nouiehed, and Raed Al Kontar. Salr: Sharpness-aware learning rates for improved
+generalization. arXiv preprint arXiv:2011.05348, 2020.
+
+Manzil Zaheer, Sashank Reddi, Devendra Sachan, Satyen Kale, and Sanjiv Kumar. Adaptive methods for nonconvex optimization. In Advances in neural information processing systems, pp. 9793–
+9803, 2018.
+
+Matthew D Zeiler. Adadelta: an adaptive learning rate method. arXiv preprint arXiv:1212.5701,
+2012.
+
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding
+deep learning requires rethinking generalization. 2017a.
+
+Hongyi Zhang, Moustapha Cisse, Yann N Dauphin, and David Lopez-Paz. mixup: Beyond empirical
+risk minimization. arXiv preprint arXiv:1710.09412, 2017b.
+
+Michael Zhang, James Lucas, Jimmy Ba, and Geoffrey E Hinton. Lookahead optimizer: k steps
+forward, 1 step back. In Advances in Neural Information Processing Systems, pp. 9593–9604,
+2019.
+
+Yaowei Zheng, Richong Zhang, and Yongyi Mao. Regularizing neural networks via adversarial
+model perturbation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+_Recognition, pp. 8156–8165, 2021._
+
+Pan Zhou, Jiashi Feng, Chao Ma, Caiming Xiong, Steven Hoi, et al. Towards theoretically understanding why sgd generalizes better than adam in deep learning. arXiv preprint arXiv:2010.05627,
+2020.
+
+Juntang Zhuang, Tommy Tang, Yifan Ding, Sekhar Tatikonda, Nicha Dvornek, Xenophon Papademetris, and James S Duncan. Adabelief optimizer: Adapting stepsizes by the belief in observed gradients. arXiv preprint arXiv:2010.07468, 2020.
+
+
+-----
+
+A PROOFS
+
+A.1 PROOF OF LEMMA. 3.1
+
+Suppose ρ is small, perform Taylor expansion around the local minima w, we have:
+
+_f_ (w + δ) = f (w) + _f_ (w)[⊤]δ + [1] (10)
+_∇_ 2 _[δ][⊤][Hδ][ +][ O][(][||][δ][||][3][)]_
+
+where H is the Hessian, and is positive semidefinite at a local minima. At a local minima, ∇f (w) =
+0, hence we have
+
+
+_f_ (w + δ) = f (w) + [1] (11)
+
+2 _[δ][⊤][Hδ][ +][ O][(][||][δ][||][3][)]_
+
+
+and
+
+_fp(w) = max_ _δ_ _ρ f_ (w + δ) = f (w) + [1] (12)
+_||_ _||≤_ 2 _[ρ][2][σ][max][(][H][) +][ O][(][||][δ][||][3][)]_
+
+where σmax is the dominate eigenvalue (eigenvalue with the largest absolute value). Now consider
+two local minima w1 and w2 with dominate eigenvalue σ1 and σ2 respectively, we have
+
+
+_fp(w1)_ _f_ (w1) + [1] _fp(w2)_ _f_ (w2) + [1]
+_≈_ 2 _[ρ][2][σ][1]_ _≈_ 2 _[ρ][2][σ][2]_
+
+
+We have fp(w1) > fp(w2) =⇒ _σ1 > σ2 and σ1 > σ2_ =⇒ _fp(w1) > fp(w2) because the_
+relation between f (w1) and f (w2) is undetermined. □
+
+A.2 PROOF OF LEMMA. 3.2
+
+Since ρ is small, we can perform Taylor expansion around w,
+
+_h(w) = f_ (w + δ) − _f_ (w)
+
+= δ[⊤]∇f (w) + O(ρ[2])
+
+= ρ||∇f (w)||2 + O(ρ[2]) > 0 (13)
+
+
+where the last line is because δ is approximated as δ = ρ _||∇f∇(fw()w||)2+ϵ_ [, hence has the same direction]
+
+as ∇f (w). □
+
+A.3 PROOF OF LEMMA. 3.3
+
+Since ρ is small, we can approximate f (w) with a quadratic model around a local minima w:
+
+
+_f_ (w + δ) = f (w) + [1]
+
+2 _[δ][⊤][Hδ][ +][ O][(][ρ][3][)]_
+
+where H is the Hessian at w, assumed to be positive semidefinite at local minima. Normalize δ such
+that ||δ||2 = ρ, Hence we have:
+
+_h(w) = fp(w)_ _f_ (w) = max _δ_ 2 _ρ f_ (w + δ) _f_ (w) = [1] (14)
+_−_ _||_ _||_ _≤_ _−_ 2 _[σ][max][ρ][2][ +][ O][(][ρ][3][)]_
+
+where σmax is the dominate eigenvalue of the hessian H, and first order term is 0 because the
+gradient is 0 at local minima. Therefore, we have σmax ≈ 2h(w)/ρ[2]. □
+
+A.4 PROOF OF THM. 5.1
+
+For simplicity we consider the base optimizer is SGD. For other optimizers such as Adam, we can
+derive similar results by applying standard proof techniques in the literature to our proof.
+
+
+-----
+
+STEP 1: CONVERGENCE W.R.T FUNCTION fp(w)
+
+For simplicity of notation, we denote the update at step t as
+
+_dt =_ _ηtgp[(][t][)]_ + ηtαg[(][t][)] (15)
+_−_ _⊥_
+
+By L smoothness of f and the definition of fp(wt) = f (wt[adv]), and definition of dt = wt+1 _wt_
+_−_ _−_
+and wt[adv] = wt + δt we have
+
+2
+
+_fp(wt+1) = f_ (wt[adv]+1[)][ ≤] _[f]_ [(][w]t[adv]) + ⟨∇f (wt[adv]), wt[adv]+1 _[−]_ _[w]t[adv]⟩_ + _[L]2_ _wt[adv]+1_ _[−]_ _[w]t[adv]_ (16)
+
+= f (wt[adv]) + _f_ (wt[adv]), wt+1 + δt+1 _wt_ _δt_
+_⟨∇_ 2 _−_ _−_ _⟩_
+
++ _[L]_ _wt+1 + δt+1_ _wt_ _δt_ (17)
+
+2 _−_ _−_
+
+2
+_f_ (wt[adv]) + _f_ (wt[adv]), dt + L _dt_ (18)
+_≤_ _⟨∇_ _⟩_
+
+2
++ _f_ (wt[adv]), δt+1 _δt_ + L _δt+1_ _δt_ (19)
+_⟨∇_ _−_ _⟩_ _−_
+
+STEP 1.0: BOUND EQ. 18
+
+We first bound Eq. 18. Take expectation conditioned on observation up to step t (for simplicity of
+notation, we use E short for Ex to denote expectation over all possible data points) conditioned on
+observations up to step t, also by definition of dt, we have
+
+Efp(wt+1) _fp(wt)_ _ηt_ _fp(wt), Egp[(][t][)]_
+_−_ _≤−_ _⟨∇_ _[⟩]_ [+]2[ αη][t][⟨∇][f][p][(][w][t][)][,][ E][g]⊥[(][t][)][⟩]
+
++ Lηt[2][E] _−_ _gp[(][t][)]_ + αg⊥[(][t][)] 2 (20)
+
+2
+_ηtE_ _fp(wt)_ _t_ (21)
+_≤−_ _∇_ 2 [+ 0 + (][α][ + 1)][2][G][2][η][2]
+
+Since Eg[(][t][)]
+_⊥_ [is orthogonal to][ ∇][f][p][(][w][t][)][ by construction][,]
+
+
+
+_||g[(][t][)]|| ≤_ _G by assumption_
+
+
+STEP 1.1: BOUND EQ. 19
+
+By definition of δt, we have
+
+_g[(][t][)]_
+_δt = ρt_ (22)
+
+_||g[(][t][)]|| + ϵ_
+
+_g[(][t][+1)]_
+_δt+1 = ρt+1_ (23)
+
+_||g[(][t][+1)]|| + ϵ_
+
+where g[(][t][)] is the gradient of f at wt evaluated with a noisy data sample. When learning rate ηt is
+small, the update in weight dt is small, and expected gradient is
+
+_∇f_ (wt+1) = ∇f (wt + dt) = ∇f (wt) + Hdt + O(||dt||[2]) (24)
+
+where H is the Hessian at wt. Therefore, we have
+
+_g[(][t][)]_ _g[(][t][+1)]_
+E⟨∇f (wt[adv]), δt+1 − _δt⟩_ = ⟨∇f (wt[adv]), ρtE _g[(][t][)]_ + ϵ _g[(][t][+1)]_ + ϵ _[⟩]_ (25)
+
+_||_ _||_ _[−]_ _[ρ][t][+1][E]_ _||_ _||_
+
+_g[(][t][)]_ _g[(][t][+1)]_
+_≤||∇f_ (wt[adv])||ρt E _g[(][t][)]_ + ϵ _g[(][t][+1)]_ + ϵ (26)
+
+_||_ _||_ _[−]_ [E] _||_ _||_
+
+_f_ (wt[adv]) _ρtφt_ (27)
+_≤||∇_ _||_
+
+where the first inequality is due to (1) ρt is monotonically decreasing with t, and (2) triangle inequality that ⟨a, b⟩≤||a|| · ||b||. φt is the angle between the unit vector in the direction of ∇f (wt)
+
+
+-----
+
+and _f_ (wt+1). The second inequality comes from that (1) _g_ _g+ϵ_ _< 1 strictly, so we can replace_
+_∇_ _||_ _||_
+
+_δt in Eq. 25 with a unit vector in corresponding directions multiplied by ρt and get the upper bound,_
+(2) the norm of difference in unit vectors can be upper bounded by the arc length on a unit circle.
+
+When learning rate ηt and update stepsize dt is small, φt is also small. Using the limit that
+
+
+tan x = x + O(x[2]), sin x = x + O(x[2]), _x →_ 0
+
+
+We have:
+
+
+tan φt = + O(φ[2]t [)] (28)
+
+_[||∇][f]_ [(][w][t][+1]f[)]([ −∇]wt) _[f]_ [(][w][t][)][||]
+
+_||∇_ _||_
+
+= + O(φ[2]t [)] (29)
+
+_[||][Hd][t][ +]f[ O](w[(][||]t[d])_ _[t][||][2][)][||]_
+
+_||∇_ _||_
+
+_ηtL(1 + α)_ (30)
+_≤_
+
+where the last inequality is due to (1) max eigenvalue of H is upper bounded by L because f is
+_L_ smooth, (2) _dt_ = _ηt(g_ + αg ) and Egt = _f_ (wt).
+_−_ _||_ _||_ _||_ _∥_ _⊥_ _||_ _∇_
+
+Plug into Eq. 27, also note that the perturbation amplitude ρt is small so wt is close to wt[adv], then
+we have
+E _f_ (wt[adv]), δt+1 _δt_ _L(1 + α)Gρtηt_ (31)
+_⟨∇_ _−_ _⟩≤_
+Similarly, we have
+
+2 _g[(][t][)]_ _g[(][t][+1)]_ 2
+E _δt+1_ _δt_ _ρ[2]t_ [E] (32)
+_−_ _≤_ _g[(][t][)]_ + ϵ _g[(][t][+1)]_ + ϵ
+
+_||_ _||_ _[−]_ _||_ _||_
+
+_≤_ _ρ[2]t_ _[φ]t[2]_ (33)
+
+_≤_ _ρ[2]t_ _[η]t[2][L][2][(1 +][ α][)][2]_ (34)
+
+
+STEP 1.2: TOTAL BOUND
+
+Reuse results from Eq. 21 (replace Lp with 2L) and plug into Eq. 18, and plug Eq. 31 and Eq. 34
+into Eq. 19, we have
+
+
+2
+
+2 [+ 2][L][(][α]2[ + 1)][2]
+
+
+_G[2]ηt[2]_
+
+
+Efp(wt+1) _fp(wt)_ _ηtE_ _fp(wt)_
+_−_ _≤−_ _∇_ 2 [+ 2] 2
+
++ L(1 + α)Gρtηt + [2][L][3][(1 +][ α][)][2]
+
+
+_ηt[2][ρ]t[2]_ (35)
+
+
+Perform telescope sum, we have
+
+
+_ηtE_ _fp(wt)_ + _L(1 + α)[2]G[2]η0[2]_ [+][ L][(1 +][ α][)][Gρ][0][η][0]
+_||∇_ _||[2]_
+_t=1_
+
+X h
+
+
+Efp(wT ) − _fp(w0) ≤−_
+
+
+_t=1_
+
+
++ L[3](1 + α)[2]η0[2][ρ][2]0
+
+
+1
+
+(36)
+_t[2]_
+
+
+_t=1_
+
+
+Hence
+
+_ηT_
+
+
+_T_
+
+_ηtE_ _fp(wt)_ _fp(w0)_ Efp(wT ) + D log T + _[π][2][E]_
+_||∇_ _||[2]_ _≤_ _−_ 6
+_t=1_
+
+X
+
+
+E||∇fp(wt)||[2] _≤_
+_t=1_
+
+X
+
+
+(37)
+
+
+where
+_D = L(1 + α)[2]G[2]η0[2]_ [+][ L][(1 +][ α][)][Gρ][0][η][0][,] _E = L[3](1 + α)[2]η0[2][ρ][2]0_ (38)
+Note that ηT = _√η0T_ [, we have]
+
+
+_T_
+
+E _fp(wt)_
+_||∇_ _||[2]_ _≤_ _[f][p][(][w][0][)][ −]_ _[f][min]η0_ [ +][ π][2][E/][6]
+_t=1_
+
+X
+
+
++ _[D]_
+
+_η0_
+
+
+log T
+
+
+(39)
+
+
+which implies that GSAM enables fp to converge at a rate of O(log T/√T ), and all the constants
+
+here are well-bounded.
+
+
+-----
+
+STEP 2: CONVERGENCE W.R.T. FUNCTION f (w)
+
+We prove the risk for f (w) convergences for non-convex stochastic optimization case using SGD.
+Denote the update at step t as
+_dt =_ _ηtgp[(][t][)]_ + αηtg[(][t][)] (40)
+_−_ _⊥_
+By smoothness of f, we have
+
+2
+
+_f_ (wt+1) _f_ (wt) + _f_ (wt), dt + _[L]_ _dt_ (41)
+_≤_ _⟨∇_ _⟩_ 2 2
+
+2
+
+= f (wt) + _f_ (wt), _ηtgp[(][t][)]_ + αηtg[(][t][)] _dt_ (42)
+_⟨∇_ _−_ _⊥_ _[⟩]_ [+][ L]2 2
+
+For simplicity, we introduce a scalar βt such that
+_∇f∥(wt) = βt∇fp(wt)_ (43)
+
+where ∇f∥(wt) is the projection of ∇f (wt) onto ∇fp(wt). When perturbation amplitude ρ is small,
+we expect βt to be very close to 1.
+
+Take expectation conditioned on observations up to step t for both sides of Eq. 42, we have:
+
+
+2
+
+Ef (wt+1) _f_ (wt) + _f_ (wt), _f_ (wt) _f_ (wt) + αηtEg[(][t][)] + _[L]_ _dt_ (44)
+_≤_ *∇ _−_ _β[η][t]t_ _∇_ _−∇_ _⊥_ _⊥_ + 2 [E] 2
+
+ 
+
+2 2
+
+1
+
+= f (wt) − _β[η][t]t_ _∇f_ (wt) 2 [+] _βt_ + α _ηt_ _∇f_ (wt), ∇f⊥(wt) + _[L]2_ [E] _dt_ 2 (45)
+
+2   D E 2
+
+1
+
+= f (wt) _f_ (wt) + α _ηt_ _f_ (wt), _f_ (wt) sin θt + _[L]_ _dt_
+_−_ _β[η][t]t_ _∇_ 2 [+] _βt_ _∇_ _∇_ 2 [E] 2
+
+  D E (46)
+
+_θt is the angle between ∇fp(wt) and ∇f_ (wt)
+ 2 1  2 2
+
+= f (wt) _f_ (wt) + α _ηt_ _f_ (wt) _t_ [)) +][ L] _dt_
+_−_ _β[η][t]t_ _∇_ 2 [+] _βt_ _∇_ 2[(][|][ tan][ θ][t][|][ +][ O][(][θ][2] 2 [E] 2
+
+  (47)
+
+sin x = x + O(x[2]), tan x = x + O(x[2]) when x → 0.
+
+Also note when perturbation amplitude _ρt is small, we have_ 
+
+_ρt_
+_fp(wt) =_ _f_ (wt + δt) = _f_ (wt) + _t_ [)] (48)
+_∇_ _∇_ _∇_ _||∇f_ (wt)||2 + ϵ _[H][(][w][t][)][∇][f]_ [(][w][t][) +][ O][(][ρ][2]
+
+where δt = ρt _||∇∇ff((wwtt))||2_ [by definition,][ H][(][w][t][)][ is the Hessian. Hence we have]
+
+_ρtL_
+
+tan θt (49)
+_|_ _| ≤_ _[||∇][f][p][(][w][t][)]f[ −∇](wt)[f]_ [(][w][t][)][||] _≤_ _f_ (wt)
+
+_||∇_ _||_ _||∇_ _||_
+
+where L is the Lipschitz constant of f, and L−smoothness of f indicates the maximum absolute
+eigenvalue of H is upper bounded by L. Plug Eq. 49 into Eq. 47, we have
+
+2 2 2
+
+1
+
+Ef (wt+1) _f_ (wt) _f_ (wt) + α _ηt_ _f_ (wt) _dt_ (50)
+_≤_ _−_ _β[η][t]t_ _∇_ 2 [+] _βt_ _∇_ 2[|][ tan][ θ][t][|][ +][ L]2 [E] 2
+
+2   2
+
+1
+
+_f_ (wt) _f_ (wt) + α _Lρtηt_ _f_ (wt) _dt_ (51)
+_≤_ _−_ _β[η][t]t_ _∇_ 2 [+] _βt_ _∇_ 2 [+][ L]2 [E] 2
+
+2   2
+
+1
+
+_f_ (wt) _f_ (wt) + α _LρtηtG +_ _[L]_ _dt_ (52)
+_≤_ _−_ _β[η][t]t_ _∇_ 2 [+] _βt_ 2 [E] 2
+
+ 
+
+Assume gradient has bounded norm G. (53)
+ 
+
+
+_f_ (wt),
+_∇_ _−_ _β[η][t]t_
+
+
+_f_ (wt) _f_ (wt) + αηtEg[(][t][)]
+_∇_ _−∇_ _⊥_ _⊥_
+
+
+
+Ef (wt+1) ≤ _f_ (wt) +
+
+
+_ηt_ 2 1
+_f_ (wt) _f_ (wt) + α _LρtηtG +_ _[L]_ _t_ (54)
+_≤_ _−_ _βmax_ _∇_ 2 [+] _βmin_ 2 [E][(][α][ + 1)][2][G][2][η][2]
+
+ 
+
+_βt is close to 1 assuming ρ is small,_
+
+
+hence it’s natural to assume 0 < βmin _βt_ _βmax_
+_≤_ _≤_
+
+
+
+-----
+
+Re-arranging above formula, we have
+_ηt_ 2 1
+
+_f_ (wt) + α _LGηtρt +_ _[L]_ _t_ (55)
+
+_βmax_ _∇_ 2 _βmin_ 2 [(][α][ + 1)][2][G][2][η][2]
+
+_[≤]_ _[f]_ [(][w][t][)][ −] [E][f] [(][w][t][+1][) +]  
+
+perform telescope sum and taking expectations on each step, we have
+
+_T_ _T_ _T_
+
+1 2 1
+
+_ηt_ _f_ (wt) + α _LG_ _ηtρt +_ _[L]_ _ηt[2]_
+
+_βmax_ _∇_ 2 _βmin_ 2 [(][α][ + 1)][2][G][2]
+
+_t=1_ _t=1_ _t=1_
+
+X _[≤]_ _[f]_ [(][w][0][)][ −] [E][f] [(][w][T][ ) +]   X X
+
+(56)
+Take the schedule to be ηt = _√[η][0]t_ [and][ ρ][t][ =][ ρ]√[0]t [, then we have]
+
+
+_η0_
+
+_βmax_
+
+Hence
+
+
+(57)
+2
+
+_[≤]_ _[LHS]_
+
+_≤_ _RHS_ (58)
+
+
+_f_ (wt)
+_∇_
+
+
+_t=1_
+
+
+_T_
+
+1
+
+_t_ [+][ L]2 [(][α][ + 1)][2][G][2][η]0[2]
+
+_t=1_
+
+X
+
+(59)
+
+
+_≤_ _f_ (w0) − _fmin +_
+
+_≤_ _f_ (w0) − _fmin +_
+
+
++ α _LGη0ρ0_
+_βmin_
+
+
+
+_t=1_
+
+
++ α _LGη0ρ0(1 + log T_ )
+_βmin_
+
+
+
++ _[L]2 [(][α][ + 1)][2][G][2][η]0[2][(1 + log][ T]_ [)] (60)
+
+
+_T_
+
+1 2 log T
+
+_f_ (wt) + C4
+
+_T_ _t=1_ _∇_ 2 _√T_ _√T_
+
+_[≤]_ _[C][3]_
+
+X
+
+where C1, C4 are some constants. This implies the convergence rate w.r.t f (w) is O(log T/
+
+STEP 3: CONVERGENCE W.R.T. SURROGATE GAP h(w)
+
+
+(61)
+
+_T_ ).
+
+
+Note that we have proved convergence for fp(w) in step 1, and convergence for f (w) in step 3. Also
+note that
+2 2 2 2
+_h(wt)_ _fp(wt)_ _f_ (wt) _fp(wt)_ _f_ (wt) (62)
+_∇_ 2 [=] _∇_ _−∇_ 2 _[≤]_ [2] _∇_ 2 [+ 2] _∇_ 2
+
+Hence
+
+_T_ _T_ _T_
+
+1 2 2 2
+
+_h(wt)_ _fp(wt)_ _f_ (wt) (63)
+
+_T_ _∇_ 2 _T_ _∇_ 2 [+ 2]T _∇_ 2
+
+_t=1_ _t=1_ _t=1_
+
+X _[≤]_ [2] X X
+
+also converges at rate O(log T/√T ) because each item in the RHS converges at rate O(log T _√T_ ).
+
+□
+
+A.5 PROOF OF COROLLARY. 5.2.1
+
+Using the results from Thm. 5.2, with probability at least 1 − _a, we have_
+
+_KL(_ ) + log [2]a[m]
+
+Ew Exf (w, x) Ew _f_ (w) + 4 _Q||P_ (64)
+_∼Q_ _≤_ _∼Q_ s _m_
+
+Assume δ (0, b[2]Ik) where k is the dimension of model parameters, hence δ[2] (element-wise
+_∼N_ [b]
+square) follows a a Chi-square distribution. By Lemma.1 in Laurent & Massart (2000), we have
+
+P _δ_ 2 _kt + 2tb[2][]_ _exp(_ _t)_ (65)
+_||_ _||[2]_ _[−]_ _[kb][2][ ≥]_ [2][b][2][√] _≤_ _−_
+
+hence with probability at least  1 1/[√]n, we have
+_−_
+
+2
+
+log _n_
+
+_||δ||2[2]_ _[≤]_ _[b][2]_ 2 log _[√]n + k + 2_ _k log_ _[√]n!_ _≤_ 2b[2]k 1 + r _k[√]_ ! _≤_ _ρ[2]_ (66)
+
+q
+
+
+-----
+
+_ρ_ 2[]
+Therefore, with probability at least 1 1/[√]n = 1 _exp_ _√2b_ _√k_
+_−_ _−_ _−_ _[−]_
+   
+
+Eδf (w + δ) max _δ_ 2 _ρ_ _f_ (w + δ) (67)
+_≤_ _||_ _||_ _≤_
+
+Combine Eq. 65 and Eq. 67, subtract the same constant C on both sides, and under the same assumption as in (Foret et al., 2020) that[b] Ew Exf (w, x) [b] Eδ (0,b2I _k)Ew_ Exf (w + δ, x)we
+_∼Q_ _≤_ _∼N_ _∼Q_
+finish the proof. □
+
+A.6 PROOF OF THM. 5.3
+
+STEP 1: A SUFFICIENT CONDITION THAT THE LOSS GAP IS EXPECTED TO DECREASE FOR
+EACH STEP
+
+Take Taylor expansion, then the expected change of loss gap caused by descent step is
+
+E⟨∇fp(wt) −∇f (wt), −ηt∇fp(wt)⟩ (68)
+_where Eg_ = _f_ (wt)
+_⊥_ _∇_ _⊥_
+ 
+
+
+= ηt _fp(wt)_ 2 [+] _fp(wt)_ 2 _f_ (wt) 2 [cos][ θ][t]
+
+" _−_ _∇_ _∇_ _∇_
+
+[2]
+
+where θt is the angle between vector ∇fp(wt) and ∇f (wt).
+The expected change of loss gap caused by ascent step is
+
+
+(69)
+
+
+E⟨∇fp(wt) −∇f (wt), αηt∇f⊥(wt)⟩ = −αηt _∇f⊥(wt)_ 2 _[<][ 0]_ (70)
+
+Above results demonstrate that ascent step decreases the loss gap, while descent step might increase
+
+[2]
+
+the loss gap. A sufficient (but not necessary) condition for E⟨∇h(wt), dt⟩≤ 0 requires α to be large
+or | _∇f_ (wt) 2 [cos][ θ][t][ ≤] _∇fp(wt)_ . In practice, the perturbation amplitude ρ is small and we can
+assume θt is close to 0 and _∇fp(wt)_ is close to _∇f_ (wt), we can also set the parameter α to
+be large in order to decrease the loss gap.
+
+STEP 2: UPPER AND LOWER BOUND OF DECREASE IN LOSS GAP (BY THE ASCENT STEP IN
+ORTHOGONAL GRADIENT DIRECTION) COMPARED TO SAM.
+
+Next we give an estimate of the decrease in _h caused by our ascent step. We refer to Eq. 69 and_
+Eq. 70 to analyze the change in loss gap caused by the descent and ascent (orthogonally) respectively.
+It can be seen that gradient descent step might not decrease loss gap, in fact they often increase loss
+
+[b]
+gap in practice; while the ascent step is guaranteed to decrease the loss gap.
+
+The decrease in loss gap is:
+
+∆[b]ht = −⟨∇f[b]p(wt) −∇f[b](wt), αηt∇f[b]⊥(wt)⟩ = αηt _∇f⊥(wt)_ 2 (71)
+
+_T_ _T_ = αηt _∇fbb(wt)_ 2[2][|][2][ tan][ θ][t][|][2] (72)
+
+
+∆[b]ht _αL[2]ηtρ[2]t_ (73)
+_t=1_ _≤_ _t=1_
+
+X X
+
+By Eq. 49 (74)
+ 
+
+
+_αL[2]η0ρ[2]0_
+_t=1_
+
+X
+
+
+1
+
+(75)
+_t[3][/][2]_
+
+
+2.7αL[2]η0ρ[2]0 (76)
+_≤_
+
+Hence we derive an upper bound for _t=1_ [∆][b]ht.
+
+[P][T]
+
+
+-----
+
+Next we derive a lower bound for _t=1_ [∆][b]ht Note that when ρt is small, by Taylor expansion
+
+_ρt_
+_∇f[b]p(wt) = ∇f[b](wt + δ[P]t) =[T]_ _∇f[b](wt) +_ _f_ (wt) _H(wt)∇f[b](wt) + O(ρ[2]t_ [)] (77)
+
+_||∇_ [b] _||_
+
+where _H(wt) is the Hessian evaluated on training samples. Also whenb_ _ρt is small, the angle θt_
+between _fp(wt) and_ _f_ (wt) is small, by the limit that
+_∇_ [b] _∇_ [b]
+
+[b]
+
+tan x = x + O(x[2]), x → 0
+
+sin x = x + O(x[2]), x → 0
+
+We have
+_| tan θt| = | sin θt| + O(θt[2][) =][ |][θ][t][|][ +][ O][(][θ]t[2][)]_
+Omitting high order term, we have
+
+_fp(wt)_ _f_ (wt) _H(wt) + O(ρ[2]t_ [)][||]
+tan θt _θt_ = _−∇_ [b] _||_ = (78)
+_|_ _| ≈|_ _|_ _[||∇]_ [b] _f_ (wt) _[||][ρ][t][ b]_ _f_ (wt) _≥_ _[ρ][t][|][σ]G[|][min]_
+
+_||_ _||_ _||∇_ [b] _||_
+
+where G is the upper-bound on norm of gradient, |σ|min is the minimum absolute eigenvalue of the
+Hessian. The intuition is that as perturbation amplitude decreases, the angle[b] _θt decreases at a similar_
+rate, though the scale constant might be different. Hence we have
+
+
+∆[b]ht = _αηt_ _∇f_ (wt) 2[|][ tan][ θ][t][|][2][ +][ O][(][θ]t[4][)] (79)
+_t=1_ _t=1_
+
+X X
+
+_T_ b [2] 2
+
+_αηtc[2][]_ _[ρ][t][|][σ][|][min]_ (80)
+
+_≥_ _G_
+
+_t=1_
+
+X 
+
+_T_
+
+= _[αc][2][ρ]0[2][η][0][|][σ][|][2]min_ 1 (81)
+
+_G[2]_ _t[3][/][2]_
+
+_t=1_
+
+X
+
+
+0[η][0][|][σ][|][2]min (82)
+_≥_ _[αc][2][ρ][2]G[2]_
+
+where c[2] is the lower bound of ||∇f[b]||[2] (e.g. due to noise in data and gradient observation). Results above indicate that the decrease in loss gap caused by the ascent step is non-trivial, hence our
+proposed method efficiently improves generalization compared with SAM. □
+
+A.7 DISCUSSION ON COROLLARY 5.2.1
+
+The comment “‘The corollary gives a bound on the risk in terms of the perturbed training loss
+if one removes C from both sides”’ is correct. But there is a misunderstanding in the statement
+“‘the perturbed training loss is small then the model has a small risk”’: it’s only true when ρtrain
+for training equals its real value ρtrue determined by the data distribution; in practice, we never
+know ρtrue. In the following we show that the minimization of both h and fp is better than simply
+minimizing fp when ρtrue ̸= ρtrain.
+
+1. First, we re-write the conclusion of Corollary 5.2.1 as
+
+EwExf (w, x) ≤ _fp + R =with probability C +_ [b]h + R = (1 C − + ρa)[1[2]σ/ −2 +e[−] R[(] _√ +ρ2b_ _O[−]√(kρ)[3][2])]_
+
+where R is the regularization term, C is the training loss, σ is the dominant eigenvalue of Hessian.
+As in lemma 3.3, we perform Taylor-expansion and can ignore the high-order term O(ρ[3]). We focus
+on
+_fp = C +_ _h = C + ρ[2]σ/2_
+
+2. When ρtrue = ρtrain, minimizing h achieves a lower risk than only minimizing fp. (1) Note
+that after training, ̸ _C (training loss) is fixed, but[b] h could vary with ρ (e.g. when training on dataset_
+A and testing on an unrelated dataset B, the training loss remains unchanged, but the risk would
+be huge and a large ρ is required for a valid bound). (2) With an example, we show a low fp is
+insufficient for generalization, and a low σ is necessary:
+
+
+-----
+
+A Suppose we use ρtrain for training, and consider two solutions with C1, σ1 (SAM) and
+_C2, σ2 (GSAM). Suppose they have the same fp during training for some ρtrain, so_
+
+
+_fp1 = C1 + σ1/2_ _ρ[2]train_ [=][ C][2] [+][ σ][2][/][2][ ×][ ρ][2]train [=][ f][p][2]
+_×_
+
+Suppose C1 < C2 so σ1 > σ2.
+
+B When ρtrue > ρtrain, we have
+
+risk bound 1 = C1 + σ1/2 × ρ[2]true [+][ R >][ risk bound 2][ =][ C][2] [+][ σ][2][/][2][ ×][ ρ][2]true [+][ R]
+
+This implies that a small σ helps generalization, but only a low fp1 (caused by a low C1
+and high σ1) is insufficient for a good generalization.
+
+C Note that ρtrain is fixed during training, so minimizing htrain during training is equivalently minimizing σ by Lemma 3.3
+
+3. Why we are often unlucky to have ρtrue > ρtrain (1) First, the test sets are almost surely
+**outside the convex hull of the training set because “‘interpolation almost surely never occurs in**
+high-dimensional (> 100) cases”’ Balestriero et al. (2021). As a result, the variability of (train
++ test) sets is almost surely larger than the variability of (train) set. Since ρ increases with data
+variability (see point 4 below), we have ρtrue > ρtrain set almost surely. (2) Second, we don’t
+know the value of ρtrue and can only guess it. In practice, we often guess a small value because
+training often diverges with large ρ (as observed in Foret et al. (2020); Chen et al. (2021)).
+
+4. Why ρ increases with data variability. In Corollary 5.2.1, we assume weight perturbation
+_δ ∼N_ (0, b[2]I _[k]). The meaning of b is the following. If we can randomly sample a fixed number_
+of samples from the underlying distribution, then training the model from scratch (with a fixed seed
+for random initialization) gives rise to a set of weights. Repeating this process, we get many sets of
+weights, and their standard deviation is b. Since the number of training samples is limited and fixed,
+the more variability in data, the more variability in weights, and the larger b. Note that Corollary
+stated that the bound holds with probability proportional to [1 − _e[−][(]_ _√ρ2b_ _[−]√k)[2]_ ]. In order for the
+
+result to hold with a fixed probability, ρ must stay proportional to b, hence ρ also increases with the
+variability of data.
+
+
+-----
+
+Table 4: Hyper-parameters to reproduce experimental results
+
+|Model|ρmax ρmin α lrmax lrmin Weight Decay Base Optimizer Epochs Warmup Steps LR schedule|
+|---|---|
+|ResNet50 ResNet101 ResNet512|0.04 0.02 0.01 1.6 1.6e-2 0.3 SGD 90 5k Linear 0.04 0.02 0.01 1.6 1.6e-2 0.3 SGD 90 5k Linear 0.04 0.02 0.005 1.6 1.6e-2 0.3 SGD 90 5k Linear|
+|ViT-S/32 ViT-S/16 ViT-B/32 ViT-B/16|0.6 0.0 0.4 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.6 0.0 1.0 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.6 0.1 0.6 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.6 0.2 0.4 3e-3 3e-5 0.3 AdamW 300 10k Linear|
+|Mixer-S/32 Mixer-S/16 Mixer-S/8 Mixer-B/32 Mixer-B/16|0.5 0.0 0.2 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.5 0.0 0.6 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.5 0.1 0.1 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.7 0.2 0.05 3e-3 3e-5 0.3 AdamW 300 10k Linear 0.5 0.2 0.01 3e-3 3e-5 0.3 AdamW 300 10k Linear|
+
+
+
+B EXPERIMENTAL DETAILS
+
+B.1 TRAINING DETAILS
+
+For ViT and Mixer, we search the learning rate in {1e-3, 3e-3, 1e-2, 3e-3}, and search weight decay
+in {0.003, 0.03, 0.3}. For ResNet, we search the learning rate in {1.6, 0.16, 0.016}, and search
+the weight decay in {0.001, 0.01,0.1}. For ViT and Mixer, we use the AdamW optimizer with
+_β1 = 0.9, β2 = 0.999; for ResNet we use SGD with momentum= 0.9. We train ResNets for 90_
+epochs, and train ViTs and Mixers for 300 epochs following the settings in (Chen et al., 2021) and
+(Dosovitskiy et al., 2020). Considering that SAM and GSAM uses twice the computation of vanilla
+training for each step, for vanilla training we try 2× longer training, and does not find significant
+improvement as in Table. 5.
+
+We first search the optimal learning rate and weight decay for vanilla training, and keep these two
+hyper-parameters fixed for SAM and GSAM. For ViT and Mixer, we search ρ in {0.1, 0.2, 0.3, 0.4,
+0.5, 0.6} for SAM and GSAM; for ResNet, we search ρ from 0.01 to 0.05 with a stepsize 0.01.
+For ASAM, we amplify ρ by 10× compared to SAM, as recommended by Kwon et al. (2021). For
+GSAM, we search α in {0.1, 0.2, 0.3} throughout the paper. We report the best configuration of
+each individual model in Table. 4.
+
+B.2 TRANSFER LEARNING EXPERIMENTS
+
+Using weights trained on ImageNet-1k, we finetune models with SGD on downstream tasks including the CIFAR10/CIFAR100 (Krizhevsky et al., 2009), Oxford-flowers (Nilsback & Zisserman,
+2008) and Oxford-IITPets (Parkhi et al., 2012). For all experiments, we use the SGD optimizer with
+no weight decay under a linear learning rate schedule and gradient clipping with global norm 1. We
+search the maximum learning rate in {0.001, 0.003, 0.01, 0.03}. On Cifar datasets, we train models
+for 10k steps with a warmup step of 500; on Oxford datasets, we train models for 500 steps with a
+wamup step of 100.
+
+B.3 EXPERIMENTAL SETUP WITH ABLATION STUDIES ON DATA AUGMENTATION
+
+We follow the settings in (Tolstikhin et al., 2021) to perform ablation studies on data augmentation. In the left subfigure of Fig. 6, “Light” refers to Inception-style data augmentation with random
+flip and crop of images, “Medium” refers to the mixup augmentation with probability 0.2 and RandAug magnitude 10; “Strong” refers to the mixup augmentation with probability 0.2 and RandAug
+magnitude 15.
+
+C ABLATION STUDIES AND DISCUSSIONS
+
+C.1 INFLUENCE OF ρ AND α
+
+We plot the performance of a ViT-B/32 model varying with ρ (Fig. 7a) and α (Fig. 7b). We empirically validate that fine-tuning ρ in SAM can not achieve comparable performance with GSAM, as
+
+
+-----
+
+Top-1 accuracy of ViT-B/32 varying with
+
+
+78
+
+
+78
+
+77
+
+76
+
+75
+
+74
+
+73
+
+72
+
+71
+
+70
+
+69
+
+
+77
+
+76
+
+75
+
+74
+
+73
+
+72
+
+71
+
+70
+
+69
+
+
+
+Top-1 accuracy of ViT-B/32 under different
+
+SAM
+GSAM
+
+= 0.1 = 0.2 = 0.3 = 0.4 = 0.5 = 0.6
+
+
+Vanilla
+SAM
+
+= 0.05 = 0.10 = 0.15 = 0.20 = 0.25
+
+
+(a) Performance of SAM and GSAM under different ρ.
+
+
+(b) Performance of GSAM under different α
+
+
+Figure 7: Performance of GSAM varying with ρ and α.
+
+Table 5: Top-1 accuracy of ViT-B/32 on ImageNet with Inception-style data augmentation. For
+vanilla training we report results for training 300 epochs and 600 epochs, for GSAM we report the
+results for 300 epochs.
+
+
+
+|Method|Epochs|ImageNet ImageNet-Real ImageNet-v2 ImageNe|
+|---|---|---|
+|Vanilla|300 600|71.4 77.5 57.5 23.4 72.0 78.2 57.9 23.6|
+|GSAM|300|76.8 82.7 63.0 25.1|
+
+
+shown in Fig. 7a. Considering that GSAM has one more parameter α, we plot the accuracy varying
+with α in Fig. 7b, and show that GSAM consistently outperforms SAM and vanilla training.
+
+
+C.2 CONSTANT ρ V.S. DECAYED ρt SCHEDULE
+
+Note that Thm. 5.1 assumes ρt to decay with t in order to prove the convergence, while SAM uses a
+constant ρ during training. To eliminate the influence of ρt schedule, we conduct ablation study as
+in Table. 6. The ascent step in GSAM can be applied to both constant ρ or a decayed ρt schedule,
+and improves accuracy for both cases. Without ascent step, constant ρ and decayed ρt achieve
+similar performance. Results in Table. 6 implies that the ascent step in GSAM is the main reason
+for improvement of generalization performance.
+
+
+Cosine
+
+250 500 750 1000 1250 1500 1750
+
+=0
+=0.05
+=0.1
+=0.15
+=0.2
+
+Training step
+
+
+Influence of on surrogate gap h
+
+
+1.0
+
+0.9
+
+
+1.0
+
+0.9
+
+0.8
+
+0.7
+
+0.6
+
+0.5
+
+0.4
+
+
+0.8
+
+0.7
+
+
+0.6
+
+0.5
+
+|=0 =0 =0 =0 =0|.05 .1 .15 .2|
+|---|---|
+|0 25|0 500 750 1000 1250 1500 1750 Training step|
+
+
+Figure 8: The value of cos θt varying with training steps, where θt is the angle between ∇f (wt)
+and _fp(wt) as in Fig. 2._
+_∇_
+
+
+Figure 9: Surrogate gap curve under different α
+values.
+
+
+-----
+
+Table 6: Top-1 Accuracy on ViT-B/32 on ImageNet. Ablation studies on constant ρ or a decayed ρt.
+
+Vanilla Constant ρ (SAM) Constant ρ + ascent Decayed ρt Decayed ρt + ascent
+
+72.0 75.8 76.2 75.8 76.8
+
+C.3 VISUALIZE THE TRAINING PROCESS
+
+In the proof of Thm. 5.3, our analysis relies on assumption that θt is small. We empirically validated
+this assumption by plotting cos θt in Fig. 8, where θt is the angle between ∇f (wt) and ∇fp(wt).
+Note that the cosine value is calculated in the parameter space of dimension 8.8 × 10[7], and in
+high-dimensional space two random vectors are highly likely to be perpendicular. In Fig. 8 the
+cosine value is always above 0.9, indicating that _f_ (wt) and _fp(wt) point to very close directions_
+_∇_ _∇_
+considering the high dimension of parameters. This empirically validates our assumption that θt is
+small during training.
+
+We also plot the surrogate gap during training in Fig. 9. As α increases, the surrogate gap decreases,
+validating that the ascent step in GSAM efficiently minimizes the surrogate gap. Furthermore, the
+surrogate gap increases with training steps for any fixed α, indicating that the training process gradually falls into local minimum in order to minimize the training loss.
+
+D RELATED WORKS
+
+Besides SAM and ASAM, other methods were proposed in the literature to improve generalization:
+Lin et al. (2020) proposed extrapolation of gradient, Xie et al. (2021) proposed to manipulate the
+noise in gradient, and Damian et al. (2021) proved label noise improves generalization, Yue et al.
+(2020) proposed to adjust learning rate according to sharpness, and Zheng et al. (2021) proposed
+model perturbation with similar idea to SAM. Izmailov et al. (2018) proposed averaging weights
+to improve generalization, and Heo et al. (2020) restricted the norm of updated weights to improve
+generalization. Many of aforementioned methods can be combined with GSAM to further improve
+generalization.
+
+Besides modified training schemes, there are other two types of techniques to improve generalization: data augmentation and model regularization. Data augmentation typically generates new data
+from training samples; besides standard data augmentation such as flipping or rotation of images,
+recent data augmentations include label smoothing (M¨uller et al., 2019) and mixup (M¨uller et al.,
+2019) which trains on convex combinations of both inputs and labels, automatically learned augmentation (Cubuk et al., 2018), and cutout (DeVries & Taylor, 2017) which randomly masks out parts
+of an image. Model regularization typically applies auxiliary losses besides the training loss such as
+weight decay (Loshchilov & Hutter, 2017), other methods randomly modify the model architecture
+during training, such as dropout (Srivastava et al., 2014) and shake-shake regularization (Gastaldi,
+2017). Note that the data augmentation and model regularization literature mentioned here typically
+train with the standard back-propagation (Rumelhart et al., 1985) and first-order gradient optimizers,
+and both techniques can be combined with GSAM.
+
+Besides SGD, Adam and AdaBelief, GSAM can be combined with other first-order gradient optimizers, such as AdaBound (Luo et al., 2019), RAdam (Liu et al., 2019), Yogi (Zaheer et al., 2018),
+AdaGrad (Duchi et al., 2011), AMSGrad (Reddi et al., 2019) and AdaDelta (Zeiler, 2012).
+
+
+-----
+
