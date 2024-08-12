@@ -199,7 +199,7 @@ def do_idea(
                     model="gpt-4o-2024-05-13",
                     client=openai.OpenAI(),
                     num_reflections=5,
-                    num_fs_examples=0,
+                    num_fs_examples=1,
                     num_reviews_ensemble=5,
                     temperature=0.1,
                 )
@@ -223,7 +223,7 @@ def do_idea(
                     model="gpt-4o-2024-05-13",
                     client=openai.OpenAI(),
                     num_reflections=5,
-                    num_fs_examples=0,
+                    num_fs_examples=1,
                     num_reviews_ensemble=5,
                     temperature=0.1,
                 )
