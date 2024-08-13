@@ -112,6 +112,8 @@ cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
 
 ## Run AI Scientist Paper Generation Experiments
 
+**Note:** please ensure the setup steps above are completed.
+
 ```bash
 conda activate ai_scientist
 # Run the paper generation.
