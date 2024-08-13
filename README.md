@@ -79,15 +79,12 @@ python data/text8/prepare.py
 
 ```
 # Set up NanoGPT baseline run
-python templates/nanoGPT/experiment.py --out_dir run_0
-
-# Make sure plotting works
-python templates/nanoGPT/plot.py
+cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
 ```
-python templates/nanoGPT_lite/experiment.py --out_dir run_0
+cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 ### Setup 2D Diffusion
@@ -100,16 +97,14 @@ pip install .
 pip install scikit-learn
 
 # Set up 2D Diffusion baseline run
-python templates/2d_diffusion/experiment.py --out_dir run_0
-python templates/2d_diffusion/plot.py
+cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 ### Setup Grokking
 
 ```bash
 # Set up Grokking baseline run
-python templates/grokking/experiment.py --out_dir run_0
-python templates/grokking/plot.py
+cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 
