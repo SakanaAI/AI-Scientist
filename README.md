@@ -177,6 +177,11 @@ The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tan
 
 The Grokking template used code from [Sea-Snell/grokking](https://github.com/Sea-Snell/grokking) and [danielmamay/grokking](https://github.com/danielmamay/grokking).
 
+## Related Work
+
+- [Dinu, SymbolicAI: A Neuro-Symbolic Perspective on Large Language Models (LLMs), 2022](https://github.com/ExtensityAI/symbolicai)
+- [Dinu et al., SymbolicAI: A framework for logic-based approaches combining generative models and solvers, CoLLAs 2024](https://arxiv.org/abs/2402.00854)
+
 ## Citing **The AI Scientist** ✏️
 
 If you use **The AI Scientist** in your research, please cite it as follows:
