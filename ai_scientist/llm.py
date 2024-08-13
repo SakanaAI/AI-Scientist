@@ -118,7 +118,7 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if model == "claude-3-5-sonnet-20240620":
+    if "claude" in model:
         new_msg_history = msg_history + [
             {
                 "role": "user",
@@ -131,7 +131,7 @@ def get_response_from_llm(
             }
         ]
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model=model,
             max_tokens=3000,
             temperature=temperature,
             system=system_message,
