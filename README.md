@@ -43,7 +43,7 @@ conda create -n ai_scientist python=3.11
 conda activate ai_scientist
 
 # LLM APIs
-pip install anthropic aider-chat backoff openai
+pip install anthropic[bedrock] aider-chat backoff openai
 # Viz
 pip install matplotlib pypdf pymupdf4llm
 # Install pdflatex
@@ -56,6 +56,10 @@ pip install torch numpy transformers datasets tiktoken wandb tqdm
 We use the following environment variables for the different API providers for different models:
 
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`
+
+For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
+
+(*required*) `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, (*optional*) `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`
 
 Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher throughput [if you have one](https://www.semanticscholar.org/product/api), though in principle it should work without it.
 
