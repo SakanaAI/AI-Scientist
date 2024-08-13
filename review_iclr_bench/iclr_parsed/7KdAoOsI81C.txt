@@ -1,0 +1,1963 @@
+Published as a conference paper at ICLR 2022
+TRANSFER
+RL
+ACROSS
+OBSERVATION
+FEATURE
+SPACES VIA MODEL-BASED REGULARIZATION
+Yanchao Sun†∗
+Ruijie Zheng†
+Xiyao Wang†
+Andrew Cohen‡
+Furong Huang†
+† University of Maryland, College Park
+‡ Unity Technologies
+†{ycs,rzheng12,xywang,furongh}@umd.edu
+‡andrew.cohen@unity3d.com
+ABSTRACT
+In many reinforcement learning (RL) applications, the observation space is spec-
+ified by human developers and restricted by physical realizations, and may thus
+be subject to dramatic changes over time (e.g. increased number of observable
+features). However, when the observation space changes, the previous policy will
+likely fail due to the mismatch of input features, and another policy must be trained
+from scratch, which is inefficient in terms of computation and sample complexity.
+Following theoretical insights, we propose a novel algorithm which extracts the
+latent-space dynamics in the source task, and transfers the dynamics model to the
+target task to use as a model-based regularizer. Our algorithm works for drastic
+changes of observation space (e.g. from vector-based observation to image-based
+observation), without any inter-task mapping or any prior knowledge of the target
+task. Empirical results show that our algorithm significantly improves the effi-
+ciency and stability of learning in the target task.
+1
+INTRODUCTION
+Deep Reinforcement Learning (DRL) has the potential to be used in many large-scale applications
+such as robotics, gaming and automotive. In these real-life scenarios, it is an essential ability for
+agents to utilize the knowledge learned in past tasks to facilitate learning in unseen tasks, which is
+known as Transfer RL (TRL). Most existing TRL works (Taylor & Stone, 2009; Zhu et al., 2020)
+focus on tasks with the same state-action space but different dynamics/reward. However, these
+approaches do not apply to the case where the observation space changes significantly.
+Observation change is common in practice as in the following scenarios. (1) Incremental environ-
+ment development. RL is used to train non-player characters (NPC) in games (Juliani et al., 2018),
+which may be frequently updated. When there are new scenes, characters, or obstacles added to the
+game, the agent’s observation space will change accordingly. (2) Hardware upgrade/replacement.
+For robots with sensory observations (Bohez et al., 2017), the observation space could change (e.g.
+from text to audio, from lidar to camera) as the sensor changes. (3) Restricted data access. In some
+RL applications (Ganesh et al., 2019), agent observation contains sensitive data (e.g. inventory)
+which may become unavailable in the future due to data restrictions. In these cases, the learner may
+have to discard the old policy and train a new policy from scratch, as the policy has a significantly
+different input space, even though the underlying dynamics are similar. But training an RL policy
+from scratch can be expensive and unstable. Therefore, there is a crucial need for a technique that
+transfers knowledge across tasks with similar dynamics but different observation spaces.
+Besides these existing common applications, there are more benefits of across-observation transfer.
+For example, observations in real-world environments are usually rich and redundant, so that directly
+learning a policy is hard and expensive. If we can transfer knowledge from low-dimensional and
+informative vector observations (usually available in a simulator) to richer observations, the learning
+efficiency can be significantly improved. Therefore, an effective transfer learning method enables
+many novel and interesting applications, such as curriculum learning via observation design.
+In this paper, we aim to fill the gap and propose a new algorithm that can automatically transfer
+knowledge from the old environment to facilitate learning in a new environment with a (drastically)
+∗The work was done while the author was an intern at Unity Technologies.
+1
+Published as a conference paper at ICLR 2022
+1
+2
+3
+Me: (1,1)
+Goal: (4,3)
+Representation Learning
+Observed features
+Policy Learning
+1
+2
+3
+4
+same
+latent
+state
+Source
+Target
+transfer
+learning
+Figure 1: An example of the transfer problem with changed observation space. The source-task agent observes
+the x-y coordinates of itself and the goal, while the target-task agent observes a top-down view/image of the
+whole maze. The two observation spaces are drastically different, but the two tasks are structurally similar. Our
+goal is to transfer knowledge from the source task to accelerate learning in the target task, without knowing or
+learning any inter-task mapping.
+different observation space. In order to meet more practical needs, we focus on the challenging
+setting where the observation change is: (1) unpredictable (there is no prior knowledge about
+how the observations change), (2) drastic (the source and target tasks have significantly different
+observation feature spaces, e.g., vector to image), and (3) irretrievable (once the change happens,
+it is impossible to query the source task, so that the agent can not interact with both environments
+simultaneously). Note that different from many prior works (Taylor et al., 2007; Mann & Choe,
+2013), we do not assume the knowledge of any inter-task mapping. That is, the agent does not know
+which new observation feature is corresponding the which old observation feature.
+To remedy the above challenges and achieve knowledge transfer, we make a key observation that,
+if only the observation features change, the source and target tasks share the same latent space and
+dynamics (e.g. in Figure 1, O(S) and O(T ) can be associated to the same latent state). Therefore,
+we first disentangle representation learning from policy learning, and then accelerate the target-task
+agent by regularizing the representation learning process with the latent dynamics model learned in
+the source task. We show by theoretical analysis and empirical evaluation that the target task can be
+learned more efficiently with our proposed transfer learning method than from scratch.
+Summary of Contributions. (1) To the best of our knowledge, we are the first to discuss the transfer
+problem where the source and target tasks have drastically different observation feature spaces,
+and there is no prior knowledge of an inter-task mapping. (2) We theoretically characterize what
+constitutes a “good representation” and analyze the sufficient conditions the representation should
+satisfy. (3) Theoretical analysis shows that a model-based regularizer enables efficient representation
+learning in the target task. Based on this, we propose a novel algorithm that automatically transfers
+knowledge across observation representations. (4) Experiments in 7 environments show that our
+proposed algorithm significantly improves the learning performance of RL agents in the target task.
+2
+PRELIMINARIES AND BACKGROUND
+Basic RL Notations. An RL task can be modeled by a Markov Decision Process (MDP) (Puterman,
+2014), defined as a tuple M = ⟨O, A, P, R, γ⟩, where O is the state/observation space, A is the
+action space, P is the transition kernel, R is the reward function and γ is the discount factor. At
+timestep t, the agent observes state ot, takes action at based on its policy π : O →∆(A)(where ∆(·)
+denotes the space of probability distributions), and receives reward rt = R(ot, at). The environment
+then proceeds to the next state ot+1 ∼P(·|ot, at). The goal of an RL agent is to find a policy
+π in the policy space Π with the highest cumulative reward, which is characterized by the value
+functions. The value of a policy π for a state o ∈O is defined as V π(o) = Eπ,P [P∞
+t=0 γtrt|o0 =
+o]. The Q value of a policy π for a state-action pair (o, a) ∈O × A is defined as Qπ(o, a) =
+Eπ,P [P∞
+t=0 γtrt|o0 = o, a0 = a]. Appendix A provides more background of RL.
+Representation Learning in RL. Real-world applications usually have large observation spaces
+for which function approximation is needed to learn the value or the policy. However, directly
+learning a policy over the entire observation space could be difficult, as there is usually redundant
+information in the observation inputs. A common solution is to map the large-scale observation
+into a smaller representation space via a non-linear encoder (also called a representation mapping)
+2
+Published as a conference paper at ICLR 2022
+ϕ : O →Rd, where d is the representation dimension, and then learn the policy/value function over
+the representation space ϕ(O). In DRL, the encoder and the policy/value are usually jointly learned.
+3
+PROBLEM SETUP: TRANSFER ACROSS DIFFERENT OBSERVATION SPACES
+We aim to transfer knowledge learned from a source MDP to a target MDP, whose observation
+spaces are different while dynamics are structurally similar. Denote the source MDP as M(S) =
+⟨O(S), A, P (S), R(S), γ⟩, and the target MDP as M(T ) = ⟨O(T ), A, P (T ), R(T ), γ⟩. Note that O(S) and
+O(T ) can be significantly different, such as O(S) being a low-dimensional vector space and O(T ) being
+a high-dimensional pixel space, which is challenging for policy transfer since the source target policy
+have different input shapes and would typically be very different architecturally.
+In this work, as motivated in the Introduction, we focus on the setting wherein the dynamics
+((P (S), R(S)) and (P (T ), R(T ))) of the two MDPs between which we transfer knowledge are defined on
+different observation spaces but share structural similarities. Specifically, we make the assumption
+that there exists a mapping between the source and target observation spaces such that the transition
+dynamics under the mapping in the target task share the same transition dynamics as in the source
+task. We formalize this in Assumption 1:
+Assumption 1. There exists a function f : O(T ) →O(S) such that ∀o
+(T )
+i , o
+(T )
+j
+∈O(T ), ∀a ∈A,
+P
+(T )(o
+(T )
+j |o
+(T )
+i , a) = P
+(S)(f(o
+(T )
+j )|f(o
+(T )
+i ), a),
+R
+(T )(o
+(T )
+i , a) = R
+(S)(f(o
+(T )
+i ), a).
+Remarks. (1) Assumption 1 is mild as many real-world scenarios fall under this assumption. For
+instance, when upgrading the cameras of a patrol robot to have higher resolutions, such a mapping
+f can be a down-sampling function. (2) f is a general function without extra restrictions. f can be a
+many-to-one mapping, i.e., more than one target observations can be related to the same observation
+in the source task. f can be non-surjective, i.e., there could exist source observations that do not
+correspond to any target observation.
+Many prior works (Mann & Choe, 2013; Brys et al., 2015) have similar assumptions, but require
+prior knowledge of such an inter-task mapping to achieve knowledge transfer. However, such a
+mapping might not be available in practice. As an alternative, we propose a novel transfer algorithm
+in the next section that does not assume any prior knowledge of the mapping f. The proposed
+algorithm learns a latent representation of the observations and a dynamics model in this latent
+space, and then the dynamics model is transferred to speed up learning in the target task.
+4
+METHODOLOGY: TRANSFER WITH REGULARIZED REPRESENTATION
+In this section, we first formally characterize “what a good representation is for RL” in Section 4.1,
+then introduce our proposed transfer algorithm based on representation regularization in Section 4.2,
+and next provide theoretical analysis of the algorithm in Section 4.3.
+4.1
+CHARACTERIZING CONDITIONS FOR GOOD REPRESENTATIONS
+As discussed in Section 2, real-world applications usually have rich and redundant observations,
+where learning a good representation (Jaderberg et al., 2016; Dabney et al., 2020) is essential for
+efficiently finding an optimal policy. However, the properties that constitute a good representation
+for an RL task are still an open question. Some prior works (Bellemare et al., 2019; Dabney et al.,
+2020; Gelada et al., 2019) have discussed the representation quality in DRL, but we take a different
+perspective and focus on characterizing the sufficient properties of representation for learning a task.
+Given a representation mapping ϕ, the Q value of any (o, a) ∈O × A can be approximately rep-
+resented by a function of ϕ(o), i.e., ˆ
+Q(o, a) = h(ϕ(o); θa), where h is a function parameterized by
+θa. To study the relation between representation quality and approximation quality, we define an
+approximation operator Hϕ, which finds the best Q-value approximation based on ϕ. Formally, let
+Θ denote the parameter space of function h ∈H, then ∀a ∈A, HϕQ(o, a) := h(ϕ(o); θ∗
+a), where
+θ∗
+a = argminθ∈ΘEo[∥h(ϕ(o); θ) −Q(ϕ(o), a)∥]. Such a function h can be realized by neural net-
+works as universal function approximators (Hornik et al., 1989). Therefore, the value approximation
+error ∥Q −HϕQ∥only depends on the representation quality, i.e., whether we can represent the Q
+value of any state o as a function of the encoded state ϕ(o).
+3
+Published as a conference paper at ICLR 2022
+The quality of the encoder ϕ is crucial for learning an accurate value function or learning a good
+policy. The ideal encoder ϕ should discard irrelevant information in the raw observation but keep
+essential information. In supervised or self-supervised representation learning (Chen et al., 2020;
+Achille & Soatto, 2018), it is believed that a good representation ϕ(X) of input X should con-
+tain minimal information of X which maintaining sufficient information for predicting the label Y .
+However, in RL, it is difficult to identify whether a representation is sufficient, since there is no label
+corresponding to each input. The focus of an agent is to estimate the value of each input o ∈O,
+which is associated with some policy. Therefore, we point out that the representation quality in RL
+is policy-dependent. Below, we formally characterize the sufficiency of a representation mapping in
+terms of a fixed policy and learning a task.
+Sufficiency for A Fixed Policy. If the agent is executing a fixed policy, and its goal is to estimate the
+expected future return from the environment, then a representation is sufficient for the policy as long
+as it can encode the policy value Vπ. A formal definition is provided by Definition 9 in Appendix B.
+Sufficiency for Learning A Task. The goal of RL is to find an optimal policy. Therefore, it is
+not adequate for the representation to only fit one policy. Intuitively, a representation mapping is
+sufficient for learning if we are able to find an optimal policy over the representation space ϕ(O),
+which requires multiple iterations of policy evaluation and policy improvement. Definition 2 below
+defines a set of “important” policies for learning with ϕ(O).
+Definition 2 (Encoded Deterministic Policies). For a given representation mapping ϕ(·), define an
+encoded deterministic policy set ΠD
+ϕ as the set of policies that are deterministic and take the same
+actions for observations with the same representations. Formally,
+ΠD
+ϕ := {π ∈Π
+|
+∃˜
+π : ϕ(O) →A s.t. ∀o ∈O, π(o) = ˜
+π(ϕ(o))},
+(1)
+where ˜
+π is a mapping from the representation space to the action space.
+A policy π is in ΠD
+ϕ if it does not distinguish o1 and o2 when ϕ(o1) = ϕ(o2). Therefore, ΠD
+ϕ can
+be regarded as deterministic policies that make decisions for encoded observations. Now, we define
+the concept of sufficient representation for learning in an MDP.
+Definition 3 (Sufficient Representation for Learning). A representation mapping ϕ is sufficient for
+a task M w.r.t. approximation operator Hϕ if HϕQπ = Qπ for all π ∈ΠD
+ϕ . Furthermore,
+• ϕ is linearly-sufficient for learning M if ∃θa s.t. Qπ(o, a) = ϕ(o)⊤θa, ∀a ∈A, π ∈ΠD
+ϕ .
+• ϕ is ϵ-sufficient for learning M if ∥HϕQπ −Qπ∥≤ϵ, ∀π ∈ΠD
+ϕ .
+Definition 3 suggests that the representation is sufficient for learning a task as long as it is sufficient
+for policies in ΠD
+ϕ . Then, the lemma below justifies that a nearly sufficient representation can ensure
+that approximate policy iteration converges to a near-optimal solution. (See Appendix D for analysis
+on approximate value iteration.)
+Lemma 4 (Error Bound for Approximate Policy Iteration). If ϕ is ϵ-sufficient for task M (with ℓ∞
+norm), then the approximated policy iteration with approximation operator Hϕ starting from any
+initial policy that is encoded by ϕ (π0 ∈ΠD
+ϕ ) satisfies
+lim sup
+k→∞
+∥Q∗−Qπk∥∞≤
+2γ2ϵ
+(1 −γ)2 ,
+(2)
+where πk is the policy in the k-th iteration.
+Lemma 4, proved in Appendix C, is extended from the error bound provided by Bertsekas & Tsit-
+siklis (1996). For simplicity, we consider the bound in ℓ∞, but tighter bounds can be derived with
+other norms (Munos, 2005), although a tighter bound is not the focus of this paper.
+How Can We Learn A Sufficient Representation? So far we have provided a principle to define
+whether a given representation is sufficient for learning. In DRL, the representation is learned to-
+gether with the policy or value function using neural networks, but the quality of the representation
+may be poor (Dabney et al., 2020), which makes it hard for the agent to find an optimal policy.
+Based on Definition 3, a natural method to learn a good representation is to let the representation fit
+as many policy values as possible as auxiliary tasks, which matches the ideas in other works. For ex-
+ample, Bellemare et al. (2019) propose to fit a set of representative policies (called adversarial value
+functions). Dabney et al. (2020) choose to fit the values of all past policies (along the value improve-
+ment path), which requires less computational resource. Different from these works that directly fit
+4
+Published as a conference paper at ICLR 2022
+Algorithm 1 Source Task Learning
+Require: Regularization weight λ; update frequency m for stable encoder.
+1: Initialize encoder ϕ(S), stable encoder ˆ
+ϕ(S), policy π(S), transition prediction network ˆ
+P and
+reward prediction network ˆ
+R.
+2: for t = 0, 1, · · · do
+3:
+Take action at ∼π(S)(ϕ(S)(o
+(S)
+t )), get next observation o
+(S)
+t+1 and reward rt, store to buffer.
+4:
+Sample a mini-batch {oi, ai, ri, o′
+i}N
+i=1 from the buffer.
+5:
+Update ˆ
+P and ˆ
+R using one-step gradient descent with ∇ˆ
+P LP (ˆ
+ϕ(S); ˆ
+P) and ∇ˆ
+RLR(ˆ
+ϕ(S); ˆ
+R),
+where LP and LR are defined in Equation (3).
+6:
+Update encoder and policy by minπ(S),ϕ(S) Lbase(ϕ(S), π(S))+λ
+ LP (ϕ(S); ˆ
+P)+LR(ϕ(S); ˆ
+R)
+
+.
+7:
+if t | m then Update the stable encoder ˆ
+ϕ(S) ←ϕ(S).
+Algorithm 2 Target Task Learning with Transferred Dynamics Models
+Require: Regularization weight λ; dynamics models ˆ
+P and ˆ
+R learned in the source task.
+1: Initialize encoder ϕ(T ), policy π(T )
+2: for t = 0, 1, · · · do
+3:
+Take action at ∼π(T )(ϕ(T )(o
+(T )
+t )), get next observation o
+(T )
+t+1 and reward rt, store to buffer.
+4:
+Sample a mini-batch {oi, ai, ri, o′
+i}N
+i=1 from the buffer.
+5:
+Update encoder and policy by minϕ(T ),π(T ) Lbase(ϕ(T ), π(T ))+λ
+ LP (ϕ(T ); ˆ
+P)+LR(ϕ(T ); ˆ
+R)),
+where LP and LR are defined in Equation (3).
+the value functions of multiple policies, in Section 4.2, we propose to fit and transfer an auxiliary
+policy-independent dynamics model, which is an efficient way to achieve sufficient representation
+for learning and knowledge transfer, as theoretically justified in Section 4.3.
+4.2
+ALGORITHM: LEARNING AND TRANSFERRING MODEL-BASED REGULARIZER
+Our goal is to use the knowledge learned in the source task to learn a good representation in the
+target task, such that the agent learns the target task more easily than learning from scratch. Since
+we focus on developing a generic transfer mechanism, the base learner can be any DRL algorithms.
+We use Lbase to denote the loss function of the base learner.
+As motivated in Section 4.1, we propose to learn policy-independent dynamics models for producing
+high-quality representations: (1) ˆ
+P which predicts the representation of the next state based on
+current state representation and action, and (2) ˆ
+R which predicts the immediate reward based on
+current state representation and action. For a batch of N transition samples {oi, ai, o′
+i, ri}N
+i=1, define
+the transition loss and the reward loss as:
+LP (ϕ, ˆ
+P) = 1
+N
+N
+X
+i=1
+( ˆ
+P(ϕ(oi), ai) −¯
+ϕ(o′
+i))2,
+LR(ϕ, ˆ
+R) = 1
+N
+N
+X
+i=1
+( ˆ
+R(ϕ(oi), ai) −ri)2
+(3)
+where ¯
+ϕ(o′
+i) denotes the representation of the next state o′
+i with stop gradients. In order to fit a
+more diverse state distribution, transition samples are drawn from an off-policy buffer, which stores
+shuffled past trajectories.
+Encoder
+Policy/Value
+Dynamics
+ / 
+
+Shared
+Across
+Tasks
+stop
+gradients
+Figure 2: The architecture of proposed method.
+ˆ
+P and ˆ
+R are learned in the source task, then trans-
+ferred to the target task and fixed during training.
+The learning procedures for the source task and the
+target task are illustrated in Algorithm 1 and Algo-
+rithm 2, respectively. Figure 2 depicts the architec-
+ture of the learning model for both source and tar-
+get tasks. z = ϕ(o) and z′ = ¯
+ϕ(o′) are the en-
+coded observation and next observation. Given the
+current encoding z and the action a, the dynamics
+models ˆ
+P and ˆ
+R return the predicted next encoding
+ˆ
+z′ = ˆ
+P(z, a) and predicted reward ˆ
+r = ˆ
+R(z, a).
+Then the transition loss is the mean squared error
+(MSE) between z′ and ˆ
+z′ in a batch; the reward loss
+is the MSE between r and ˆ
+r in a batch.
+5
+Published as a conference paper at ICLR 2022
+In the source task (Algorithm 1): dynamics models ˆ
+P and ˆ
+R are learned by minimizing LP and
+LR, which are computed based on a recent copy of encoder called stable encoder ˆ
+ϕ(S) (Line 5). The
+computation of the stable encoder is to help the dynamics models converge, as the actual encoder ϕ(S)
+changes at every step. Note that a stable copy of the network is widely used in many DRL algorithms
+(e.g. the target network in DQN), which can be directly regarded as ˆ
+ϕ(S) without maintaining an extra
+network. The actual encoder ϕ(S) is regularized by the auxiliary dynamics models ˆ
+P and ˆ
+R (Line 6).
+In the target task (Algorithm 2): dynamics model ˆ
+P and ˆ
+R are transferred from the source task
+and fixed during learning. Therefore, the learning of ϕ(T ) is regularized by static dynamics models,
+which leads to faster and more stable convergence than naively learning an auxiliary task.
+Relation and Difference with Model-based RL and Bisimulation Metrics. Learning a dynamics
+model is a common technique in model-based RL (Kipf et al., 2019; Grimm et al., 2020), whose
+goal is to learn an accurate world model and use the model for planning. The dynamics model
+could be learned on either raw observations or representations. In our framework, we also learn a
+dynamics model, but the model serves as an auxiliary task, and learning is still performed by the
+model-free base learner with Lbase. Bisimulation methods (Castro, 2020; Zhang et al., 2020b) aim to
+approximate the bisimulation distances among states by learning dynamics models, whereas we do
+not explicitly measure the distance among states. Note that we also do not require a reconstruction
+loss that is common in literature (Lee et al., 2019).
+4.3
+THEORETICAL ANALYSIS: BENEFITS OF TRANSFERABLE DYNAMICS MODEL
+The algorithms introduced in Section 4.2 consist of two designs: learning a latent dynamics model
+as an auxiliary task, and transferring the dynamics model to the target task. In this section, we show
+theoretical justifications and practical advantages of our proposed method. We aim to answer the fol-
+lowing two questions: (1) How does learning an auxiliary dynamics model help with representation
+learning? (2) Is the auxiliary dynamics model transferable?
+For notational simplicity, let Pa and Ra denote the transition and reward functions associated with
+action a ∈A. Note that Pa and Ra are independent of any policy. We then define the sufficiency of
+a representation mapping w.r.t. dynamics models as below.
+Definition 5 (Policy-independent Model Sufficiency). For an MDP M, a representation mapping
+ϕ is sufficient for its dynamics (Pa, Ra)a∈A if ∀a ∈A, there exists functions ˆ
+Pa : Rd →Rd and
+ˆ
+Ra : Rd →R such that ∀o ∈O, ˆ
+Pa(ϕ(o)) = Eo′∼Pa(o)[ϕ(o′)], ˆ
+Ra(ϕ(o)) = Ra(o).
+Remarks. (1) ϕ is exactly sufficient for dynamics (Pa, Ra)a∈A when the transition function P is
+deterministic. (2) If P is stochastic, but we have maxo,a ∥Eo′∼Pa(o)[ϕ(o′)] −ˆ
+Pa(ϕ(o))∥≤ϵP and
+maxo,a |Ra(o) −ˆ
+Ra(ϕ(o))| ≤ϵR, then ϕ is (ϵP , ϵR)-sufficient for the dynamics of M.
+Next we show by Proposition 6 and Theorem 7 that learning sufficiency can be achieved via ensuring
+model sufficiency.
+Proposition 6 (Learning Sufficiency Induced by Policy-independent Model Sufficiency). Consider
+an MDP M with deterministic transition function P and reward function R. If ϕ is sufficient for
+(Pa, Ra)a∈A, then it is sufficient (but not necessarily linearly sufficient) for learning in M.
+Proposition 6 shows that, if the transition is deterministic and the model errors LP , LR are zero, then
+ϕ is exactly sufficient for learning. More generally, if the transition function P is not deterministic,
+and model fitting is not perfect, the learned representation can still be nearly sufficient for learning
+as characterized by Theorem 7 below, which is extended from a variant of the value difference
+bound derived by Gelada et al. (2019). Proposition 6 and Theorem 7 justify that learning the latent
+dynamics model as an auxiliary task encourages the representation to be sufficient for learning. The
+model error LP and LR defined in Section 4.2 can indicate how good the representation is.
+Theorem 7. For an MDP M, if representation mapping ϕ is (ϵP , ϵR)-sufficient for the dynamics
+of M, then approximate policy iteration with approximation operator Hϕ starting from any initial
+policy π0 ∈ΠD
+ϕ satisfies
+lim sup
+k→∞
+∥Q∗−Qπk∥∞≤
+2γ2
+(1 −γ)3 (ϵR + γϵP Kϕ,V ).
+(4)
+where Kϕ,V is an upper bound of the value Lipschitz constant as defined in Appendix B.
+6
+Published as a conference paper at ICLR 2022
+Transferring Model to Get Better Representation in Target. Although Proposition 6 shows that
+learning auxiliary dynamics models benefits representation learning, finding the optimal solution is
+non-trivial since one still has to learn ˆ
+P and ˆ
+R. Therefore, the main idea of our algorithm is to
+transfer the dynamics models ˆ
+P, ˆ
+R from the source task to the target task, to ease the learning in
+the target task. Theorem 8 below guarantees that transferring the dynamics models is feasible. Our
+experimental result in Section 6 verifies that learning with transferred and fixed dynamics models
+outperforms learning with randomly initialized dynamics models.
+Theorem 8 (Transferable Dynamics Models). Consider a source task M (S) and a target task M (T )
+with deterministic transition functions. Suppose ϕ(S) is sufficient for (P (S)
+a , R(S)
+a )a∈A with func-
+tions ˆ
+Pa, ˆ
+Ra, then there exists a representation ϕ(T ) satisfying ˆ
+Pa(ϕ(o)) = Eo′∼P (T )
+a
+(o)[ϕ(o′)],
+ˆ
+Ra(ϕ(o)) = R(T )
+a (o), for all o ∈O(T ), and ϕ(T ) is sufficient for learning in M (T ).
+Theorem 8 shows that the learned latent dynamics models ˆ
+P, ˆ
+R are transferable from the source
+task to the target task. For simplicity, Theorem 8 focuses on exact sufficiency as in Proposition 6,
+but it can be easily extended to ϵ-sufficiency if combined with Theorem 7. Proofs for Proposition 6,
+Theorem 7 and Theorem 8 are all provided in Appendix C.
+Trade-off between Approximation Complexity and Representation Complexity. As suggested
+by Proposition 6, fitting policy-independent dynamics encourages the representation to be sufficient
+for learning, but not necessarily linearly sufficient. Therefore, we suggest using a non-linear pol-
+icy/value head following the representation to reduce the approximation error. Linear sufficiency
+can be achieved if ϕ is made linearly sufficient for Pπ and Rπ for all π ∈ΠD
+ϕ , where Pπ and Rπ are
+transition and reward functions induced by policy π (Proposition 10, Appendix B). However, using
+this method for transfer learning is expensive in terms of both computation and memory, as it re-
+quires to learn Pπ and Rπ for many different π’s and store these models for transferring to the target
+task. Therefore, there is a trade-off between approximation complexity and representation com-
+plexity. Learning a linearly sufficient representation reduces the complexity of the approximation
+operator. But it requires more complexity in the representation itself as it has to satisfy much more
+constraints. To develop a practical and efficient transfer method, we use a slightly more complex
+approximation operator (non-linear policy head) while keeping the auxiliary task simple and easy to
+transfer across tasks. Please see Appendix B for more detailed discussion about linear sufficiency.
+5
+RELATED WORK
+Transfer RL across Observation Feature Spaces. Transferring knowledge between tasks with
+different observation spaces has been studied for years. Many existing approaches(Taylor et al.,
+2007; Mann & Choe, 2013; Brys et al., 2015) require an explicit mapping between the source and
+target observation spaces, which may be hard to obtain in practice. Raiman et al. (2019) introduce
+network surgery that deals with the change in the input features by determining which components
+of a neural network model should be transferred and which require retraining. However, it requires
+knowledge of the input feature maps, and is not designed for drastic changes, e.g. vector to pixel.
+Sun et al. (2020) propose a provably sample-efficient transfer learning algorithm that works for
+different observation spaces without knowing any inter-task mapping, but the algorithm is mainly
+designed for tabular RL and model-based RL which uses the model to plan for a policy, differ-
+ent from our setting. Gupta et al. (2017) achieve transfer learning between two different tasks by
+learning an invariant feature space, with a key time-based alignment assumption. We empirically
+compared this method with our proposed transfer algorithm in Section 6. Our work is also related
+to state abstraction in block MDPs, as studied by Zhang et al. (2020a). But the problem studied
+in Zhang et al. (2020a) is a multi-task setting where the agent aims to learn generalizable abstract
+states from a series of tasks. Another related topic is domain adaptation in RL (Higgins et al., 2017;
+Eysenbach et al., 2020; Zhang et al., 2020b), where the target observation space (e.g. real world) is
+different from the source observation (e.g. simulator). However, domain adaptation does not assume
+drastic observation changes (e.g. changed dimension). Moreover, the aim of domain adaptation is
+usually zero-shot generalization to new observations, thus prior knowledge or a few samples of the
+target domain is often needed (Eysenbach et al., 2020).
+Representation Learning in RL. In environments with rich observations, representation learning
+is crucial for the efficiency of RL methods. Learning unsupervised auxiliary tasks (Jaderberg et al.,
+2016) is shown to be effective for learning a good representation. The relationship between learning
+7
+Published as a conference paper at ICLR 2022
+policy-dependent auxiliary tasks and learning good representations has been studied in some prior
+works (Bellemare et al., 2019; Dabney et al., 2020; Lyle et al., 2021), while our focus is to learn
+policy-independent auxiliary tasks to facilitate transfer learning. Using latent prediction models to
+regularize representation has been shown to be effective for various types of rich observations (Guo
+et al., 2020; Lee et al., 2019). Gelada et al. (2019) theoretically justify that learning latent dy-
+namics model guarantees the quality of the learned representation, while we further characterize
+the relationship between representation and learning performance, and we utilize dynamics models
+to improve transfer learning. Zhang et al. (2020b) use a bisimulation metric to learn latent rep-
+resentations that are invariant to task-irrelevant details in observation. As pointed out by Achille
+& Soatto (2018), invariant and sufficient representation is indeed minimal sufficient, so it is an
+interesting future direction to combine our method with bisimulation metric to learn minimal suf-
+ficient representations. There is also a line of work using contrastive learning to train an encoder
+for pixel observations (Srinivas et al., 2020; Yarats et al., 2021; Stooke et al., 2021), which usually
+pre-train an encoder based on image samples using self-supervised learning. However, environment
+dynamics are usually not considered during pre-training. Our algorithm can be combined with these
+contrastive learning approaches to further improve learning performance in the target task.
+6
+EXPERIMENTAL EVALUATION
+We empirically evaluate our transfer learning algorithm in various environments and multiple
+observation-change scenarios. Detailed experiment setup and hyperparameters are in Appendix E.
+Baselines. To verify the effectiveness of our proposed transfer learning method, we compare our
+transfer learning algorithm with 4 baselines: (1) Single: a single-task base learner. (2) Auxiliary:
+learns auxiliary models from scratch to regularize representation. (3) Fine-tune: loads and freezes
+the source policy head, and retrains an encoder in the target task. (4) Time-aligned (Gupta et al.,
+2017): supposes the target task and the source task proceed to the same latent state given the same
+action sequence, and pre-trains a target-task encoder with saved source-task trajectories. More de-
+tails of baseline implementations are in Appendix E.1.1.
+Scenarios. As motivated in Section 1, there are many scenarios where one can benefit from transfer
+learning across observation feature spaces. We evaluate our proposed transfer algorithm in 7 envi-
+ronments that fit various scenarios, to simulate real-world applications:
+(1) Vec-to-pixel: a novel and challenging scenario, where the source task has low-dimensional vector
+observations and the target task has pixel observations. We use 3 vector-input environments Cart-
+Pole, Acrobot and Cheetah-Run as source tasks, and use the rendered image in the target task.
+(2) More-sensor: another challenging scenario where the target task has a lot more sensors than the
+source task. We use 3 MuJoCo environments: HalfCheetah, Hopper and Walker2d, whose origi-
+nal observation dimensions are 17, 11 and 17, respectively. We add mass-based inertia and velocity
+(provided by MuJoCo’s API), resulting in 145, 91, 145 dimensions in the corresponding target tasks.
+(3) Broken-sensor: we use an existing game 3DBall contained in the Unity ML-Agents Toolkit (Ju-
+liani et al., 2018), which has two different observation specifications that naturally fit our transfer
+setting: the source observation has 8 features containing the velocity of the ball; the target obser-
+vation does not have the ball’s velocity, thus the agent has to stack the past 9 frames to infer the
+velocity. Please see Appendix E.1.2 for more detailed descriptions of all the 7 environments.
+Base DRL Learners. What we propose is a transfer learning mechanism that can be combined with
+any existing DRL methods. For environments with discrete action spaces (CartPole, Acrobot), we
+use the DQN algorithm (Mnih et al., 2015), while for environments with continuous action spaces
+(Cheetah-Run, HalfCheetah, Hopper, Walker2d, 3DBall), we use the SAC algorithm (Haarnoja et al.,
+2018). To ensure a fair comparison, we use the same base DRL learner with the same hyperparam-
+eter settings for all tested methods, as detailed in Appendix E.1.3. As is common in prior works,
+our implementation of the RL algorithms is mostly a proof of concept, thus many advanced training
+techniques are not included (e.g. Rainbow DQN).
+Results. Experimental results on all tested environments are shown in Figure 3. We can see that
+our proposed transfer method learns significantly better than the single-task learner, and also outper-
+forms all baselines in the challenging target tasks. Our transfer method outperforms Auxiliary since
+it transfers dynamics model from the source task instead of learning it from scratch, and outper-
+forms Fine-tine since it regularizes the challenging encoder learning with a model-based regularizer.
+8
+Published as a conference paper at ICLR 2022
+0
+50
+100
+150
+200
+250
+50
+100
+150
+Episodes
+Return
+Vec-to-pixel: CartPole
+Source
+Transfer (ours)
+Single
+Auxiliary
+Finetune
+Time-aligned
+0k
+250k
+500k
+750k
+1000k
+1250k
+−500
+−400
+−300
+−200
+−100
+Steps
+Return
+Vec-to-pixel: Acrobot
+Source (oracle)
+Transfer (ours)
+Single
+Auxiliary
+Fine-tune
+Time-aligned
+0k
+250k
+500k
+200
+400
+600
+800
+Steps
+Returns
+Vec-to-pixel: Cheetah-Run
+Source
+Without Transfer
+With Transfer
+Auxiliary Tasks
+0k
+200k
+400k
+600k
+800k
+1000k
+0
+1,000
+2,000
+3,000
+4,000
+5,000
+steps
+More-sensor: HalfCheetah
+0k
+200k
+400k
+600k
+800k
+1000k
+1,000
+2,000
+3,000
+steps
+More-sensor: Hopper
+0k
+200k
+400k
+600k
+800k
+1000k
+1,000
+2,000
+3,000
+4,000
+steps
+More-sensor: Walker2d
+50k
+100k
+150k
+200k
+250k
+300k
+350k
+·105
+0
+20
+40
+60
+80
+100
+Steps
+Broken-sensor: 3DBall
+Figure 3: Our proposed transfer method outperforms all baselines in target tasks over all tested scenarios. (The
+dashed green lines are the learning curves in source tasks.) Results are averaged over 10 random seeds.
+The Time-aligned method, although requires additional pre-training that is not shown in the figures,
+does not work better than Single in most environments, because the time-based alignment assump-
+tion may not hold as discussed in Appendix E.1.1. In some environments (e.g. Hopper, Walker2d,
+3DBall), our transfer algorithm even achieves better asymptotic performance than the source-task
+policy, which suggests that our method can be used for improving the policy with incremental obser-
+vation design. To the best of our knowledge, we are the first to achieve effective knowledge transfer
+from a vector-input environment to a pixel-input environment without any pre-defined mappings.
+0k
+200k
+400k
+600k
+800k
+1000k
+0
+1,000
+2,000
+3,000
+4,000
+5,000
+Steps
+Return
+HalfCheetah
+Our Method
+Transfer ˆ
+P only
+Transfer ˆ
+R only
+Single
+Figure 4: Ablation Study
+Ablation Study and Hyper-parameter Test. To verify the
+effectiveness of proposed transfer method, we conduct abla-
+tion study and compare our method with its two variants: only
+transferring the transition model ˆ
+P and only transferring the
+reward model ˆ
+R. Figure 4 shows the comparison in HalfChee-
+tah, and Appendix E.2 demonstrates more results. We find that
+all the variants of our method can make some improvements,
+which suggests that transferring ˆ
+P and ˆ
+R are both effective
+designs for accelerating the target task learning.
+Figure 6
+in Appendix E.2 shows another ablation study where we in-
+vestigate different selections of model regularizers and policy
+heads. In Algorithm 2, a hyper-parameter λ is needed to con-
+trol the weight of the transferred model-based regularizer. Figure 7 in Appendix E.2 shows that, for
+a wide range of λ’s, the agent consistently outperforms the single-task learner.
+Potential Limitations and Solutions. As Figure 3 shows, in some environments such as HalfChee-
+tah, our transfer algorithm significantly outperforms baselines without transfer. But in Walker2d,
+the improvement is less significant, although transferring is still better than not transferring. This
+phenomenon is common in model-based learning (Nagabandi et al., 2018), as state predicting in
+Walker2d is harder than that in HalfCheetah due to the complexity of the dynamics. Therefore, we
+suggest using our method to transfer when the learned models ( ˆ
+P, ˆ
+R) in the source task are rela-
+tively good (error is low). More techniques of improving model-based learning, such as bisimula-
+tion (Zhang et al., 2020b; Castro, 2020), can be applied to further improve the transfer performance.
+7
+CONCLUSION
+In this paper, we identify and propose a solution to an important but rarely studied problem: trans-
+ferring knowledge between tasks with drastically different observation spaces where inter-task map-
+pings are not available. We propose to learn a latent dynamics model in the source task and transfer
+the model to the target task to facilitate representation learning. Theoretical analysis and empirical
+study justify the effectiveness of the proposed algorithm.
+9
+Published as a conference paper at ICLR 2022
+ACKNOWLEDGEMENTS
+This work is supported by Unity Technologies, National Science Foundation IIS-1850220 CRII
+Award 030742-00001, DOD-DARPA-Defense Advanced Research Projects Agency Guaranteeing
+AI Robustness against Deception (GARD), and Adobe, Capital One and JP Morgan faculty fellow-
+ships.
+ETHICS STATEMENT
+Transfer learning aims to apply previously learned experience to new tasks to improve learning
+efficiency, which is becoming more and more important nowadays for training intelligent agents in
+complex systems. This paper focuses on a practical but rarely studied transfer learning scenario,
+where the observation feature space of an RL environment is subject to drastic changes. Driven
+by theoretical analysis on representation learning and its relation to latent dynamics learning, we
+propose a novel algorithm that transfers knowledge between tasks with totally different observation
+spaces, without any prior knowledge of an inter-task mapping.
+This work can benefit many applications as suggested by the examples below.
+(1) In many real-life environments where deep RL is used (e.g. navigating in a building), the under-
+lying dynamics (e.g. the structure of the building) are usually fixed, but what features the observation
+space has is designed by human developers (e.g. what sensors are installed) and thus may change
+frequently during the development. When the agent gets equipped with better sensors, our algorithm
+makes it possible to reuse previously learned models when learning with the new sensors.
+(2) An agent usually learns better with a compact observation space (e.g. a low-dimensional vector
+space containing its location and the goal’s location) than a rich/noisy observation space (e.g. an
+image containing the goal). However, a compact observation is usually more difficult to construct in
+practice as it may require expert knowledge and human work. In this case, one can extract compact
+observations in a few samples and pre-train a policy with our Algorithm 1, then train the agent in the
+real environment with rich observations with our Algorithm 2 using the learned dynamics models.
+Our experiment in Figure 3 shows that the learning efficiency in the rich-observation environment
+can be significantly improved with our proposed transfer method.
+REPRODUCIBILITY STATEMENT
+For theoretical results, we provide concrete proofs in Appendix C and Appendix D. For empirical re-
+sults, we illustrate implementation details in Appendix E. The source code and running instructions
+are provided in the supplementary materials.
+REFERENCES
+Alessandro Achille and Stefano Soatto. Emergence of invariance and disentanglement in deep rep-
+resentations. The Journal of Machine Learning Research, 19(1):1947–1980, 2018.
+Marc Bellemare, Will Dabney, Robert Dadashi, Adrien Ali Taiga, Pablo Samuel Castro, Nicolas
+Le Roux, Dale Schuurmans, Tor Lattimore, and Clare Lyle. A geometric perspective on optimal
+representations for reinforcement learning. Advances in neural information processing systems,
+32:4358–4369, 2019.
+D. P. Bertsekas and J. N. Tsitsiklis. Neuro-dynamic programming. Athena Scientific, Belmont, MA,
+1996.
+Steven Bohez, Tim Verbelen, Elias De Coninck, Bert Vankeirsbilck, Pieter Simoens, and Bart
+Dhoedt. Sensor fusion for robot control through deep reinforcement learning. In 2017 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS), pp. 2365–2370, 2017. doi:
+10.1109/IROS.2017.8206048.
+Tim Brys, Anna Harutyunyan, Matthew E Taylor, and Ann Now´
+e. Policy transfer using reward
+shaping. In AAMAS, pp. 181–188, 2015.
+10
+Published as a conference paper at ICLR 2022
+Pablo Samuel Castro.
+Scalable methods for computing state similarity in deterministic markov
+decision processes. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34,
+pp. 10069–10076, 2020.
+Ting Chen, Simon Kornblith, Mohammad Norouzi, and Geoffrey Hinton. A simple framework for
+contrastive learning of visual representations. In International conference on machine learning,
+pp. 1597–1607. PMLR, 2020.
+Will Dabney, Andr´
+e Barreto, Mark Rowland, Robert Dadashi, John Quan, Marc G. Bellemare, and
+David Silver. The value-improvement path: Towards better representations for reinforcement
+learning. CoRR, abs/2006.02243, 2020. URL https://arxiv.org/abs/2006.02243.
+Benjamin Eysenbach, Swapnil Asawa, Shreyas Chaudhari, Sergey Levine, and Ruslan Salakhutdi-
+nov. Off-dynamics reinforcement learning: Training for transfer with domain classifiers. arXiv
+preprint arXiv:2006.13916, 2020.
+Sumitra Ganesh, Nelson Vadori, Mengda Xu, Hua Zheng, Prashant Reddy, and Manuela Veloso.
+Reinforcement learning for market making in a multi-agent dealer market.
+arXiv preprint
+arXiv:1911.05892, 2019.
+Carles Gelada, Saurabh Kumar, Jacob Buckman, Ofir Nachum, and Marc G Bellemare. Deepmdp:
+Learning continuous latent space models for representation learning. In International Conference
+on Machine Learning, pp. 2170–2179. PMLR, 2019.
+Christopher Grimm, Andr´
+e Barreto, Satinder Singh, and David Silver. The value equivalence prin-
+ciple for model-based reinforcement learning. arXiv preprint arXiv:2011.03506, 2020.
+Zhaohan Daniel Guo, Bernardo Avila Pires, Bilal Piot, Jean-Bastien Grill, Florent Altch´
+e, R´
+emi
+Munos, and Mohammad Gheshlaghi Azar. Bootstrap latent-predictive representations for multi-
+task reinforcement learning. In International Conference on Machine Learning, pp. 3875–3886.
+PMLR, 2020.
+Abhishek Gupta, Coline Devin, YuXuan Liu, Pieter Abbeel, and Sergey Levine. Learning invariant
+feature spaces to transfer skills with reinforcement learning. arXiv preprint arXiv:1703.02949,
+2017.
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. Soft actor-critic: Off-policy
+maximum entropy deep reinforcement learning with a stochastic actor. In International confer-
+ence on machine learning, pp. 1861–1870. PMLR, 2018.
+Danijar Hafner, Timothy Lillicrap, Jimmy Ba, and Mohammad Norouzi. Dream to control: Learning
+behaviors by latent imagination. arXiv preprint arXiv:1912.01603, 2019.
+Irina Higgins, Arka Pal, Andrei Rusu, Loic Matthey, Christopher Burgess, Alexander Pritzel,
+Matthew Botvinick, Charles Blundell, and Alexander Lerchner. Darla: Improving zero-shot trans-
+fer in reinforcement learning. In International Conference on Machine Learning, pp. 1480–1490.
+PMLR, 2017.
+Kurt Hornik, Maxwell Stinchcombe, and Halbert White. Multilayer feedforward networks are uni-
+versal approximators.
+Neural Networks, 2(5):359–366, 1989.
+ISSN 0893-6080.
+doi: https:
+//doi.org/10.1016/0893-6080(89)90020-8.
+URL https://www.sciencedirect.com/
+science/article/pii/0893608089900208.
+Ronald A Howard. Dynamic programming and markov processes. 1960.
+Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czarnecki, Tom Schaul, Joel Z Leibo, David
+Silver, and Koray Kavukcuoglu. Reinforcement learning with unsupervised auxiliary tasks. arXiv
+preprint arXiv:1611.05397, 2016.
+Arthur Juliani, Vincent-Pierre Berges, Ervin Teng, Andrew Cohen, Jonathan Harper, Chris Elion,
+Chris Goy, Yuan Gao, Hunter Henry, Marwan Mattar, et al. Unity: A general platform for intelli-
+gent agents. arXiv preprint arXiv:1809.02627, 2018.
+11
+Published as a conference paper at ICLR 2022
+Thomas Kipf, Elise van der Pol, and Max Welling. Contrastive learning of structured world models.
+arXiv preprint arXiv:1911.12247, 2019.
+Alex X. Lee, Anusha Nagabandi, Pieter Abbeel, and Sergey Levine. Stochastic latent actor-critic:
+Deep reinforcement learning with a latent variable model. CoRR, abs/1907.00953, 2019. URL
+http://arxiv.org/abs/1907.00953.
+Clare Lyle, Mark Rowland, Georg Ostrovski, and Will Dabney. On the effect of auxiliary tasks on
+representation dynamics. In International Conference on Artificial Intelligence and Statistics, pp.
+1–9. PMLR, 2021.
+Timothy A Mann and Yoonsuck Choe. Directed exploration in reinforcement learning with trans-
+ferred knowledge. In European Workshop on Reinforcement Learning, pp. 59–76. PMLR, 2013.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Belle-
+mare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level
+control through deep reinforcement learning. Nature, 518(7540):529, 2015.
+R´
+emi Munos. Error bounds for approximate value iteration. In Proceedings of the National Confer-
+ence on Artificial Intelligence, volume 20, pp. 1006. Menlo Park, CA; Cambridge, MA; London;
+AAAI Press; MIT Press; 1999, 2005.
+Anusha Nagabandi, Gregory Kahn, Ronald S. Fearing, and Sergey Levine. Neural network dy-
+namics for model-based deep reinforcement learning with model-free fine-tuning.
+In 2018
+IEEE International Conference on Robotics and Automation (ICRA), pp. 7559–7566, 2018. doi:
+10.1109/ICRA.2018.8463189.
+Martin L Puterman. Markov decision processes: discrete stochastic dynamic programming. John
+Wiley & Sons, 2014.
+Jonathan Raiman, Susan Zhang, and Christy Dennison. Neural network surgery with sets. arXiv
+preprint arXiv:1912.06719, 2019.
+Aravind Srinivas, Michael Laskin, and Pieter Abbeel. Curl: Contrastive unsupervised representa-
+tions for reinforcement learning. arXiv preprint arXiv:2004.04136, 2020.
+Adam Stooke, Kimin Lee, Pieter Abbeel, and Michael Laskin. Decoupling representation learning
+from reinforcement learning. In International Conference on Machine Learning, pp. 9870–9879.
+PMLR, 2021.
+Yanchao Sun, Xiangyu Yin, and Furong Huang. Temple: Learning template of transitions for sample
+efficient multi-task rl. arXiv preprint arXiv:2002.06659, 2020.
+Yuval Tassa, Yotam Doron, Alistair Muldal, Tom Erez, Yazhe Li, Diego de Las Casas, David Bud-
+den, Abbas Abdolmaleki, Josh Merel, Andrew Lefrancq, et al. Deepmind control suite. arXiv
+preprint arXiv:1801.00690, 2018.
+Matthew E Taylor and Peter Stone. Transfer learning for reinforcement learning domains: A survey.
+Journal of Machine Learning Research, 10(7), 2009.
+Matthew E Taylor, Peter Stone, and Yaxin Liu. Transfer learning via inter-task mappings for tem-
+poral difference learning. Journal of Machine Learning Research, 8(9), 2007.
+Denis Yarats, Rob Fergus, Alessandro Lazaric, and Lerrel Pinto. Reinforcement learning with pro-
+totypical representations. arXiv preprint arXiv:2102.11271, 2021.
+Amy Zhang, Clare Lyle, Shagun Sodhani, Angelos Filos, Marta Kwiatkowska, Joelle Pineau, Yarin
+Gal, and Doina Precup. Invariant causal prediction for block mdps. In International Conference
+on Machine Learning, pp. 11214–11224. PMLR, 2020a.
+Amy Zhang, Rowan McAllister, Roberto Calandra, Yarin Gal, and Sergey Levine.
+Learning
+invariant representations for reinforcement learning without reconstruction.
+arXiv preprint
+arXiv:2006.10742, 2020b.
+Zhuangdi Zhu, Kaixiang Lin, and Jiayu Zhou. Transfer learning in deep reinforcement learning: A
+survey. arXiv preprint arXiv:2009.07888, 2020.
+12
+Published as a conference paper at ICLR 2022
+Appendix:
+Transfer RL across Observation Feature Spaces via
+Model-Based Regularization
+A
+ADDITIONAL PRELIMINARY KNOWLEDGE
+For any policy π, its Q value Qπ is the unique fixed point of the Bellman operator
+(T πQ)(o, a) = Eo′∼P (o,a),a′∼π(o′)[R(o, a) + γQ(o′, a′)]
+(5)
+The optimal policy can be found by policy iteration (Howard, 1960), where one starts from an
+initial policy π0 and repeats policy evaluation and policy improvement. More specifically, at it-
+eration k, the algorithm evaluates Qπk via Equation (5), then improves the policy by πk+1(o) :=
+argmaxa∈AQπk(o, a), ∀o ∈O. It is well-known that the policy iteration algorithm converges to the
+optimal policy under mild conditions (Puterman, 2014). When the dynamics P and R are unknown,
+reinforcement learning algorithms use interaction samples from the environment to approximately
+solve ˆ
+Qπk. Prior works (Bertsekas & Tsitsiklis, 1996; Munos, 2005) have shown that if the approx-
+imation error is bounded by a small constant, the performance of πk as k →∞is guaranteed to be
+close to the optimal policy value Qπ∗, which we also denote as Q∗.
+B
+ADDITIONAL DISCUSSION FOR REPRESENTATION SUFFICIENCY
+Good Representation for A Fixed Policy
+We slightly abuse notation and use Hϕ to denote the
+approximation operator for state value function V : O →R, similar to the approximation of Q as
+introduced in Section 4.1. The following definition characterizes the sufficiency of a representation
+mapping in terms of evaluating a fixed policy.
+Definition 9 (Sufficient Representation for A Fixed Policy). A representation mapping ϕ is suf-
+ficient for a policy π w.r.t. approximation operator Hϕ iff HϕV π = V π. More generally, for a
+constant ϵ ≥0, Φ is ϵ-sufficient for π iff ∥HϕV π −V π∥≤ϵ.
+Remarks. (1) If o1, o2 ∈O have different values under π, a good representation should be able to
+distinguish them, i.e., ϕ∗(o1) ̸= ϕ∗(o2).
+(2) The approximation operator Hϕ is linear if HϕV = ProjΦ(V ) where ProjΦ(·) denotes the
+orthogonal projection to the subspace spanned by the basis functions of ⟨ϕ1, ϕ2, · · · , ϕd⟩.
+Model Sufficiency over Policies Induces Linear Learning Sufficiency
+It can be found from
+Definition 3 that ϕ is sufficient as long as it represents Qπ for all π ∈ΠD
+ϕ . Fitting various value
+functions to improve representation quality is proposed by some prior works Bellemare et al. (2019);
+Dabney et al. (2020) and shown to be effective. However, learning and fitting many policy values
+could be computationally expensive, and is not easy to be applied to transfer learning between tasks
+with different observation spaces. Can we regularize the representation with the latent dynamics
+instead of policy values? Proposition 10 below shows that if ϕ is linearly sufficient for all dynamics
+pairs (Pπ, Rπ) induced by policies in ΠD
+ϕ and the dynamics pairs associated with all actions, then ϕ
+is linearly sufficient for learning.
+For notation simplicity, assume the state space is finite.
+Then, let (Pπ, Rπ) be the transition
+matrix and reward vector induced by policy π, i.e., Pπ[i, j] = Ea∼π(oi)[P(oj|oi, a)], Rπ[i] =
+Ea∼π(oi)[R(oi, a)]. Similarly, let Pa[i, j] = P(oj|oi, a), Ra[i] = R(oi, a). We let Φ denote the
+representation matrix, where the i-th row of Φ refers to the feature of the i-the observation.
+Proposition 10 (Linear Sufficiency Induced by Policy-based Model Sufficiency). For representation
+Φ, if for all π ∈ΠD
+ϕ , a ∈A, there exist ˆ
+Pπ, ˆ
+Rπ, ˆ
+Pa, ˆ
+Ra such that Φ ˆ
+Pπ = PπΦ, Φ ˆ
+Rπ = Rπ,
+Φ ˆ
+Pa = PaΦ, Φ ˆ
+Ra = Ra, i.e. Φ is linearly sufficient both policy-based dynamics and policy-
+independent dynamics models, i.e., then Φ is linearly sufficient for a task M w.r.t. approximation
+operator Hϕ.
+Proposition 10 proven in Appendix C.3 suggests that we can let representation fit (Pπ, Rπ) for many
+different π’s. However, it could be computationally intractable since the policy space is large. More
+13
+Published as a conference paper at ICLR 2022
+importantly, it is not memory-friendly to store and transfer a large number of dynamics models
+for all ( ˆ
+Pπ, ˆ
+Rπ). In our Proposition 6, we show that learning sufficiency can be induced by policy-
+independent model sufficiency, which is much simpler as there is no need to learn and store ( ˆ
+Pπ, ˆ
+Rπ)
+for many policies. As a trade-off, the policy-independent model induces non-linear sufficiency
+instead of linear sufficiency, requiring a more expressive approximation operator.
+Latent MDP induced by Representation
+We follow the analysis by Gelada et al. (2019) and
+define a new MDP under the representation mapping ϕ: ˜
+M = ⟨˜
+O, A, ˜
+P, ˜
+R, γ⟩, where for all o ∈O,
+ϕ(o) ∈˜
+O, ˜
+P(ϕ(o), a) = ˆ
+Paϕ(o), ˜
+R(ϕ(o), a) = ˆ
+Raϕ(o). Let ˜
+V denote the value function in ˜
+M,
+and let ˜
+π denote a policy in ˜
+M. We make the following mild assumption
+Assumption 11. There exists a constant Kϕ,V such that
+| ˜
+V˜
+π(ϕ(o1)) −˜
+V˜
+π(ϕ(o2))| ≤Kϕ,V ∥ϕ(o1) −ϕ(o2)∥, ∀˜
+π : ˜
+O →A, o1, o2 ∈O.
+This assumption is mild as any MDP with bounded reward has bounded value functions.
+C
+TECHNICAL PROOFS
+C.1
+PROOF OF LEMMA 4
+Proof of Lemma 4. We first show that policy iteration with approximation operator Hϕ starting from
+a policy π0 ∈ΠD
+ϕ generates a sequence of policies that are in ΠD
+ϕ . That is, for all πk, and any
+o1, o2 ∈O, πk(o1) = πk(o2) if ϕ(o1) = ϕ(o2). We prove this claim by induction.
+Base case: when k = 0, π0 ∈ΠD
+ϕ .
+Inductive step: assume πk ∈ΠD
+ϕ for k ≥0, then for iteration k + 1, we know that
+πk+1(o) := argmaxaQk(o, a)
+(6)
+where Qk = HϕQπk.
+Based on the definition of Hϕ, Qk(o, a) = f(ϕ(o); θa) for some θa. Hence, if o1 and o2 have the
+same representation, Qk(o1, ·) and Qk(o2, ·) are equal. As a result, πk+1(o1) and πk+1(o2) are
+equal, so πk+1 ∈ΠD
+ϕ .
+Next we prove the error bound in Lemma 4. We start by restating the error bounds for approximate
+policy iteration by Bertsekas & Tsitsiklis (1996):
+limsupk→∞∥V ∗−V πk∥∞≤
+2γ
+(1 −γ)2 supk∥Vk −V πk∥∞
+(7)
+where πk is the policy in the k-th iteration. Then we extend the above result to the action value Q.
+For any πk during the policy iteration (as proven above, πk ∈ΠD
+ϕ ), if ϕ is ϵ-sufficient for M as
+defined in Definition 3 with ℓ∞norm, then we have ∥Qk −Qπk∥∞≤ϵ. That is, ∀o ∈O, a ∈
+A, |Qk(o, a) −Qπk(o, a)| ≤ϵ. Therefore, ∀o ∈O,
+|Vk(o) −Vπk(o)| = |
+X
+a∈A
+π(a|o)(Qk(o, a) −Qπk(o, a))| ≤ϵ
+(8)
+On the other hand, we can derive
+∥Q∗−Qπk∥∞= max
+o,a |Q∗(o, a) −Qπk(o, a)|
+(9)
+= max
+o,a |R(o, a) + γ
+X
+o′∈O
+P(o′|o, a)V ∗(o′) −R(o, a) −γ
+X
+o′∈O
+P(o′|o, a)Vπk(o′)|
+(10)
+= γ∥V ∗−Vπk∥∞
+(11)
+Combining Equation (8) and (11), we obtain
+limsupk→∞∥Q∗−Qπk∥∞≤
+2γ2
+(1 −γ)2 ϵ.
+(12)
+14
+Published as a conference paper at ICLR 2022
+C.2
+PROOF OF PROPOSITION 6
+Proof of Proposition 6. Given that P is deterministic for o ∈O, a ∈A, we slightly abuse notation
+and let o′ = P(o, a) = Pa(o) if P(o′|o, a) = 1. If ϕ is sufficient for the dynamics models,
+i.e. ∀o ∈O, a ∈A, ˆ
+Paϕ(o) = ϕ(Pa(o)), ˆ
+Raϕ(o) = Ra(o). Then, we can define a new MDP
+˜
+M = ⟨˜
+O, A, ˜
+P, ˜
+R, γ⟩, where for all o ∈O, ϕ(o) ∈˜
+O, and ˜
+P(ϕ(o), a) = ˆ
+Paϕ(o) = ϕ(P(o, a)),
+˜
+R(ϕ(o), a) = ˆ
+Raϕ(o) = R(o, a).
+Any policy π ∈ΠD
+ϕ , based on the definition of ΠD
+ϕ , can be written as ˜
+π◦ϕ, where ˜
+π is a deterministic
+policy in ˜
+M. Next, we show that for all o ∈O, a ∈A, Qπ(o) = ˜
+Q˜
+π(ϕ(o)).
+By definition of the Q value, we know
+Qπ(o, a) = Eπ,P [
+∞
+X
+t=0
+γtR(ot, at)|o0 = o, a0 = a]
+(13)
+˜
+Q˜
+π(ϕ(o)) = E˜
+π, ˜
+P [
+∞
+X
+t=0
+γt ˜
+R(˜
+ot, ˜
+at)|˜
+o0 = ϕ(o), ˜
+a0 = a]
+(14)
+We claim that in the above equations, ˜
+ot = ϕ(ot), ˜
+at = at, for all t ≥0. We prove the claim by
+induction.
+When t = 0, the claim holds as ˜
+o0 = ϕ(o0) = ϕ(o), ˜
+a0 = a0 = a.
+Then, with inductive hypothesis that ˜
+ot = ϕ(ot), ˜
+at = at, we show the claim holds for t + 1:
+Action: at+1 = π(ot+1) = ˜
+π(ϕ(ot+1)) = ˜
+at+1.
+State: ˜
+ot+1 = ˜
+P( ˜
+ot, at) = ˜
+P(ϕ(ot), at) = ϕ(P(ot, at)) = ϕ(ot+1).
+Hence, we have shown ˜
+ot = ϕ(ot), ˜
+at = at, for all t ≥0, then the reward in the t-th step of
+Equation (13) and (14) are the same, as ˜
+R( ˜
+ot, ˜
+at) = ˜
+R(ϕ(ot), at) = R(ot, at). Therefore, Qπ(o) =
+˜
+Q˜
+π(ϕ(o)).
+Therefore, for any π ∈ΠD
+ϕ , its action value can be represented by ˜
+Q˜
+π ◦ϕ. Therefore, ϕ is sufficient
+for learning in M.
+Next, we show that ϕ is not necessarily linearly sufficient for learning the task.
+Consider an arbitrary policy π ∈ΠD
+ϕ . Without loss of generality, suppose Rπ is linearly represented
+by ϕ, i.e. Ra(o, a) = ϕ(o)⊤ˆ
+Ra, then we have
+Rπ(o) =
+X
+a∈A
+π(a|ϕ(o))Ra(o, a)
+=
+X
+a∈A
+π(a|ϕ(o))ϕ(o)⊤ˆ
+Ra
+= ⟨π(ϕ(o)), ˆ
+R⊤ϕ(o)⟩
+= ⟨ˆ
+Rπ(ϕ(o)), ϕ(o)⟩
+where ˆ
+R := [ ˆ
+Ra1; ˆ
+Ra1; · · · ; ˆ
+Ra|A|]. We can find that unless π always takes the same action for all
+input states, ϕ is not guaranteed to linearly encode Rπ.
+Similarly, for Pπ, suppose Pa(·|o, a) = ϕ(o)⊤ˆ
+Pa we have
+ϕ(Pπ(o)) =
+X
+a∈A
+π(a|ϕ(o))Pa(·|o, a)
+=
+X
+a∈A
+π(a|ϕ(o))ϕ(o)⊤ˆ
+Pa
+= ˆ
+P(π(ϕ(o)), ϕ(o), I)
+15
+Published as a conference paper at ICLR 2022
+where ˆ
+P := [ ˆ
+Pa1; ˆ
+Pa1; · · · ; ˆ
+Pa|A|] is an |A| × d × d tensor, and ˆ
+P(·, ·, ·) denotes the multi-linear
+operation. Hence, if π takes different actions in different states, ϕ may not linearly encode the
+transition, either.
+Therefore, ϕ is not guaranteed to linearly encode Rπ and Pπ, and thus is not guaranteed to linearly
+encode Vπ and Qπ.
+C.3
+PROOF OF PROPOSITION 10
+Proof of Proposition 10. We first show that for any π ∈Π, if ϕ is linearly sufficient for (Pπ, Rπ),
+then there exists a vector ω ∈Rk such that Vπ = ˆ
+Vπ = Φω.
+Since Φ is linearly sufficient for Pπ and Rπ, we have Φ ˆ
+Pπ = PπΦ and Φ ˆ
+Rπ = Rπ for some ˆ
+Pπ
+and ˆ
+Rπ. Let ω = (I −γ ˆ
+Pπ)† ˆ
+Rπ, then the Bellman error of ˆ
+Vπ = Φω can be computed as
+Rπ + γPπ ˆ
+Vπ −ˆ
+Vπ = Rπ + γPπΦω −Φω
+= Φ ˆ
+Rπ + γΦ ˆ
+Pπω −Φω
+= Φ( ˆ
+Rπ −(I −γ ˆ
+Pπ)(I −γ ˆ
+Pπ)† ˆ
+Rπ)
+= Φ( ˆ
+Rπ −ˆ
+Rπ)
+= 0
+Therefore, ˆ
+Vπ is a fixed point of the Bellman operator T π, and thus equal to Vπ.
+Next, as we know that Qπ(·, a) = Ra + γ⟨Pa, Vπ⟩, and Φ ˆ
+Pa = PaΦ, Φ ˆ
+Ra = Ra, we can obtain
+Qπ(·, a) = Ra + γ⟨Pa, Vπ⟩
+= Φ ˆ
+Ra + γPaΦω
+= Φ ˆ
+Ra + γΦ ˆ
+Paω
+= Φ( ˆ
+Ra + γ ˆ
+Paω)
+Therefore, for any π ∈ΠD
+ϕ , Qπ can be linearly represented by Φ, and thus Φ is linearly sufficient
+for learning by definition.
+C.4
+PROOF OF THEOREM 7
+Proof of Theorem 7. Lemma 2 in Gelada et al. (2019) is based on one policy in the induced MDP
+and bounded model errors. We can replace the Wasserstein distance W(ϕP(·|o, a), ˜
+P(·|ϕ(o), a)) by
+the Euclidean distance ∥ϕP(o, a), ˜
+P(ϕ(o), a)∥as we focus on deterministic transitions.
+For any policy π ∈ΠD
+ϕ that can be written as ˜
+π ◦ϕ, we have
+|Qπ(o, a) −˜
+Q˜
+π(ϕ(o), a)| ≤ϵR + γKϕ,V ϵP
+1 −γ
+(15)
+Therefore, ϕ is (1 −γ)−1(ϵR + γKϕ,V ϵP )-sufficient for learning M.
+Combined with Lemma 4, we can obtain the bound in Theorem 7.
+C.5
+PROOF OF THEOREM 8
+Proof of Theorem 8. First of all, if there exists ϕ(T ) satisfying ˆ
+Pa(ϕ(oi)) = P (T )
+a [i]Φ(T ), ˆ
+Ra(ϕ(oi)) =
+R(T )
+a [i], ∀oi ∈O(T ), then it is sufficient for the dynamics of the target task, and thus sufficient for
+16
+Published as a conference paper at ICLR 2022
+learning the target task as stated in Proposition 6. Therefore, our focus is to show the existence of
+such a representation.
+As ϕ(S) is sufficient for P (S)
+a
+and R(S)
+a for all a ∈A, we have
+ˆ
+Pa(ϕ
+(S)(o
+(S))) = P
+(S)(o
+(S), a)Φ
+(S) = ϕ
+(S)(P
+(S)(o
+(S), a))
+(16)
+ˆ
+Ra(ϕ
+(S)(o
+(S))) = R
+(S)(o
+(S), a)
+(17)
+where we let P (S)(o(S), a) denote the next state of (o(S), a), given that P is deterministic.
+Based on Assumption 1, we know that there exists a function f such that ∀o(T ) ∈O(T ), f(o(T )) ∈
+O(S), and f(P (T )(o(T ), a)) = P (S)(f(o(T )), a), R(T )(o(T ), a) = R(S)(f(o(T )), a). Hence, we can obtain
+ˆ
+Pa(ϕ
+(S)(f(o
+(T )))) = ϕ
+(S)(P
+(S)(f(o
+(T )), a)) = ϕ
+(S)(f(P
+(T )(o
+(T ), a)))
+(18)
+ˆ
+Ra(ϕ
+(S)(f(o
+(T )))) = R
+(S)(f(o
+(T )), a) = R
+(T )(o
+(T ), a)
+(19)
+Let ˆ
+ϕ(T ) := ϕ(S) ◦f, then we get
+ˆ
+Pa(ˆ
+ϕ
+(T )(o
+(T ))) = ˆ
+ϕ
+(T )(P
+(T )(o
+(T ), a))
+(20)
+ˆ
+Ra(ˆ
+ϕ
+(T )(o
+(T ))) = R
+(T )(o
+(T ), a)
+(21)
+Therefore, ˆ
+ϕ(T ) is a feasible solution satisfying model sufficiency in the target task, and thus is
+sufficient for learning.
+Theorem 8 holds since we have shown (1) all feasible solutions to Φ(T ) ˆ
+Pa = P (T )
+a Φ and Φ(T ) ˆ
+Ra =
+R(T )
+a are sufficient for learning in M (T ), and (2) there exists at least one feasible solution to Φ(T ) ˆ
+Pa =
+P (T )
+a Φ and Φ(T ) ˆ
+Ra = R(T )
+a .
+D
+REPRESENTATION LEARNING FOR APPROXIMATE VALUE ITERATION
+Now we illustrate how our transfer algorithm and the proposed model-based regularization work for
+approximate value iteration. We focus on the case where the reward function R(o, a) ≥0 for all
+o ∈O and a ∈A.
+Preliminaries
+The bases of value iteration is the Bellman optimality operator T ∗. For the value
+function, we have
+T ∗V (o) = max
+a∈A[R(o, a) + γ
+X
+o∈O
+P(o′|o, a)V (o′)]
+(22)
+For the Q function, we have
+T ∗Q(o, a) = R(o, a) + γ
+X
+o∈O
+P(o′|o, a) max
+a′∈A Q(o′, a′),
+(23)
+where we slightly abuse notation and use T ∗for both the value function and the Q function when
+there is no ambiguity.
+Starting from some initial Q0 (or V0) and iteratively applying T ∗, i.e., Qk+1 = T ∗Qk, Qk (or
+Vk) can finally converge to Q∗or V ∗when k →∞, which is known as value iteration. When an
+approximation operator H is used, the process is called approximate value iteration (AVI): Qk+1 =
+HϕT ∗Qk. A prior work has shown the following asymptotic result:
+Lemma 12 (Approximate Value Iteration for Q). For a reinforcement learning algorithm based on
+value iteration with approximation operator H, if ∥HT ∗Qk −T ∗Qk∥∞≤ϵ, for all Qk along the
+value iteration path, then we have
+lim sup
+k→∞
+∥V ∗−Vπk∥≤
+2ϵ
+(1 −γ)2 .
+(24)
+Value Iteration Learning with Given Representation
+Given a representation mapping ϕ, we
+aim to learn an approximation function h : ϕ(O) →R|A| such that ˆ
+Q(o, ·) = h(ϕ(o)) ≈Q(o, ·).
+For notation simplicity, we further use h(ϕ(o), a) to denote the approximated Q value ˆ
+Q(o, a) for
+a ∈A. We start from an initial h0 that has a uniform value c for all inputs, where c > 0 can
+be randomly selected. The initial approximation for Q value is ˆ
+Q0 = h0 ◦ϕ. Then, at iteration
+17
+Published as a conference paper at ICLR 2022
+k > 0, we solve ˆ
+Qk = HϕT ∗ˆ
+Qk−1 = hk ◦ϕ, where hk := argminh∥h ◦ϕ −T ∗ˆ
+Qk−1∥∞. We use
+a neural network (universal function approximator) to parameterize h, so the approximation error
+∥h ◦ϕ −T ∗ˆ
+Qk−1∥∞depends on the representation quality of ϕ.
+Therefore, a representation mapping ϕ is ϵ-sufficient for learning with value iteration if ∥HϕT ∗Qk−
+T ∗Qk∥∞≤ϵ. Next, we identify the relationship between policy-independent model sufficiency and
+the learning sufficiency with value iteration methods.
+Guaranteed Learning with Model-regularized Representation
+We first make the following as-
+sumption for the learned approximation function h.
+Assumption 13 (Lipschitz Value Approximation). There exists a constant Kϕ,h, such that ∀k ≥
+0, o1, o2 ∈O, a ∈A,
+|hk(ϕ(o1), a) −hk(ϕ(o2), a)| ≤Kϕ,h∥ϕ(o1) −ϕ(o2)∥,
+(25)
+where hk is the approximation function in the k-th iteration.
+Then, the following Theorem holds, which justifies that learning with model-regularized represen-
+tation helps with value iteration learning.
+Theorem 14. For an MDP M, if encoder ϕ satisfies maxo∈O,a∈A |R(o, a) −ˆ
+Ra(ϕ(o))| ≤ϵR and
+maxo∈O,a∈A ∥Eo′∼P (·|o,a)ϕ(o′) −ˆ
+Pa(ϕ(o))∥2 ≤ϵP for dynamics models ( ˆ
+Pa, ˆ
+Ra)a∈A, then the
+approximated value iteration with approximation operator Hϕ under Assumption 13 satisfies
+lim sup
+k→∞
+∥V ∗−V πk∥∞≤
+2
+(1 −γ)2 (ϵR + γϵP Kϕ,h).
+(26)
+Proof of Theorem 14. Let hk be the approximation function in the k-th iteration. That is, the ap-
+proximated Q function in the k-th iteration is ˆ
+Qk = hk ◦ϕ. As the rewards of all state-action pairs
+are non-negative, we have hk(ϕ(o), a) ≥0.
+Define a function ˆ
+hk+1 as
+ˆ
+hk+1(ϕ(o), a) = ˆ
+Ra(ϕ(o)) + γ max
+a′∈A hk( ˆ
+Pa(ϕ(o)), a′)
+(27)
+Given that
+T ∗ˆ
+Qk(o, a) = R(o, a) + γEo′∼P (·|o,a)[max
+a′∈A
+ˆ
+Qk(o′, a′)]
+(28)
+= R(o, a) + γEo′∼P (·|o,a)[max
+a′∈A hk(ϕ(o′), a′)],
+(29)
+we have that for any o ∈O, a ∈A,
+
+
+ˆ
+hk+1(ϕ(o), a) −T ∗ˆ
+Qk(o, a)
+
+
+
+(30)
+=
+
+
+
+ ˆ
+Ra(ϕ(o)) + γ max
+a′∈A hk( ˆ
+Pa(ϕ(o)), a′) −(R(o, a) + γEo′∼P (·|o,a)[max
+a′∈A hk(ϕ(o′), a′)])
+
+
+
+
+(31)
+≤
+
+
+ ˆ
+Ra(ϕ(o)) −R(o, a)
+
+
+ + γ
+
+
+
+max
+a′∈A hk( ˆ
+Pa(ϕ(o)), a′) −Eo′∼P (·|o,a)[max
+a′∈A hk(ϕ(o′), a′)]
+
+
+
+
+(32)
+≤ϵR + γEo′∼P (·|o,a)[
+
+
+
+max
+a′∈A hk( ˆ
+Pa(ϕ(o)), a′) −max
+a′∈A hk(ϕ(o′), a′)
+
+
+
+]
+(33)
+≤ϵR + γEo′∼P (·|o,a) max
+a′∈A
+
+
+hk( ˆ
+Pa(ϕ(o)), a′) −hk(ϕ(o′), a′)
+
+
+
+(34)
+≤ϵR + γEo′∼P (·|o,a) max
+a′∈A Kϕ,h
+
+
+ ˆ
+Pa(ϕ(o) −ϕ(o′)
+
+
+
+(35)
+≤ϵR + γϵP Kϕ,h,
+(36)
+where (34) is due to the non-negativity of hk, and (35) is due to Assumption 13.
+Now we have shown that the constructed ˆ
+hk+1 satisfies
+∥ˆ
+hk+1 ◦ϕ −T ∗ˆ
+Qk∥∞≤ϵR + γϵP Kϕ,h.
+(37)
+According to the definition of Hϕ, we obtain
+∥hk+1 ◦ϕ −T ∗ˆ
+Qk∥∞≤∥ˆ
+hk+1 ◦ϕ −T ∗ˆ
+Qk∥∞≤ϵR + γϵP Kϕ,h
+(38)
+18
+Published as a conference paper at ICLR 2022
+since Hϕ finds a hk+1 that minimizes the approximation error.
+Therefore, Theorem 14 follows by combining Inequality (38) and Lemma 12.
+E
+EXPERIMENT DETAILS AND ADDITIONAL RESULTS
+E.1
+EXPERIMENT SETTING DETAILS
+E.1.1
+BASELINES
+• Single: A DQN or SAC learner on the target domain without any auxiliary tasks.
+• Auxiliary:
+On the target domain, the encoder ϕ(T ) is optimized based on the loss
+Lbase(ϕ(T ), π(T )) + λ
+h
+LP (ϕ(T ); ˆ
+P (T )) + LR(ϕ(T ); ˆ
+R(T ))
+i
+. Compared with our transfer algo-
+rithms which transfer the learned dynamics from source domain to the target domain, it
+learns the dynamics model ( ˆ
+P (T ), ˆ
+R(T )) on the target domain from scratch. Here we set λ to
+be the same as our transferred algorithm (values of λ are provided in Appendix E.1.3). The
+purpose of this baseline is to test whether the efficiency of our proposed transfer algorithms
+come from the transferred latent dynamics or from the auxiliary loss (or potentially both).
+• Fine-tune: To test whether our transfer algorithms benefit from loading the learned policy
+head π(S), on the target domain, we load the weights of π(T ) from the trained source policy
+head π(S) and train the DQN or SAC agent without any auxiliary loss.
+• Time-aligned: Gupta et al. (2017) propose to learn aligned representations for two tasks,
+under the assumption that the source-task agent and the target-task agent reach similar
+latent sates at the same time step, i.e. ϕ(T )(s
+(T )
+t ) = ϕ(S)(s
+(S)
+t ). Note that this assumption
+is valid when the initial state is fixed and the transitions are all deterministic. Although
+in our setting, the agent can not learn both tasks simultaneously, we can adapt the idea of
+time-based alignment and encourage the target encoder to map target observations to the
+source representations happening at the same time step.
+In our experiments, we store N source trajectories
+n
+si
+0, ai
+0, si
+1, ai
+1, ...,
+oN
+i=1 collected during
+source task training. Then on the target domain, we first collect N trajectories following the
+same action as the one collected from the source domain. In other words, at time step t of
+the i-th trajectory, we take action ai
+t. After the target trajectories are collected, we minimize
+the alignment loss Lalign(ϕ(T )) = E
+h ϕ(T )(s
+(T )
+t ) −ϕ(S)(s
+(S)
+t )
+2i
+to enforce that observations
+from source and target domain at the same time-step have the same representations.
+In our experiments, we set N to be 10% of the training trajectories. (We also experimented
+with larger N’, for example using all the training trajectories, but the differences are minor.)
+In terms the alignment loss, we optimize the loss for 1000 epochs with batch size equal to
+256, where at each epoch we sample a batch of paired source and target observations and
+compute the alignment loss. After pre-training the target encoder, we load the weight into
+ϕ(T ) and resumes the normal DQN or SAC training.
+Our experimental results show that, although more training steps are given to the time-
+aligned learner, it does not outperform the single-task learner, and sometimes fails to learn
+(e.g. in 3DBall). The main reason is that the time-based assumption does not hold in
+practice as initial states are usually randomly generated. Therefore, even though the agent
+exactly imitates the source-task policy at every step, the observations from source and target
+task do not necessarily match at every time-step. In environments with non-deterministic
+transitions, the state mismatch will be a more severe issue and may lead to an unreasonable
+encoder.
+E.1.2
+ENVIRONMENTS
+Environment Settings in Vec-to-pixel Tasks
+• CartPole: The source task is the same as the ordinary CartPole environment on Gym.
+For the pixel-input target task, we extract the screen of the environment which is of size
+19
+Published as a conference paper at ICLR 2022
+(400,600), and crop the pixel input to let the image be centered at the cart. The resulting ob-
+servation has size (40,90) after cropping. We take the difference between two consecutive
+frames as the agent’s observation.
+• Acrobot: The source task is the same as the ordinary Acrobot environment on Gym.
+For the pixel-input target task, we first extract the screen of the environment which is of
+size (150,150), and then down-sample the image to (40,40). We also take the difference
+between two consecutive frames as the agent’s observation.
+• Cheetah-Run: The source task is the Cheetah Run Task provided by DeepMind Control
+Suite (DMC) (Tassa et al., 2018). For the target task, we use the image of size (84,84)
+rendered from the environment as the agent’s observation.
+Environment Settings in More-sensor Tasks
+For the target task of MuJoCo environments, we
+add the center of the mass based inertia and velocity into the observations of the agent, concatenating
+them with the original observation on the source task. Consequently, in the target environments,
+the dimensionality of the observation space on target task become much larger than that of the
+source task. On Hopper, the dimensionality of the target observation is 91, whereas the the source
+observation space only has 11 dimensions. The dimensionalities of target tasks on HalfCheetah,
+Hopper and Walker are 145, 91, 145 respectively.
+Environment Settings in Broken-sensor Tasks
+3DBall is an example environment provided by
+the ML-Agents Toolkit (Juliani et al., 2018). In this task, the agent (a cube) is supposed to balance
+a ball on its top. At every step, the agent will be rewarded if the ball is still on its top. If the
+ball falls off, the episode will immediately end. The highest episodic return in this task is 100.
+There are two versions of this game, which only differ by their observation spaces. The simpler
+version (named 3DBall in the toolkit) has 8 observation features corresponding to the rotation of the
+agent cube, and the position and velocity of the ball. The harder version (named 3DBallHard in the
+toolkit) does not have access to the ball velocity, but observes a stack of 9 past frames, each of which
+corresponds to the rotation of the agent cube, and the position of the ball, resulting in 45 observation
+dimensions at every step. We regard 3DBall as the source task and 3DBallHard as the target task in
+our experiments.
+E.1.3
+IMPLEMENTATION OF BASE DRL ALGORITHMS AND HYPER-PARAMETER SETTINGS
+Implementation of DQN
+To ensure that the base learning algorithm learns the pixel-input target
+tasks well, we follow the existing online codebases for pre-processing, architectures and hyperpa-
+rameter settings in pixel CartPole1 and pixel Acrobot 2. On source domain, the DQN network has a
+2-layer encoder and a 2-layer Q head of hidden size 64, and the representation dimension is set as
+16. For pixel-input, the encoder has three convolution layers followed by a linear layer. The number
+of channels of the convolutional layers are equal to 16, 32, 32, respectively (kernel size=5 for all
+three layers). We use the Adam optimizer with learning rate 0.001 and β1, β2 = 0.9, 0.999. The
+target Q network is updated every 10 iterations. In CartPole, we use a replay buffer with size 10000.
+In the more challenging Acrobot, we use a prioritized replay buffer with size 100000.
+Implementation of SAC
+For MuJoCo environments, we follow an elegant open-sourced SAC
+implementation3. The number of hidden units for all neural networks is 256. The actor has a two-
+layer encoder and a two-layer policy head. The two Q networks both have three linear layers. The
+activation function is ReLU and the learning rate is 3 · 10−4. We train the dynamics model and the
+reward model every 50k interactive steps in the source task. For the DMC environment Cheetah-
+Run, we follow the open-sourced SAC implementation with an autoencoder 4. The pixel encoder
+has three convolution layers and one linear layer. The number of channels for all convolutional
+layers is 32 and the kernel size is 3. For the 3DBall environment, as it can only be learned within the
+ML-Agents toolkit, we directly use the SAC implementation provided by the toolkit with the default
+hyperparameter settings.
+1https://pytorch.org/tutorials/intermediate/reinforcement q learning.html
+2https://github.comeyalbd2Deep RL Course
+3https://github.com/pranz24/pytorch-soft-actor-critic
+4https://github.com/denisyarats/pytorch sac ae
+20
+Published as a conference paper at ICLR 2022
+Implementation of Latent Dynamics Model
+Note that our goal is to learn a good representation
+by enforcing it predicting the latent dynamics, different from model-based RL (Hafner et al., 2019)
+that aims to learn accurate models for planning. Therefore, we let the dynamics models ˆ
+P and ˆ
+R
+be simple linear networks, so that the representation can be more informative in terms of represent-
+ing dynamics and learning values/policies. For environments with discrete action spaces, we learn
+|A| linear transition networks and |A| linear reward models. For environments with continuous ac-
+tion spaces, we first learn an action encoder ψ : A →Rd with the same encoding size d as the
+state representation. Then, we learn a linear transition network and a linear reward network with
+ˆ
+P(ϕ(o) ◦ψ(a)) being the predicted next representation, and ˆ
+R(ϕ(o) ◦ψ(a)) being the predicted
+reward, where ◦denotes element-wise product. In practice, we find this implementation achieves
+good performance across many environments.
+In addition, note that due to the significant difference between source observation and target obser-
+vation, the initial encoding scale could be very different in source and target tasks, making it hard
+for them to be regularized by the same dynamics model. Therefore, we normalize the output of both
+encoders to be a unit vector (l2 norm is 1), which remedies the potential mismatch in their scales.
+Hyperparameter Settings for Transfer Learning
+In experiments, we find that it is better to set
+λ relatively large when the environment dynamics are simple and the dynamics model is of high
+quality. When the environment dynamics is complex, we choose to be more conservative and set λ
+to be smaller. Concretely, in CartPole, λ is set as 18; in 3DBall, λ is set as 10; in Acrobot, λ is set
+as 5; in the remaining MuJoCo environments where dynamics are more complicated, λ is set as 1.
+Although we use different λ’s in different environments based on domain knowledge, we find that
+different values of λ’s do not have much influence on the learning performance. Figure 7 provided in
+Appendix E.2 shows a test on the hyper-parameter λ, where we can see that our algorithm effectively
+transfers knowledge under various values of λ.
+Regarding the representation dimension, we set it to be smaller for simpler tasks, and larger for
+more complex tasks. In 3DBall, we set the encoding size to be 8; in CartPole, we set the encoding
+size as 16; in Acrobot, we set the encoding size as 32; in Cheetah-Run, we set the encoding size
+as 50; in MuJoCo tasks, we set the encoding size as 256. Again, we find that the feature size does
+not influence the performance too much. But based on the theoretical insights of learning minimal
+sufficient representation Achille & Soatto (2018), we believe that it is generally better to have a
+lower-dimensional representation while making sure it is sufficient for learning.
+21
+Published as a conference paper at ICLR 2022
+E.2
+ADDITIONAL EXPERIMENTAL RESULTS
+Ablation Study: Transferring Different Components
+Figure 5 shows the ablation study of our method in continuous control tasks. We compare our
+method with the following variants:
+(1) learning auxiliary tasks without transfer,
+(2) only transferring transition models ˆ
+P and
+(3) only transferring reward models ˆ
+R.
+Compared with the single-task learning baseline (the blue curves), we find that all the variants of our
+method can make some improvements, which suggests that learning dynamics models as auxiliary
+tasks, transferring ˆ
+P and ˆ
+R are all effective designs for accelerating the target task learning. Finally,
+our method (the red curves) that combines the above components achieves the best performance,
+justifying the effectiveness of our transfer algorithm.
+0k
+200k
+400k
+600k
+800k
+1000k
+0
+1,000
+2,000
+3,000
+4,000
+5,000
+Steps
+Return
+HalfCheetah
+Without Transfer
+Auxiliary Tasks
+Transfer ˆ
+P
+Transfer ˆ
+R
+Our Method
+0k
+200k
+400k
+600k
+800k
+1000k
+1,000
+2,000
+3,000
+steps
+Return
+Hopper
+Without Transfer
+Auxiliary Tasks
+Transfer ˆ
+P
+Transfer ˆ
+R
+Our Method
+0k
+200k
+400k
+600k
+800k
+1000k
+1,000
+2,000
+3,000
+4,000
+Steps
+Return
+Walker2d
+Without Transfer
+Auxiliary Tasks
+Transfer ˆ
+P
+Transfer ˆ
+R
+Our Method
+50k
+100k
+150k
+200k
+250k
+300k
+350k
+0
+20
+40
+60
+80
+100
+Steps
+Return
+3DBall
+Without Transfer
+Auxiliary Tasks
+Transfer ˆ
+P
+Transfer ˆ
+R
+Our Method
+Figure 5: Ablation study of our method on different transferred components.
+22
+Published as a conference paper at ICLR 2022
+0
+50
+100
+150
+200
+50
+100
+150
+Episodes
+Episodic Return
+Our Method
+Auxiliary Tasks
+Without Transfer
+Random Models
+Linear Value Head
+Figure 6: In the Vec-to-pixel CartPole environment,
+sanity check verifies the effectiveness of our algorithm
+design. Results are averaged over 20 random seeds.
+Sanity Check: Effectiveness of the Proposed
+Transfer Method
+We conduct another ablation study to evaluate
+each component of our algorithm in the Cart-
+Pole environment as shown in Figure 6. We
+find that when transferring the dynamics mod-
+els with only a linear value head (the green
+curve), the agent fails to learn a good policy
+as we analyzed in Section 4.3. If the dynam-
+ics models ( ˆ
+P, ˆ
+R) are randomly generated in-
+stead of being transferred from the source task
+(the orange curve), the agent does not learn, ei-
+ther. More importantly, if we learn dynamics
+models as auxiliary tasks in the target task with-
+out transferring them from the source (the pur-
+ple curve), the agent learns a little better than
+a vanilla agent, but is worse than our proposed
+transfer algorithm. These empirical results have
+verified our theoretical insights and shown the effectiveness of our algorithm design.
+0
+5
+10
+15
+20
+25
+50
+60
+70
+80
+Regularization Weight λ
+Average Return
+Transfer with Various λ’s
+Without Transfer
+Figure 7: In the Vec-to-pixel CartPole environment,
+under different selections of hyperparameter λ, the al-
+gorithm works better than learning from scratch (when
+λ = 0). Results are averaged over 20 random seeds.
+Hyper-parameter Test
+Figure 7 further visualizes how the hyperpa-
+rameter λ (regularization weight) influences the
+transfer performance in the Vec-to-pixel Cart-
+Pole environment.
+It can be found that the
+agent generally benefits from a larger λ, which
+suggests that the model-based regularization
+has a positive impact on the learning perfor-
+mance. For a wide range of λ’s, the agent al-
+ways outperforms the learner without transfer
+(the learner with λ = 0). Therefore, our algo-
+rithm is not sensitive to the hyperparameter λ,
+and a larger λ is preferred to get better perfor-
+mance. In Appendix E.1.3, we have provided
+the λ selections for all experiments.
+23

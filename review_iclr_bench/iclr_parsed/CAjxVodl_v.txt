@@ -1,0 +1,3005 @@
+# GENERALIZED DECISION TRANSFORMER FOR OFFLINE HINDSIGHT INFORMATION MATCHING
+
+
+**Hiroki Furuta**
+The University of Tokyo
+furuta@weblab.t.u-tokyo.ac.jp
+
+
+**Yutaka Matsuo** **Shixiang Shane Gu**
+The University of Tokyo Google Research
+
+
+ABSTRACT
+
+How to extract as much learning signal from each trajectory data has been a key
+problem in reinforcement learning (RL), where sample inefficiency has posed
+serious challenges for practical applications. Recent works have shown that using
+expressive policy function approximators and conditioning on future trajectory
+information – such as future states in hindsight experience replay (HER) or returnsto-go in Decision Transformer (DT) – enables efficient learning of multi-task
+policies, where at times online RL is fully replaced by offline behavioral cloning
+(BC), e.g. sequence modeling. We demonstrate that all these approaches are doing
+hindsight information matching (HIM) – training policies that can output the rest
+of trajectory that matches some statistics of future state information. We present
+Generalized Decision Transformer (GDT) for solving any HIM problem, and show
+how different choices for the feature function and the anti-causal aggregator not
+only recover DT as a special case, but also lead to novel Categorical DT (CDT)
+and Bi-directional DT (BDT) for matching different statistics of the future. For
+evaluating CDT and BDT, we define offline multi-task state-marginal matching
+(SMM) and imitation learning (IL) as two generic HIM problems, propose a
+Wasserstein distance loss as a metric for both, and empirically study them on
+MuJoCo continuous control benchmarks. Categorical DT, which simply replaces
+anti-causal summation with anti-causal binning in DT, enables arguably the first
+effective offline multi-task SMM algorithm that generalizes well to unseen (and
+even synthetic) multi-modal reward or state-feature distributions. Bi-directional
+DT, which uses an anti-causal second transformer as the aggregator, can learn to
+model any statistics of the future and outperforms DT variants in offline multi-task
+IL, i.e. one-shot IL. Our generalized formulations from HIM and GDT greatly
+expand the role of powerful sequence modeling architectures in modern RL.
+
+1 INTRODUCTION
+
+Reinforcement learning (RL) suffers from the problem of sample inefficiency, and a central question
+is how to extract as much learning signals, or constraint equations (Pong et al., 2018; Tu & Recht,
+2019; Dean et al., 2020), from each trajectory data as possible. As dynamics transitions and Bellman
+equation provide a rich source of supervisory objectives and constraints, many algorithms combined
+model-free with model-based, and policy-based with value-based in order to achieve maximal sample
+efficiency, while approximately preserving stable, unbiased policy learning (Heess et al., 2015; Gu
+et al., 2016; 2017; Buckman et al., 2018; Pong et al., 2018; Tu & Recht, 2019).
+
+Orthogonal to these, in the recent years we have seen a number of algorithms that are derived
+from different motivations and frameworks, but share the following common trait: they use future
+**trajectory information τt:T to accelerate optimization of a contextual policy π(at|st, z) with**
+**context z with respect to a parameterized reward function r(st, at, z) (see Section 3 for notations).**
+These hindsight algorithms have enabled Q-learning with sparse rewards (Andrychowicz et al.,
+2017), temporally-extended model-based RL with Q-function (Pong et al., 2018), mastery of 6-DoF
+object manipulation in cluttered scenes from human play (Lynch et al., 2019), efficient multi-task
+RL (Eysenbach et al., 2020; Li et al., 2020), offline self-supervised discovery of manipulation
+primitives from pixels (Chebotar et al., 2021), and offline RL using return-conditioned supervised
+
+
+-----
+
+learning with transformers (Chen et al., 2021a; Janner et al., 2021). We derive a generic problem
+formulation covering all these variants, and observe that this hindsight information matching
+**(HIM) framework, with behavioral cloning (BC) as the learning objective, can learn a conditional**
+policy to generate trajectories that each satisfy any properties, including distributional.
+
+Given this insight and recent casting of RL as sequence modeling (Chen et al., 2021a; Janner et al.,
+2021), we propose Generalized Decision Transformer (GDT), a family of algorithms for future
+information matching using hindsight behavioral cloning with transformers, and greatly expand
+the applicability of transformers and other powerful sequential modeling architectures within RL
+**with only small architectural changes to DT. In summary, our key contributions are:**
+
+-  We introduce hindsight information matching (HIM) (Section 4, Table 1) as a unifying view
+of existing hindsight-inspired algorithms, and Generalized Decision Transformers (GDT) as a
+generalization of DT for RL as sequence modeling to solve any HIM problem (Figure 1).
+
+-  Inspired by distribution RL (Bellemare et al., 2017; Dabney et al., 2018) and state-marginal
+matching (SMM) (Lee et al., 2020; Ghasemipour et al., 2020; Gu et al., 2021), we define offline
+_multi-task SMM problems, propose Categorical DT (CDT) (Section 5), validate its empirical_
+performance to match feature distributions (even generalizing to a synthetic bi-modal target
+distribution at times), and construct the first benchmark tasks for offline multi-task SMM.
+
+-  Inspired by one-shot imitation learning (Duan et al., 2017; Finn et al., 2017; Dasari & Gupta,
+
+2020), we define offline multi-task imitation learning (IL), propose a Wasserstein-distance
+evaluation metric, develop Bi-directional DT (BDT) as a fully expressive variant of GDT
+(Section 5), and demonstrate BDT’s competitive performance at offline multi-task IL.
+
+|Method|Φ(s, a)|Aggregator|
+|---|---|---|
+|DT (Chen et al., 2021a) DT-X (Section 5.3) CDT (Section 5.2) BDT (Section 5.4)|r(s, a) Learned r(s, a) or any Learned|Summation Summation Binning Transformer|
+
+
+**Method** **Φ(s, a)** **Aggregator**
+
+DT (Chen et al., 2021a) _r(s, a)_ Summation
+
+DT-X (Section 5.3) Learned Summation
+
+CDT (Section 5.2) _r(s, a) or any_ Binning
+
+BDT (Section 5.4) Learned Transformer
+
+
+Figure 1: Generalized Decision Transformer (GDT), where the figure is a minor generalization of the DT
+architecture (Chen et al., 2021a) and the table summarizes how it leads to different classes of algorithms
+**with only small architectural changes. If the feature function Φ(s, a) is reward r(s, a) and the anti-causal**
+aggregator is γ-discounted summation, we recover DT for offline RL. If the aggregator is binning, we get
+Categorical DT (CDT) for offline multi-task state-marginal matching. If the aggregator is a second transformer,
+we get Bi-directional DT (BDT) for offline multi-task imitation learning (IL), or equivalently one-shot IL. The
+choices of Φ(s, a) and the aggregator together decide I [Φ](τ ) in Hindsight Information Matching (HIM) objective
+discussed in Section 4 and Table 1, where conversely GDT can essentially solve any HIM problem with proper
+choices of Φ and aggregator.
+
+2 RELATED WORK
+
+**Hindsight Reinforcement Learning and Behavior Cloning Hindsight techniques (Kaelbling,**
+
+1993; Andrychowicz et al., 2017; Pong et al., 2018) have revolutionized off-policy optimization
+with respect to parameterized reward functions. Two key insights were (1) for off-policy algorithms
+such as Q-learning (Mnih et al., 2015; Gu et al., 2016) and actor-critic methods (Lillicrap et al.,
+2016; Haarnoja et al., 2018; Fujimoto et al., 2018; Furuta et al., 2021a), the same transition samples
+can be used to learn with respect to any reward parameters, as long as the reward function is
+re-computable, i.e. “relabel”-able, like goal reaching rewards, and (2) if policy or Q-functions
+are smooth with respect to the reward parameter, generalization can speed up learning even with
+respect to “unexplored” rewards. In goal-based RL where future states can inform “optimal” reward
+parameters with respect to the transitions’ actions, hindsight methods were applied successfully to
+
+
+-----
+
+enable effective training of goal-based Q-function for sparse rewards (Andrychowicz et al., 2017),
+derive exact connections between Q-learning and classic model-based RL (Pong et al., 2018), dataefficient off-policy hierarchical RL (Nachum et al., 2018), multi-task RL (Eysenbach et al., 2020; Li
+et al., 2020), offline RL (Chebotar et al., 2021), and more (Eysenbach et al., 2021; Choi et al., 2021;
+Ren et al., 2019; Zhao & Tresp, 2018; Ghosh et al., 2021; Nasiriany et al., 2021). Additionally, Lynch
+et al. (2019) and Gupta et al. (2018) have shown that often BC is sufficient for learning generalizable
+parameterized policies, due to rich positive examples from future states, and most recently Chen et al.
+(2021a) and Janner et al. (2021), when combined with powerful transformer architectures (Vaswani
+et al., 2017), it produced state-of-the-art offline RL and goal-based RL results. Lastly, while motivated
+from alternative mathematical principles and not for parameterized objectives, future state information
+was also explored as ways of reducing variance or improving estimations for generic policy gradient
+methods (Pinto et al., 2017; Guo et al., 2021; Venuto et al., 2021).
+
+**Distributional Reinforcement Learning and State-Marginal Matching Modeling the full distri-**
+bution of returns instead of the averages led to the development of distributional RL algorithms (Bellemare et al., 2017; Dabney et al., 2018; 2020; Castro et al., 2018; Barth-Maron et al., 2018) such as
+Categorical Q-learning (Bellemare et al., 2017). While our work shares techniques such as discretization and binning, these works focus on optimizing a non-conditional reward-maximizing RL policy
+and therefore our problem definition is closer to that of state-marginal matching algorithms (Hazan
+et al., 2019; Lee et al., 2020; Ghasemipour et al., 2020; Gu et al., 2021), or equivalently inverse RL
+algorithms (Ziebart et al., 2008; Ho & Ermon, 2016; Finn et al., 2016; Fu et al., 2018; Ghasemipour
+et al., 2020) whose connections to feature-expectation matching have been long discussed (Abbeel
+& Ng, 2004). However, those are often exclusively online algorithms even sample-efficient variants (Kostrikov et al., 2019), since density-ratio estimations with either discriminative (Ghasemipour
+et al., 2020) or generative (Lee et al., 2020) approach requires on-policy samples, with a rare exception of Kostrikov et al. (2020). Building on the success of DT and brute-force hindsight imitation
+learning, our Categorical DT is to the best our knowledge the first method that benchmarks offline
+state-marginal matching problem in the multi-task settings.
+
+**RL and Imitation Learning as Sequence Modeling When scaled to the extreme levels of data and**
+computing, sequence models such as transformers (Vaswani et al., 2017) can train models to master
+an impressive range of capabilities in natural language processing and computer vision (Devlin et al.,
+2019; Radford et al., 2019; Brown et al., 2020; Radford et al., 2021; Ramesh et al., 2021; Chen
+et al., 2021b; Bommasani et al., 2021; Dosovitskiy et al., 2020). Comparing to their popularity
+in other areas, the adoption of transformers or architectural innovations in RL have been slow,
+partially due the difficulty of using transformers over temporal scales for online RL (Parisotto et al.,
+2020). Recent successes have focused on processing variable-length per-timestep information such
+as morphology (Kurin et al., 2021), sensory information (Tang & Ha, 2021), one-shot or few-shot
+imitation learning (Dasari & Gupta, 2020), or leveraged offline learning (Chen et al., 2021a; Janner
+et al., 2021). Our formulation enables sequence modeling to solve novel RL problems such as statemarginal matching with minimal architectural modifications to DT, greatly expanding the impacts of
+transformers and other powerful sequence models in RL.
+
+3 PRELIMINARIES
+
+We consider a Markov Decision Process (MDP) defined by the tuple of action space A, state space
+, transition probability function p(s[′] _s, a), initial state distribution p(s0), reward function r(s, a),_
+_S_ _|_
+and discount factor γ ∈ (0, 1]. In deep RL, a policy that maps the state space to the action space is
+parameterized by the function approximators, πθ(a _s)[1]. The RL objective is given by:_
+_|_
+
+1
+_LRL(π) =_ (1)
+
+1 _γ_ [E][s][∼][ρ][π][(][s][)][,a][∼][π][(][·|][s][)][ [][r][(][s, a][)]]
+_−_
+
+where p[π]t [(][s][) =] _s0:t,a0:t−1_ _t_ _[p][(][s][t][|][s][t][−][1][, a][t][−][1][)][π][(][a][t][|][s][t][)][ and][ ρ][π][(][s][) = (1][ −]_ _[γ][)][ P]t[′][ γ][t][′]_ _[p]t[π][′]_ [(][s][t][′][ =][ s][)]
+
+are short-hands for time-aligned and time-aggregated state marginal distributions following policy π.
+
+RR Q
+
+1For simplicity of notations, we write Markovian policies; however, such notations can easily apply to
+non-Markov policies such as Decision Transformer (Chen et al., 2021a) by converting to an augmented MDP
+consisting of past N states, where N is the context window of DT.
+
+
+-----
+
+3.1 STATE MARGINAL MATCHING
+
+State marginal matching (SMM) (Lee et al., 2020; Hazan et al., 2019; Ghasemipour et al., 2020) has
+been recently studied as an alternative problem specification in RL, where instead of stationary-reward
+maximization, the objective is to find a policy minimizing the divergence D between its state marginal
+distribution ρ[π](s) to a given target distribution p[∗](s)[2]:
+
+_LSMM(π) = −D(ρ[π](s), p[∗](s))_ (2)
+
+where D is a divergence measure such as Kullback-Leibler (KL) divergence (Lee et al., 2020; Fu
+et al., 2018) or, more generally, some f -divergences (Ghasemipour et al., 2020). For the target
+distribution p[∗](s), Lee et al. (2020) set a uniform distribution to enhance the exploration over the
+entire state space; Ghasemipour et al. (2020) and Gu et al. (2021) set through scripted distribution
+_sketches to generate desired behaviors; and adversarial inverse RL methods (Ho & Ermon, 2016;_
+Fu et al., 2018; Ghasemipour et al., 2020; Kostrikov et al., 2020) set as the expert data for imitation
+learning. Notably, unlike the RL objective in Eq.1, SMM objectives like Eq.2 no longer depend on
+task rewards and are only functions of state transition dynamics and target state distribution.
+
+3.2 PARAMETERIZED RL OBJECTIVES
+
+Lastly, we discuss the basis for methods like HER and TDM (Andrychowicz et al., 2017; Pong et al.,
+2018), LfP (Lynch et al., 2019), and return-conditioned or upside-down RL (Srivastava et al., 2019;
+Kumar et al., 2019; Chen et al., 2021a; Janner et al., 2021): parameterized RL objectives. Given
+parameterized reward functions with parameter z ∈Z, a conditional policy π(a|s, z) is learned with
+respect to multiple values of z simultaneously weighted by p(z). As examples, the RL objective
+in Eq.1 becomes:
+
+1
+_LRL(π) = Ez [LRL(π, z)] =_ _z_ [(][s][)][,a][∼][π][(][·|][s,z][)][ [][r][z][(][s, a][)]] (3)
+
+1 _γ_ [E][z][∼][p][(][z][)][,s][∼][ρ][π]
+_−_
+
+where the state marginal ρ[π]z [is from rolling out a conditioned policy][ π][(][·|·][, z][)][. These can be considered]
+as a special case of contextual MDPs (Jiang et al., 2017) and are all multi-task RL problems.
+
+4 HINDSIGHT INFORMATION MATCHING
+
+We show how HER and TDM (Andrychowicz et al., 2017; Pong et al., 2018), LfP (Lynch et al.,
+2019), hindsight multi-task RL (Li et al., 2020; Eysenbach et al., 2020), and return-conditioned
+or upside-down RL (Srivastava et al., 2019; Kumar et al., 2019; Chen et al., 2021a; Janner et al.,
+2021) all belong to hindsight algorithms with a shared idea of using future state information
+**to automatically mine for positive, or “optimal”, examples with respect to certain contextual**
+**parameter values, where these examples can accelerate RL or be used for behavior cloning (BC),**
+i.e. supervised learning. We start by defining additional notations.
+
+Given a partial trajectory from state st as τt = {st, at, st+1, at+1, . . . }, we define its information
+_statistics as I(τt). I(τt) could be any function of a trajectory that captures some statistical_
+properties in state-space or trajectory-space, such as sufficient statistics of a distribution, like mean,
+variance or higher-order moments (Wainwright & Jordan, 2008). For convenience, we further
+define the notion of a feature function Φ(·, ·) : S × A → _F_ [5], where the trajectory is then noted as
+_τt[Φ]_ [=][ {][φ][t][, φ][t][+1][, . . ., φ][T] [= Φ(][s][t][, a][t][)][ ∈] _[F][ and the information statistics as][ I]_ [Φ][(][τ][t][)][.][ Φ][ in practice]
+
+_[}][, φ][t]_
+
+2As discussed in Fu et al. (2018) and Ghasemipour et al. (2020), it’s also straight-forward to define stateaction-marginal matching with respect to3There is a rich literature on one-shot, or few-shot, imitation learning through meta learning. For closer ρ[π](s, a) = ρ[π](s)π(a|s) and the exact same algorithms apply.
+connections to parameterized policies and relabeling, we mainly discuss metric-based (or amortization-based)
+methods (Duan et al., 2016), as opposed to gradient-based approaches (Finn et al., 2017).
+
+4DisCo RL (Nasiriany et al., 2021) conditions on a parameterized goal distribution and uses hindsight
+techniques; however, their RL objective in Equation 1 Es∼ρπz [(][s][)][ [log][ p]z[∗][(][s][)]][, in contrast to a proper divergence]
+objective like in Ghasemipour et al. (2020), is missing the H (ρ[π]z [(][s][))][ entropy term and is essentially just solving]
+for parameterized stationary reward maximization, as also stated in their Remark 1.
+5Recent mutual information maximization or empowerment methods (Eysenbach et al., 2019; Sharma et al.,
+
+2020; Choi et al., 2021) also make similar assumptions; see Gu et al. (2021) for more details.
+
+
+-----
+
+|Method|Algo. Type|Training|IΦ(τ)|Architectures|
+|---|---|---|---|---|
+|Andrychowicz et al. (2017) Pong et al. (2018) Chebotar et al. (2021) Li et al. (2020) Eysenbach et al. (2020)|RL RL RL RL BC/RL|Online Online Offline Online On/Offline|φT φT φT a ar rg m ma ax P Pt γ γt tr r( (s st t, a at t, · ·) g x t,, )|MLP MLP CNN MLP MLP|
+|Lynch et al. (2019) Ghosh et al. (2021) Srivastava et al. (2019) Kumar et al. (2019) Janner et al. (2021) Duan et al. (2017)3|BC BC BC BC BC BC|Offline Online Online Online Offline Offline|φT φT P γtrt t P γtrt t P t γtrt or φT τ|Stochastic RNN MLP Fast Weights MLP Transformer MLP + LSTM|
+|Generalized DT (ours) DT (Chen et al., 2021a) Categorical DT (ours)4 Bi-Directional DT (ours)|BC BC BC BC|Offline Offline Offline Offline|Any P γtrt t histogram(rt, γ) τ|Transformer Transformer Transformer Transformer|
+
+
+Table 1: A coarse summary of hindsight information matching (HIM) algorithms. The notation follows Section 4.
+With HIM, all prior works can be categorized to four generic problem types based on I [Φ](τ ): (1) goal-based
+_φT (Andrychowicz et al., 2017), (2) multi-task arg max_ _t_ _[γ][t][r][(][s][t][, a][t][,][ ·][)][ (][Li et al.][,][ 2020][), (3)][ return-based]_
+
+_t_ _[γ][t][r][t][ (][Chen et al.][,][ 2021a][), or (4)][ full trajectory imitation][ τ][ (][Duan et al.][,][ 2017][).][ Φ][ is the reward function]_
+_r(s, a) in (2) and (3), an indexing function for state dimensions (e.g. xy-velocities) or a learned function ([P]_ Nair
+
+Pet al., 2018) in (1), or an identify function in (4). Our CDT introduces a new category, (5) distribution-based
+
+_I_ [Φ](τ ) = histogram(rt, γ), based on a minimal modification to DT, while our BDT can be considered as DT
+adapted for (4), the trajectory imitation.
+
+can be an identity function, the reward function r(s, a), sub-dimensions of s (e.g. xy-velocities),
+or a generic parameterized function (e.g. auto-encoder). Generalizing reward-centric intuitions in
+DT (Chen et al., 2021a), we define information matching (IM) problems as learning a conditional
+policy π(a|s, z) whose trajectory rollouts satisfy some desired information statistics value z:
+
+minπ [E][z][∼][p][(][z][)][,τ] _[∼][ρ]z[π][(][τ]_ [)] _D(I_ [Φ](τ ), z) (4)
+ 
+
+An important observation for the IM objective (Eq.4) is that for any given trajectory τ **, setting**
+**z[∗]** = I[Φ](τ ) will minimize the inner term divergence D = 0 and therefore τ states and actions
+**are optimal with respect to z = z[∗]** **and samples of (τi, z[∗]i** [)][ can be used to accelerate RL or do]
+**BC. We call these algorithms hindsight information matching (HIM) algorithms.**
+
+Table 1, which classifies prior methods into effectively four categories based on I[Φ](τ ), leads us to
+have the following insights around HIM algorithms:
+
+-  New HIM algorithms can be proposed by simply changing I[Φ](τ ), as we did to propose
+Categorical DT for (5) distribution-based.
+
+-  Given a choice of I[Φ](τ ), new HIM algorithms can be proposed by changing implementation details (Furuta et al., 2021a), such as using “RL" or “BC" as algorithm type, doing
+“Online” or “Offline” training (Levine et al., 2020), and network architectures. All “Offline” “BC” methods could be adopted easily to “Online” learning through recursive data
+collections (Ghosh et al., 2021; Kumar et al., 2019; Matsushima et al., 2021).
+
+-  Only (1) goal-based and (2) multi-task can use “RL” as algorithm type, while all four, plus
+our (5) distribution-based, can use “BC”, because “RL” requires optimizing Eq. 4 with respect
+to the policy, which gets non-trivial for some choices of I[Φ](τ ); e.g. (3-5) return-based, full
+trajectory imitation, or distribution-based. “BC” bypasses the need to solve Eq. 4 and therefore
+is universally applicable to any I[Φ](τ ) or HIM algorithm[6].
+
+5 GENERALIZED DECISION TRANSFORMER
+
+Following the insights in Section 4, we introduce Generalized Decision Transformer (GDT), which
+generalizes DT (Chen et al., 2021a) based on different choices of I [Φ](τ ), as described in Figure 1 and
+the last rows of Table 1. We chose DT as the base model since it is a simple model that uses “BC” as
+the algorithm type and “Transformer” as the architecture. The choice of “BC” is a must, so we can
+tractably train GDT with respect to any I [Φ](τ ) or HIM problem. The choice for the architecture is
+
+6Evolutionary strategies (Salimans et al., 2017), technically a non-RL black-box algorithm, could be applied,
+but accurate estimations of D in Eq.4 could require prohibitively many samples.
+
+
+-----
+
+more flexible; however, we decided to use transformers (Vaswani et al., 2017) in this work due to their
+enormous scaling successes in language and vision domains (Dosovitskiy et al., 2020; Brown et al.,
+2020; Ramesh et al., 2021). See Algorithm 1 (in Appendix F) for the full pseudocode. While GDT
+in Figure 1 can lead to different algorithms depending on different choices of the feature function
+Φ(s, a) and the anti-causal aggregator (which together determine I [Φ](τ )), in this work we focus our
+empirical studies on the following two variants: Categorical DT (CDT) and Bi-directional DT (BDT).
+
+5.1 TASK DEFINITIONS AND METRICS
+
+Before proceeding to define CDT and BDT, we first concretely define the tasks they are designed
+to solve, namely: offline multi-task state-marginal matching (SMM), and offline multi-task
+**imitation learning (IL). Given the intrinsic connection or equivalence between distribution matching**
+and IL (Ghasemipour et al., 2020), these two separate terminologies may seem redundant. However,
+inspired by the initial papers studying SMM problems (Lee et al., 2020; Ghasemipour et al., 2020)
+which qualitatively evaluates distribution matching results in specified state dimensions (e.g. xypositions), we define the imitation task as offline multi-task SMM if specific Φ is given, and as offline
+multi-task IL if Φ is an identity (i.e. φ = s) or learned (e.g. auto-encoder). We essentially view IL as
+SMM evaluation on full state.
+
+Given these definition, we also define a single metric for both offline multi-task SMM/IL: typical IL
+assumes some availability of task reward or success evaluation, and indirectly measure the quality of
+imitation through it (Ho & Ermon, 2016; Fu et al., 2018). Instead, again grounding on its connection
+to distribution matching (Ghasemipour et al., 2020), we propose a Wasserstein loss between statemarginal and target distributions as SMM-inspired metrics for evaluating offline multi-task SMM or
+IL tasks. However, it is often intractable to measure such loss for full state or even for some state
+dimensions analytically because both state-marginal and target distributions can be non-parametric
+and we cannot access their densities. In practice, we empirically estimate it employing the binning of
+the feature space we specified. More discussions are included in Appendix C.
+
+5.2 CATEGORICAL DECISION TRANSFORMER FOR DISTRIBUTION MATCHING
+
+Inspired by the recent successes in distributional RL (Bellemare et al., 2017; Dabney et al., 2018;
+2020), offline RL (Fujimoto et al., 2019; Jaques et al., 2020; Ghasemipour et al., 2021; Fujimoto & Gu,
+2021) and state-marginal matching (Lee et al., 2020; Ghasemipour et al., 2020; Gu et al., 2021), we
+introduce Categorical DT (CDT) for offline state-marginal matching (SMM) problem in Section 5.1.
+Following the prior works (Bellemare et al., 2017; Furuta et al., 2021b), we assume low-dimensional
+Φ, e.g. rewards or state dimensions like xyz-velocities, and employ the discretization of feature
+spaces to form categorical approximations of continuous distributions. To compute zt[∗] [=][ I] [Φ][(][τ][t][:][T] [)]
+for all timesteps t given a trajectory τ1:T, we use similar recursive Bellman-like computation inspired
+by Bellemare et al. (2017) (see Appendix F for the details). To the best of our knowledge, this is the
+first paper to study offline multi-task SMM and propose an effective algorithm for it.
+
+5.3 DECISION TRANSFORMER WITH LEARNED Φ
+
+While CDT assumes some low-dimensional Φ is provided for tractable binning and distribution
+approximation, we also study cases where Φ or r is not provided, and instead Φ is learned through
+auto-encoding (Hinton & Salakhutdinov, 2006; Bengio et al., 2012) (DT-AE) or contrastive (van den
+Oord et al., 2018; Srinivas et al., 2020; Yang & Nachum, 2021) (DT-CPC) losses for DT (see
+Appendix G for the details). In this case, CDT is unnecessary because if Φ learns sufficient features
+of s, matching their means, i.e. moments, through DT is enough to match any distribution to an
+arbitrary precision (Wainwright & Jordan, 2008; Li et al., 2015). Since Φ is differentiable with respect
+to DT’s action-prediction losses, we also compare DT-E2E, where we learn Φ through end-to-end
+differentiation. As Section 5.1 defines, these methods do offline multi-task SMM with full state, or
+offline multi-task IL, a similar objective to state-marginal matching or adversarial inverse RL (Ho &
+Ermon, 2016; Ghasemipour et al., 2020) in online RL. To the best of our knowledge, this is the first
+offline multi-task IL method that explicitly accounts for SMM through architectural bottlenecks.
+
+5.4 BI-DIRECTIONAL DECISION TRANSFORMER FOR ONE-SHOT IMITATION LEARNING
+
+
+-----
+
+The absence of given Φ could be tackled with learning not only parameterized Φ as in Section 5.3,
+but also a parameterized aggregator. Building on the connection to one-shot imitation learning (Duan
+et al., 2017), we provide another natural extension of DT under GDT framework called Bi-directional
+**Decision Transformer (BDT), which assumes an identity Φ, and learns representation within the**
+aggregator, in this case a second (anti-causal) transformer (Radford et al., 2018) that takes a reverseorder state sequence as an input. See Algorithm 1 in Appendix F for the pseudocode, and Appendix D
+for further comments on the connection to one-shot or meta learning. While we found some positive
+results for even simple unsupervised regularizer approaches (e.g. DT-AE), we observe BDT could
+achieve substantially better offline multi-task IL results than DT-X variants in Section 5.3.
+
+6 EXPERIMENTS
+
+We empirically investigate the following questions:
+
+-  (SMM) Can CDT match unseen reward distributions?
+
+-  (SMM) Can CDT match and generalize to unseen 1D/2D state-feature distributions?
+
+-  (SMM) Can CDT match unseen synthesized state-feature distributions?
+
+-  (IL) Can BDT perform offline one-shot imitation learning in full state?
+
+We experiment on the OpenAI Gym, MuJoCo tasks (HalfCheetah, Hopper, Walker2d, Ant-v3), a
+common benchmark for continuous control (Brockman et al., 2016; Todorov et al., 2012). Through
+the experiments, we use medium-expert datasets in D4RL (Fu et al., 2020) to ensure the decent data
+coverage. We sort all the trajectories by their cumulative rewards, hold out five best trajectories and
+five 50 percentile trajectories as a test set (10 trajectories in total), and use the rest as a train set. We
+report the results averaged over 20 rollouts every 4 random seed. We share our implementation to
+ensure the reproducibility[8].
+
+As discussed in Section 5.1 and Appendix C, we evaluate CDT/BDT with approximate distribution
+matching objective: Wasserstein-1 distance between categorical distributions of features in rollouts or
+target trajectories. We compare CDT to DT, Meta-BC, and FOCAL (Li et al., 2021), a metric-based
+offline meta RL method, as baselines. While Meta-BC and FOCAL does not solve the offline
+distribution matching problem directly, they provide decent baseline performance since their offline
+one-shot adaptation to the given target trajectories could deal with it (see Appendix B for the details).
+
+6.1 REWARD AND STATE-FEATURE MATCHING
+
+First, we evaluate whether CDT could match its rollout to the target distribution. We choose reward
+and state-feature, such as x-velocity of the agents, as feature spaces to match. To specify the target
+distributions during the evaluation, we feed the categorical representation of the target to CDT. As the
+same as the reward case, DT takes the summation of the state-feature over a trajectory as an input.
+
+We quantitatively compare CDT against baselines (Table 2) in x-velocity case, where CDT shows
+better matching results to the target distributions unseen during training. We provide the reward
+distribution results and the visualization in Appendix E.1, where CDT performs very well in all
+cases. To test the generalization additionally, we intervene the target distributions by (1) shifting
+the target distributions in the test set by constant offsets, and (2) synthesizing novel distributions via
+python scripts. See Appendix E.7 and E.8 for the results. Furthermore, to investigate the scalability
+of CDT to multi-dimensional state-features, we experiment 2D state-feature distribution matching
+(xy-velocities on Ant) in Appendix E.3, where CDT outperforms other baselines.
+
+|Method|halfcheetah Expert Medium Total|hopper Expert Medium Total|walker2d Expert Medium Total|Average|
+|---|---|---|---|---|
+|Categorical DT DT BC (no-context) Meta-BC FOCAL (Li et al., 2021)|0.633 ± 0.329 0.996 ± 1.467 0.814 ± 1.079 0.746 ± 0.380 1.076 ± 1.549 0.911 ± 1.140 3.017 ± 0.891 3.468 ± 1.271 3.242 ± 1.121 0.852 ± 0.688 0.840 ± 1.139 0.846 ± 0.941 1.643 ± 0.461 1.123 ± 1.550 1.383 ± 0.518|0.139 ± 0.043 0.059 ± 0.013 0.099 ± 0.051 0.177 ± 0.053 0.093 ± 0.037 0.135 ± 0.063 0.652 ± 0.264 0.248 ± 0.199 0.450 ± 0.309 0.799 ± 0.505 0.130 ± 0.056 0.464 ± 0.491 1.456 ± 0.473 0.484 ± 0.382 0.970 ± 0.649|0.122 ± 0.071 0.136 ± 0.045 0.129 ± 0.060 0.083 ± 0.031 0.146 ± 0.084 0.115 ± 0.070 0.748 ± 0.529 0.858 ± 0.617 0.803 ± 0.577 0.110 ± 0.082 1.462 ± 1.136 0.786 ± 1.052 1.571 ± 0.563 0.603 ± 0.427 1.087 ± 0.695|0.347 0.387 1.498 0.699 1.147|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+Categorical DTDTBC (no-context)Meta-BCFOCAL (Li et al., 2021) 0.6330.7463.0170.8521.643 ± ± ± ± ± 0.329 0.380 0.891 0.688 0.461 0.9961.0763.4680.8401.123 ± ± ± ± ± 1.467 1.549 1.271 1.139 1.550 0.8140.9113.2420.8461.383 ± ± ± ± ± 1.079 1.140 1.121 0.941 0.518 0.1390.1770.6520.7991.456 ± ± ± ± ± 0.043 0.053 0.264 0.505 0.473 0.0590.0930.2480.1300.484 ± ± ± ± ± 0.013 0.037 0.199 0.056 0.382 0.0990.1350.4500.4640.970 ± ± ± ± ± 0.051 0.063 0.309 0.491 0.649 0.1220.0830.7480.1101.571 ± ± ± ± ± 0.071 0.031 0.529 0.082 0.563 0.1360.1460.8581.4620.603 ± ± ± ± ± 0.045 0.084 0.617 1.136 0.427 0.1290.1150.8030.7861.087 ± ± ± ± ± 0.060 0.070 0.577 1.052 0.695 0.3470.3871.4980.6991.147
+
+
+Table 2: Quantitative evaluation of state-feature distribution matching, measuring Wasserstein-1 distance between
+the rollout and target distributions. We compare Categorical DT against DT, BC, Meta-BC, and FOCAL. CDT
+achieves better matching than baselines. See Table 9 in Appendix E.1 for the reward distribution results.
+
+[8https://github.com/frt03/generalized_dt](https://github.com/frt03/generalized_dt)
+
+
+-----
+
+6.2 GENERALIZATION TO UNSEEN TARGET DISTRIBUTION
+
+The performance of offline methods in RL is often restricted by the coverage or quality of datasets.
+While we demonstrate CDT can perform offline state-marginal matching to unseen target distributions
+in Section 6.1, the standard offline datasets might not be diverse enough to observe the generalization
+since those are collected by single-task reward-maximization policies. To test the generalization
+to more diverse behaviors, we investigate the following tasks: (1) z-velocity distribution matching
+with synthesized bi-modal behavior and (2) cheetah-velocity matching problem from meta RL/IL
+literature (Rakelly et al., 2019; Li et al., 2021; Fakoor et al., 2020)
+
+
+6.2.1 SYNTHESIZING UNSEEN BI-MODAL DISTRIBUTION
+
+To generate diverse behaviors for z-axis, we obtain the expert cheetah that backflips towards -x
+direction by modifying reward function (see Appendix E.4 for the details). Combining expert
+backflipping trajectories and expert running forward trajectories from D4RL dataset, we construct a
+novel dataset with diverse behaviors. We experiment the offline SMM with not only each uni-modal
+behavior (backflipping or running forward), but also synthesized bi-modal behavior; running forward
+first, then backflipping during a single rollout, using patchworked target trajectories.
+
+Table 3 and Figure 2 (a) show that CDT successfully matches the distribution to both uni-modal
+(running forward or backflipping) and synthesized bi-modal distributions better than DT and FOCAL,
+and is comparable to Meta-BC that originally designed to deal with such multi-task settings. Due to
+the difficulty for RL algorithms to maximize Eq. 4, FOCAL struggles to solve the offline multi-task
+SMM, even though FOCAL uses the same context embedding as Meta-BC. The bi-modal behavior
+[learned by CDT can be seen at https://sites.google.com/view/generalizeddt.](https://sites.google.com/view/generalizeddt)
+
+
+|Method|Uni-modal|Bi-modal|Average|
+|---|---|---|---|
+|Categorical DT DT Meta-BC FOCAL (Li et al., 2021)|1.562 ± 0.632 2.676 ± 0.765 1.519 ± 0.696 2.203 ± 1.050|1.625 ± 0.902 2.703 ± 0.703 1.655 ± 0.990 1.983 ± 0.948|1.594 2.690 1.587 2.093|
+
+
+Method **Uni-modal** **Bi-modal** **Average**
+
+Categorical DT 1.562 ± 0.632 1.625 ± 0.902 1.594
+
+DT 2.676 ± 0.765 2.703 ± 0.703 2.690
+
+Meta-BC 1.519 ± 0.696 1.655 ± 0.990 1.587
+
+FOCAL (Li et al., 2021) 2.203 ± 1.050 1.983 ± 0.948 2.093
+
+Table 3: State-feature (z-velocity) distribution matching with uni-modal and (synthesized) bi-modal target
+trajectories in HalfCheetah environment. Categorical DT matches both uni- and bi-modal trajectories better than
+DT and FOCAL, and is comparable to Meta-BC that originally aims to solve multi-task problem.
+
+Target CDT DT
+
+|uni-mo|odal traj 1|0|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+
+|bi-modal traj 1 0.8 Probability 0.6 0.4 0.2 0.0|Col2|Col3|Col4|Col5|Col6|Col7|Col8|0.8 0.6 0.4 0.2 0.0|Col10|Col11|Col12|Col13|Col14|0.8 0.6 0.4 0.2 0.0|Col16|Col17|Col18|Col19|Col20|Col21|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||||||||||||||||||||||
+||||||||||||||||||||||
+||||||||||||||||||||||
+||||||||||||||||||||||
+||||||||||||||||||||||
+
+|uni-moda|l traj 0|Col3|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+|−20 −10 uni-moda|0 10 l traj 0||
+||||
+||||
+||||
+||||
+||||
+||||
+
+|Col1|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+
+|Col1|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||||
+||||
+
+|bi-mod|dal traj 1|Col3|0.8|Col5|Col6|Col7|Col8|Col9|0.8|Col11|Col12|Col13|Col14|Col15|0.8|Col17|Col18|Col19|Col20|Col21|Col22|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||||0.8 0.6 Probability 0.4 0.2||||||0.8 0.6 0.4 0.2||||||0.8 0.6 0.4 0.2|||||||
+|||||||||||||||||||||||
+|||||||||||||||||||||||
+|||||||||||||||||||||||
+|||||||||||||||||||||||
+|||||||||||||||||||||||
+
+
+Target CDT DT x-vel = 0.5 x-vel = 1.5 x-vel = 2.5
+
+0.30 uni-modal traj 0 0.30 uni-modal traj 1 0.30 bi-modal traj 0 0.30 bi-modal traj 1 0.8 0.8 0.8
+
+0.25 0.25 0.25 0.25 0.6 0.6 0.6
+
+0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.4 0.4 0.4
+
+Probability0.10 0.10 0.10 0.10 Probability0.2 0.2 0.2
+
+0.05 0.05 0.05 0.05
+
+0.000.30 −20 uni-modal traj 0−10 0 10 0.000.30 −20 uni-modal traj 1−10 0 10 0.000.30 −20 bi-modal traj 0−10 0 10 0.000.30 −20 bi-modal traj 1−10 0 10 0.00.8−1 0 x-vel = 0.51 2 3 4 0.00.8−1 0 x-vel = 1.51 2 3 4 0.00.8−1 0 x-vel = 2.51 2 3 4
+
+0.25 0.25 0.25 0.25 0.6 0.6 0.6
+
+0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.4 0.4 0.4
+
+Probability0.10 0.10 0.10 0.10 Probability0.2 0.2 0.2
+
+0.05 0.05 0.05 0.05
+
+0.00 −20 −10 0 10 0.00 −20 −10 0 10 0.00 −20 −10 0 10 0.00 −20 −10 0 10 0.0−1 0 1 2 3 4 0.0−1 0 1 2 3 4 0.0−1 0 1 2 3 4
+
+
+(a) Z-Velocity
+
+
+(b) Unseen Cheetah-Velocity
+
+
+Figure 2: (a) Z-Velocity and (b) Unseen Cheetah-Velocity results. Blue histograms represent target distributions.
+In (a), CDT (red) can match not only uni-modal behaviors for both running forward and backflipping, but
+also bi-modal behaviors; during a single rollout running forward first, then backflipping. DT (yellow) tends to
+lean backflipping and fails to fit neither uni-modal nor bi-modal ones. In (b), CDT successfully handles the
+trajectories unseen during training, while DT seems to output covering behaviors over the dataset support.
+
+6.2.2 DIVERSE UNSEEN DISTRIBUTION FROM META LEARNING TASK
+
+
+Generalization to unknown target demonstrations or tasks has been actively investigated in meta or
+one-shot RL/IL literature (Duan et al., 2016; Wang et al., 2016). To verify the generalization of CDT
+to diverse behaviors, we adopt the cheetah-velocity task; a popular task in meta RL/IL (Rakelly et al.,
+2019; Li et al., 2021; Fakoor et al., 2020), where the cheetah tries to run with the specified velocity.
+We prepare 31 target x-velocities; taken from [0.0, 3.0], uniformly spaced at 0.1 intervals, and hold
+out {0.5, 1.5, 2.5} as a test set. See Appendix E.5 for the dataset generation.
+
+
+-----
+
+Table 4 and Figure 2 (b) reveal that CDT outperforms DT or FOCAL, and is slightly better than MetaBC through the distribution matching evaluation, which implies CDT could solve offline multi-task
+SMM generalizing to the unknown target trajectories, given sufficiently diverse offline datasets.
+
+|Method|x-vel: 0.5|x-vel: 1.5|x-vel: 2.5|Average|
+|---|---|---|---|---|
+|Categorical DT DT Meta-BC FOCAL (Li et al., 2021)|0.060 ± 0.026 1.197 ± 0.227 0.150 ± 0.069 0.472 ± 0.005|0.211 ± 0.022 0.533 ± 0.105 0.152 ± 0.127 0.952 ± 0.073|0.149 ± 0.110 0.861 ± 0.247 0.167 ± 0.055 0.346 ± 0.186|0.140 0.864 0.156 0.590|
+
+
+Method **x-vel: 0.5** **x-vel: 1.5** **x-vel: 2.5** **Average**
+
+Categorical DT 0.060 ± 0.026 0.211 ± 0.022 0.149 ± 0.110 0.140
+
+DT 1.197 ± 0.227 0.533 ± 0.105 0.861 ± 0.247 0.864
+
+Meta-BC 0.150 ± 0.069 0.152 ± 0.127 0.167 ± 0.055 0.156
+
+FOCAL (Li et al., 2021) 0.472 ± 0.005 0.952 ± 0.073 0.346 ± 0.186 0.590
+
+
+Table 4: Generalization to unseen target velocity (x-velocity = 0.5, 1.5, 2.5) among training dataset (x-velocity ∈
+
+[0.0, 3.0]\{0.5, 1.5, 2.5}; uniformly spaced at 0.1 intervals), which is a popular setting in meta RL/IL. CDT
+successfully deals with unseen target velocities well, outperforming DT and FOCAL, and is slightly better than
+Meta-BC through the offline multi-task SMM evaluation.
+
+6.3 ONE-SHOT DISTRIBUTION MATCHING IN FULL STATE
+
+Lastly, we investigate BDT for offline multi-task IL, where we do not observe rewards nor state
+features explicitly. Instead, target full state trajectories that the agents are expected to mimic is
+given. We compare BDT against parameterized Φ variants; DT-AE, -CPC, and -E2E discussed in
+Section 5.3. We consider three strategies to train the encoder for DT-AE and -CPC: training with only
+unsupervised loss, training with unsupervised and DT’s supervised loss jointly (called as “joint”),
+and pre-training with only unsupervised loss and freezing the weights during DT training (called as
+“frozen”). We aggregate the learned Φ by summation within the input sequence (length is 20). We
+evaluate BDT and DT-X with the same distribution matching evaluation as Section 6.1.
+
+We sweep m-dim learned feature from the encoder Φ(s) with m ∈{1, 4, 16}. Table 5 presents the
+offline multi-task IL results with respect to x-velocity distribution, using m = 16 embeddings (see
+Appendix E.6 for the full results including m = 1, 4, and the reward distribution case). Similar to the
+discussion in Yang & Nachum (2021), DT-CPC sometimes fails to obtain sufficient representation
+for imitation. While even simple approaches, DT-AE and DT-AE (frozen), show positive results
+compared to no-context BC baselines (in Table 2), BDT outperforms all other learned Φ variants
+or Meta-BC and is comparable to CDT or DT (also in Table 2) with longer input (N = 50). This
+implies that even though we don’t assume the state-feature specification, aggregator choice in GDT
+with minimal architectural changes may solve the offline distribution matching problem efficiently.
+We leave more sophisticated objectives or architectural changes as future work.
+
+|Method|halfcheetah Expert Medium Total|hopper Expert Medium Total|walker2d Expert Medium Total|Average|
+|---|---|---|---|---|
+|DT-AE DT-CPC DT-AE (joint) DT-CPC (joint) DT-E2E DT-AE (frozen) DT-CPC (frozen)|2.060 ± 1.076 1.089 ± 0.827 1.574 ± 1.075 6.011 ± 0.324 1.403 ± 1.384 3.707 ± 2.514 8.643 ± 0.679 2.260 ± 0.690 5.451 ± 3.264 4.544 ± 1.184 1.884 ± 1.465 3.214 ± 1.882 8.208 ± 1.087 1.928 ± 0.838 5.068 ± 3.287 1.821 ± 0.582 1.319 ± 0.863 1.570 ± 0.778 3.489 ± 1.159 2.543 ± 0.903 3.016 ± 1.141|0.611 ± 0.060 0.142 ± 0.049 0.377 ± 0.241 0.610 ± 0.019 0.101 ± 0.024 0.355 ± 0.256 1.255 ± 0.363 0.649 ± 0.241 0.952 ± 0.432 0.575 ± 0.032 0.096 ± 0.028 0.335 ± 0.241 1.097 ± 0.217 0.542 ± 0.187 0.820 ± 0.344 0.634 ± 0.038 0.137 ± 0.062 0.385 ± 0.253 0.631 ± 0.091 0.171 ± 0.130 0.401 ± 0.256|0.833 ± 0.346 0.321 ± 0.126 0.577 ± 0.365 1.281 ± 0.022 0.138 ± 0.040 0.710 ± 0.572 2.104 ± 0.620 0.988 ± 0.413 1.546 ± 0.767 0.949 ± 0.484 0.412 ± 0.378 0.680 ± 0.510 2.086 ± 0.437 1.239 ± 0.712 1.662 ± 0.727 1.180 ± 0.328 0.404 ± 0.170 0.792 ± 0.468 1.315 ± 0.329 0.279 ± 0.127 0.797 ± 0.575|0.843 1.591 2.650 1.410 2.517 0.916 1.405|
+|BDT (N=20) BDT (N=50)|1.592 ± 0.201 1.208 ± 1.854 1.400 ± 1.333 0.840 ± 0.063 1.223 ± 1.828 1.031 ± 1.307|0.318 ± 0.093 0.081 ± 0.013 0.200 ± 0.136 0.142 ± 0.010 0.098 ± 0.025 0.120 ± 0.029|0.196 ± 0.031 0.392 ± 0.184 0.294 ± 0.164 0.192 ± 0.051 0.163 ± 0.027 0.178 ± 0.043|0.631 0.443|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+DT-AEDT-CPCDT-AE (joint)DT-CPC (joint)DT-E2EDT-AE (frozen)DT-CPC (frozen) 2.0606.0118.6434.5448.2081.8213.489 ± ± ± ± ± ± ± 1.076 0.324 0.679 1.184 1.087 0.582 1.159 1.0891.4032.2601.8841.9281.3192.543 ± ± ± ± ± ± ± 0.827 1.384 0.690 1.465 0.838 0.863 0.903 1.5743.7075.4513.2145.0681.5703.016 ± ± ± ± ± ± ± 1.075 2.514 3.264 1.882 3.287 0.778 1.141 0.6110.6101.2550.5751.0970.6340.631 ± ± ± ± ± ± ± 0.060 0.019 0.363 0.032 0.217 0.038 0.091 0.1420.1010.6490.0960.5420.1370.171 ± ± ± ± ± ± ± 0.049 0.024 0.241 0.028 0.187 0.062 0.130 0.3770.3550.9520.3350.8200.3850.401 ± ± ± ± ± ± ± 0.241 0.256 0.432 0.241 0.344 0.253 0.256 0.8331.2812.1040.9492.0861.1801.315 ± ± ± ± ± ± ± 0.346 0.022 0.620 0.484 0.437 0.328 0.329 0.3210.1380.9880.4121.2390.4040.279 ± ± ± ± ± ± ± 0.126 0.040 0.413 0.378 0.712 0.170 0.127 0.5770.7101.5460.6801.6620.7920.797 ± ± ± ± ± ± ± 0.365 0.572 0.767 0.510 0.727 0.468 0.575 0.8431.5912.6501.4102.5170.9161.405
+
+BDT (N =20) 1.592 ± 0.201 1.208 ± 1.854 1.400 ± 1.333 0.318 ± 0.093 0.081 ± 0.013 0.200 ± 0.136 0.196 ± 0.031 0.392 ± 0.184 0.294 ± 0.164 0.631
+
+BDT (N =50) 0.840 ± 0.063 1.223 ± 1.828 1.031 ± 1.307 0.142 ± 0.010 0.098 ± 0.025 0.120 ± 0.029 0.192 ± 0.051 0.163 ± 0.027 0.178 ± 0.043 0.443
+
+
+Table 5: The results of BDT on the state-feature distribution matching problem (m = 16). While even simple
+auto-encoder regularizers sometimes work well, BDT with longer contexts seems to outperform other strategies
+and is comparable to CDT or DT (in Table 2). See Appendix E.6 for the full results including m = 1, 4.
+
+7 CONCLUSION
+
+We provide a unified perspective on a wide range of hindsight algorithms, and generalize the problem
+formulation as hindsight information matching (HIM). Inspired by recent successes in RL as sequence
+modeling, we propose Generalized Decision Transformer (GDT) which includes DT, Categorical
+DT, and Bi-directional DT as special cases, and is applicable to any HIM with proper choices
+of Φ and aggregator. We show how Categorical DT, a minor modification of DT, enables the first
+effective offline state-marginal matching algorithm and propose new benchmark tasks for this problem
+class. We also demonstrate the effectiveness of Bi-directional DT as a one-shot imitation learner,
+significantly outperforming simple variants based on DT. We hope our proposed HIM and GDT
+frameworks shed new perspectives on hindsight algorithms and the applicability of sequence modeling
+to much broader classes of RL problems beyond classic reward-based RL.
+
+
+-----
+
+ETHICS STATEMENT
+
+Since this paper mainly focuses on the reinterpretation of hindsight RL algorithms and experiments
+on existing benchmark datasets, we believe there are no ethical concerns.
+
+REPRODUCIBILITY STATEMENT
+
+We share our codes to ensure the reproductivity. The details of hyperparameters are described in
+Appendix A and B. The detailed settings of experiments are described in the Section 6, Appendix E,
+and G. We report the results averaged over 20 rollouts every 4 random seed.
+
+REFERENCES
+
+Pieter Abbeel and Andrew Y Ng. Apprenticeship learning via inverse reinforcement learning. In
+_International Conference on Machine learning, 2004._
+
+Marcin Andrychowicz, Filip Wolski, Alex Ray, Jonas Schneider, Rachel Fong, Peter Welinder, Bob
+McGrew, Josh Tobin, Pieter Abbeel, and Wojciech Zaremba. Hindsight experience replay. In
+_Advances in neural information processing systems, 2017._
+
+Gabriel Barth-Maron, Matthew W Hoffman, David Budden, Will Dabney, Dan Horgan, Dhruva Tb,
+Alistair Muldal, Nicolas Heess, and Timothy Lillicrap. Distributed distributional deterministic
+policy gradients. arXiv preprint arXiv:1804.08617, 2018.
+
+Marc G Bellemare, Will Dabney, and Rémi Munos. A distributional perspective on reinforcement
+learning. In International Conference on Machine Learning, 2017.
+
+Yoshua Bengio, Aaron Courville, and Pascal Vincent. Representation learning: A review and new
+perspectives. arXiv preprint arXiv:1206.5538, 2012.
+
+Rishi Bommasani, Drew A. Hudson, Ehsan Adeli, Russ Altman, Simran Arora, Sydney von Arx,
+Michael S. Bernstein, Jeannette Bohg, Antoine Bosselut, Emma Brunskill, Erik Brynjolfsson,
+Shyamal Buch, Dallas Card, Rodrigo Castellon, Niladri Chatterji, Annie Chen, Kathleen Creel,
+Jared Quincy Davis, Dora Demszky, Chris Donahue, Moussa Doumbouya, Esin Durmus, Stefano
+Ermon, John Etchemendy, Kawin Ethayarajh, Li Fei-Fei, Chelsea Finn, Trevor Gale, Lauren
+Gillespie, Karan Goel, Noah Goodman, Shelby Grossman, Neel Guha, Tatsunori Hashimoto, Peter
+Henderson, John Hewitt, Daniel E. Ho, Jenny Hong, Kyle Hsu, Jing Huang, Thomas Icard, Saahil
+Jain, Dan Jurafsky, Pratyusha Kalluri, Siddharth Karamcheti, Geoff Keeling, Fereshte Khani, Omar
+Khattab, Pang Wei Kohd, Mark Krass, Ranjay Krishna, Rohith Kuditipudi, Ananya Kumar, Faisal
+Ladhak, Mina Lee, Tony Lee, Jure Leskovec, Isabelle Levent, Xiang Lisa Li, Xuechen Li, Tengyu
+Ma, Ali Malik, Christopher D. Manning, Suvir Mirchandani, Eric Mitchell, Zanele Munyikwa,
+Suraj Nair, Avanika Narayan, Deepak Narayanan, Ben Newman, Allen Nie, Juan Carlos Niebles,
+Hamed Nilforoshan, Julian Nyarko, Giray Ogut, Laurel Orr, Isabel Papadimitriou, Joon Sung
+Park, Chris Piech, Eva Portelance, Christopher Potts, Aditi Raghunathan, Rob Reich, Hongyu
+Ren, Frieda Rong, Yusuf Roohani, Camilo Ruiz, Jack Ryan, Christopher Ré, Dorsa Sadigh,
+Shiori Sagawa, Keshav Santhanam, Andy Shih, Krishnan Srinivasan, Alex Tamkin, Rohan Taori,
+Armin W. Thomas, Florian Tramèr, Rose E. Wang, William Wang, Bohan Wu, Jiajun Wu, Yuhuai
+Wu, Sang Michael Xie, Michihiro Yasunaga, Jiaxuan You, Matei Zaharia, Michael Zhang, Tianyi
+Zhang, Xikun Zhang, Yuhui Zhang, Lucia Zheng, Kaitlyn Zhou, and Percy Liang. On the
+opportunities and risks of foundation models. arXiv preprint arXiv:2108.07258, 2021.
+
+Greg Brockman, Vicki Cheung, Ludwig Pettersson, Jonas Schneider, John Schulman, Jie Tang, and
+Wojciech Zaremba. Openai gym. arXiv preprint arXiv:1606.01540, 2016.
+
+Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal,
+Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M.
+Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin,
+Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford,
+Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. arXiv preprint
+_arXiv:2005.14165, 2020._
+
+
+-----
+
+Jacob Buckman, Danijar Hafner, George Tucker, Eugene Brevdo, and Honglak Lee. Sample-efficient
+reinforcement learning with stochastic ensemble value expansion. arXiv preprint arXiv:1807.01675,
+2018.
+
+Pablo Samuel Castro, Subhodeep Moitra, Carles Gelada, Saurabh Kumar, and Marc G Bellemare. Dopamine: A research framework for deep reinforcement learning. _arXiv preprint_
+_arXiv:1812.06110, 2018._
+
+Yevgen Chebotar, Karol Hausman, Yao Lu, Ted Xiao, Dmitry Kalashnikov, Jake Varley, Alex
+Irpan, Benjamin Eysenbach, Ryan Julian, Chelsea Finn, and Sergey Levine. Actionable models:
+Unsupervised offline reinforcement learning of robotic skills. arXiv preprint arXiv:2104.07749,
+2021.
+
+Lili Chen, Kevin Lu, Aravind Rajeswaran, Kimin Lee, Aditya Grover, Michael Laskin, Pieter Abbeel,
+Aravind Srinivas, and Igor Mordatch. Decision transformer: Reinforcement learning via sequence
+modeling. arXiv preprint arXiv:2106.01345, 2021a.
+
+Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared
+Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri,
+Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan,
+Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mohammad Bavarian,
+Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios
+Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebgen Guss, Alex Nichol, Alex Paino,
+Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shantanu Jain, William Saunders,
+Christopher Hesse, Andrew N. Carr, Jan Leike, Josh Achiam, Vedant Misra, Evan Morikawa,
+Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob
+McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. Evaluating
+large language models trained on code. arXiv preprint arXiv:2107.03374, 2021b.
+
+Jongwook Choi, Archit Sharma, Honglak Lee, Sergey Levine, and Shixiang Shane Gu. Variational
+empowerment as representation learning for goal-based reinforcement learning. In International
+_Conference on Machine Learning, 2021._
+
+Will Dabney, Mark Rowland, Marc G Bellemare, and Rémi Munos. Distributional reinforcement
+learning with quantile regression. In Thirty-Second AAAI Conference on Artificial Intelligence,
+2018.
+
+Will Dabney, Zeb Kurth-Nelson, Naoshige Uchida, Clara Kwon Starkweather, Demis Hassabis, Rémi
+Munos, and Matthew Botvinick. A distributional code for value in dopamine-based reinforcement
+learning. Nature, 577(7792):671–675, 2020.
+
+Sudeep Dasari and Abhinav Gupta. Transformers for one-shot visual imitation. In Conference on
+_Robot Learning, 2020._
+
+Sarah Dean, Horia Mania, Nikolai Matni, Benjamin Recht, and Stephen Tu. On the sample complexity
+of the linear quadratic regulator. Foundations of Computational Mathematics, 20(4):633–679,
+2020.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep
+bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805, 2019.
+
+Ron Dorfman, Idan Shenfeld, and Aviv Tamar. Offline meta learning of exploration. arXiv preprint
+_arXiv:2008.02598, 2021._
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas
+Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An
+image is worth 16x16 words: Transformers for image recognition at scale. _arXiv preprint_
+_arXiv:2010.11929, 2020._
+
+Yan Duan, John Schulman, Xi Chen, Peter L Bartlett, Ilya Sutskever, and Pieter Abbeel. RL[2]: Fast
+reinforcement learning via slow reinforcement learning. arXiv preprint arXiv:1611.02779, 2016.
+
+
+-----
+
+Yan Duan, Marcin Andrychowicz, Bradly C. Stadie, Jonathan Ho, Jonas Schneider, Ilya Sutskever,
+Pieter Abbeel, and Wojciech Zaremba. One-shot imitation learning. In Advances in Neural
+_Information Processing Systems, 2017._
+
+Benjamin Eysenbach, Abhishek Gupta, Julian Ibarz, and Sergey Levine. Diversity is all you need:
+Learning diverse skills without a reward function. In International Conference on Learning
+_Representations, 2019._
+
+Benjamin Eysenbach, Xinyang Geng, Sergey Levine, and Ruslan Salakhutdinov. Rewriting history
+with inverse rl: Hindsight inference for policy improvement. In Advances in neural information
+_processing systems, 2020._
+
+Benjamin Eysenbach, Ruslan Salakhutdinov, and Sergey Levine. C-learning: Learning to achieve
+goals via recursive classification. In International Conference on Learning Representations, 2021.
+
+Rasool Fakoor, Pratik Chaudhari, Stefano Soatto, and Alexander J. Smola. Meta-q-learning. In
+_International Conference on Learning Representations, 2020._
+
+Chelsea Finn, Paul Christiano, Pieter Abbeel, and Sergey Levine. A connection between generative
+adversarial networks, inverse reinforcement learning, and energy-based models. arXiv preprint
+_arXiv:1611.03852, 2016._
+
+Chelsea Finn, Tianhe Yu, Tianhao Zhang, Pieter Abbeel, and Sergey Levine. One-shot visual imitation
+learning via meta-learning. In Conference on Robot Learning, 2017.
+
+Justin Fu, Katie Luo, and Sergey Levine. Learning robust rewards with adverserial inverse reinforcement learning. In International Conference on Learning Representations, 2018.
+
+Justin Fu, Aviral Kumar, Ofir Nachum, George Tucker, and Sergey Levine. D4RL: datasets for deep
+data-driven reinforcement learning. arXiv preprint arXiv:2004.07219, 2020.
+
+Scott Fujimoto and Shixiang Shane Gu. A minimalist approach to offline reinforcement learning.
+_arXiv preprint arXiv:2106.06860, 2021._
+
+Scott Fujimoto, Herke van Hoof, and David Meger. Addressing function approximation error in
+actor-critic methods. In International Conference on Machine Learning, 2018.
+
+Scott Fujimoto, David Meger, and Doina Precup. Off-policy deep reinforcement learning without
+exploration. In International Conference on Machine Learning, 2019.
+
+Hiroki Furuta, Tadashi Kozuno, Tatsuya Matsushima, Yutaka Matsuo, and Shixiang Shane Gu. Coadaptation of algorithmic and implementational innovations in inference-based deep reinforcement
+learning. In Advances in neural information processing systems, 2021a.
+
+Hiroki Furuta, Tatsuya Matsushima, Tadashi Kozuno, Yutaka Matsuo, Sergey Levine, Ofir Nachum,
+and Shixiang Shane Gu. Policy information capacity: Information-theoretic measure for task
+complexity in deep reinforcement learning. In International Conference on Machine Learning,
+2021b.
+
+Seyed Kamyar Seyed Ghasemipour, Shixiang Shane Gu, and Richard Zemel. Smile: Scalable
+meta inverse reinforcement learning through context-conditional policies. In Advances in Neural
+_Information Processing Systems, 2019._
+
+Seyed Kamyar Seyed Ghasemipour, Richard Zemel, and Shixiang Gu. A divergence minimization
+perspective on imitation learning methods. In Conference on Robot Learning, 2020.
+
+Seyed Kamyar Seyed Ghasemipour, Dale Schuurmans, and Shixiang Shane Gu. Emaq: Expected-max
+q-learning operator for simple yet effective offline and online rl. In International Conference on
+_Machine Learning, 2021._
+
+Dibya Ghosh, Abhishek Gupta, Ashwin Reddy, Justin Fu, Coline Manon Devin, Benjamin Eysenbach,
+and Sergey Levine. Learning to reach goals via iterated supervised learning. In International
+_Conference on Learning Representations, 2021._
+
+
+-----
+
+Adam Gleave and Oliver Habryka. Multi-task maximum entropy inverse reinforcement learning.
+_arXiv preprint arXiv:1805.08882, 2018._
+
+Shixiang Gu, Timothy Lillicrap, Ilya Sutskever, and Sergey Levine. Continuous deep q-learning with
+model-based acceleration. In International Conference on Machine Learning, 2016.
+
+Shixiang Gu, Timothy Lillicrap, Zoubin Ghahramani, Richard E Turner, Bernhard Schölkopf, and
+Sergey Levine. Interpolated policy gradient: Merging on-policy and off-policy gradient estimation
+for deep reinforcement learning. arXiv preprint arXiv:1706.00387, 2017.
+
+Shixiang Shane Gu, Manfred Diaz, Daniel C. Freeman, Hiroki Furuta, Seyed Kamyar Seyed
+Ghasemipour, Anton Raichuk, Byron David, Erik Frey, Erwin Coumans, and Olivier Bachem. Braxlines: Fast and interactive toolkit for rl-driven behavior engineering beyond reward maximization.
+_arXiv preprint arXiv:2110.04686, 2021._
+
+Jiaming Guo, Rui Zhang, Xishan Zhang, Shaohui Peng, Qi Yi, Zidong Du, Xing Hu, Qi Guo, and
+Yunji Chen. Hindsight value function for variance reduction in stochastic dynamic environment.
+_arXiv preprint arXiv:2107.12216, 2021._
+
+Abhishek Gupta, Benjamin Eysenbach, Chelsea Finn, and Sergey Levine. Unsupervised meta-learning
+for reinforcement learning. arXiv preprint arXiv:1806.04640, 2018.
+
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. Soft actor-critic: Off-policy
+maximum entropy deep reinforcement learning with a stochastic actor. In International Conference
+_on Machine Learning, 2018._
+
+Elad Hazan, Sham M. Kakade, Karan Singh, and Abby Van Soest. Provably efficient maximum
+entropy exploration. In International Conference on Machine Learning, 2019.
+
+Nicolas Heess, Greg Wayne, David Silver, Timothy Lillicrap, Yuval Tassa, and Tom Erez. Learning
+continuous control policies by stochastic value gradients. arXiv preprint arXiv:1510.09142, 2015.
+
+G. E. Hinton and R. R. Salakhutdinov. Reducing the dimensionality of data with neural networks.
+_Science, 313(5786):504–507, 2006._
+
+Jonathan Ho and Stefano Ermon. Generative adversarial imitation learning. In Advances in neural
+_information processing systems, 2016._
+
+Michael Janner, Qiyang Li, and Sergey Levine. Reinforcement learning as one big sequence modeling
+problem. arXiv preprint arXiv:2106.02039, 2021.
+
+Natasha Jaques, Judy Hanwen Shen, Asma Ghandeharioun, Craig Ferguson, Agata Lapedriza,
+Noah Jones, Shixiang Shane Gu, and Rosalind Picard. Human-centric dialog training via offline
+reinforcement learning. arXiv preprint arXiv:2010.05848, 2020.
+
+Nan Jiang, Akshay Krishnamurthy, Alekh Agarwal, John Langford, and Robert E Schapire. Contextual decision processes with low bellman rank are pac-learnable. In International Conference on
+_Machine Learning, 2017._
+
+Leslie Pack Kaelbling. Learning to achieve goals. In International Joint Conference on Artificial
+_Intelligence, 1993._
+
+Patrick T. Komiske, Eric M. Metodiev, and Jesse Thaler. The Hidden Geometry of Particle Collisions.
+_JHEP, 07:006, 2020. doi: 10.1007/JHEP07(2020)006._
+
+Ilya Kostrikov, Kumar Krishna Agrawal, Debidatta Dwibedi, Sergey Levine, and Jonathan Tompson.
+Discriminator-actor-critic: Addressing sample inefficiency and reward bias in adversarial imitation
+learning. In International Conference on Learning Representations, 2019.
+
+Ilya Kostrikov, Ofir Nachum, and Jonathan Tompson. Imitation learning via off-policy distribution
+matching. In International Conference on Learning Representations, 2020.
+
+Aviral Kumar, Xue Bin Peng, and Sergey Levine. Reward-conditioned policies. arXiv preprint
+_arXiv:1912.13465, 2019._
+
+
+-----
+
+Vitaly Kurin, Maximilian Igl, Tim Rocktäschel, Wendelin Boehmer, and Shimon Whiteson. My body
+is a cage: the role of morphology in graph-based incompatible control. In International Conference
+_on Learning Representations, 2021._
+
+Lisa Lee, Benjamin Eysenbach, Emilio Parisotto, Eric Xing, Sergey Levine, and Ruslan Salakhutdinov.
+Efficient exploration via state marginal matching. arXiv preprint arXiv:1906.05274, 2020.
+
+Sergey Levine, Aviral Kumar, George Tucker, and Justin Fu. Offline reinforcement learning: Tutorial,
+review, and perspectives on open problems. arXiv preprint arXiv:2005.01643, 2020.
+
+Alexander C. Li, Lerrel Pinto, and Pieter Abbeel. Generalized hindsight for reinforcement learning.
+In Advances in neural information processing systems, 2020.
+
+Lanqing Li, Rui Yang, and Dijun Luo. Focal: Efficient fully-offline meta-reinforcement learning via
+distance metric learning and behavior regularization. In International Conference on Learning
+_Representations, 2021._
+
+Yujia Li, Kevin Swersky, and Rich Zemel. Generative moment matching networks. In International
+_Conference on Machine Learning, 2015._
+
+Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa,
+David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. In
+_International Conference on Learning Representations, 2016._
+
+Corey Lynch, Mohi Khansari, Ted Xiao, Vikash Kumar, Jonathan Tompson, Sergey Levine, and
+Pierre Sermanet. Learning latent plans from play. In Conference on Robot Learning, 2019.
+
+Tatsuya Matsushima, Hiroki Furuta, Yutaka Matsuo, Ofir Nachum, and Shixiang Shane Gu.
+Deployment-efficient reinforcement learning via model-based offline optimization. In International
+_Conference on Learning Representations, 2021._
+
+Eric Mitchell, Rafael Rafailov, Xue Bin Peng, Sergey Levine, and Chelsea Finn. Offline metareinforcement learning with advantage weighting. In International Conference on Machine
+_Learning, 2021._
+
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare,
+Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control
+through deep reinforcement learning. Nature, 2015.
+
+Ofir Nachum, Shixiang Gu, Honglak Lee, and Sergey Levine. Data-Efficient Hierarchical Reinforcement Learning. In Advances in neural information processing systems, 2018.
+
+Ashvin Nair, Vitchyr Pong, Murtaza Dalal, Shikhar Bahl, Steven Lin, and Sergey Levine. Visual
+reinforcement learning with imagined goals. arXiv preprint arXiv:1807.04742, 2018.
+
+Soroush Nasiriany, Vitchyr H. Pong, Ashvin Nair, Alexander Khazatsky, Glen Berseth, and Sergey
+Levine. Disco rl: Distribution-conditioned reinforcement learning for general-purpose policies. In
+_International Conference on Robotics and Automation, 2021._
+
+Emilio Parisotto, Francis Song, Jack Rae, Razvan Pascanu, Caglar Gulcehre, Siddhant Jayakumar,
+Max Jaderberg, Raphael Lopez Kaufman, Aidan Clark, Seb Noury, et al. Stabilizing transformers
+for reinforcement learning. In International Conference on Machine Learning, 2020.
+
+Lerrel Pinto, Marcin Andrychowicz, Peter Welinder, Wojciech Zaremba, and Pieter Abbeel. Asymmetric actor critic for image-based robot learning. arXiv preprint arXiv:1710.06542, 2017.
+
+Vitchyr Pong, Shixiang Gu, Murtaza Dalal, and Sergey Levine. Temporal difference models: Modelfree deep rl for model-based control. International Conference on Learning Representations,
+2018.
+
+Vitchyr H. Pong, Ashvin Nair, Laura Smith, Catherine Huang, and Sergey Levine. Offline metareinforcement learning with online self-supervision. arXiv preprint arXiv:2107.03974, 2021.
+
+Alec Radford, Karthik Narasimhan, Tim Salimans, and Ilya Sutskever. Improving language understanding by generative pre-training, 2018.
+
+
+-----
+
+Alec Radford, Jeff Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. Language
+models are unsupervised multitask learners, 2019.
+
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen Krueger, and Ilya
+Sutskever. Learning transferable visual models from natural language supervision. arXiv preprint
+_arXiv:2103.00020, 2021._
+
+Kate Rakelly, Aurick Zhou, Deirdre Quillen, Chelsea Finn, and Sergey Levine. Efficient off-policy
+meta-reinforcement learning via probabilistic context variables. In International Conference on
+_Machine Learning, 2019._
+
+Aditya Ramesh, Mikhail Pavlov, Gabriel Goh, Scott Gray, Chelsea Voss, Alec Radford, Mark Chen,
+and Ilya Sutskever. Zero-shot text-to-image generation. arXiv preprint arXiv:2102.12092, 2021.
+
+Zhizhou Ren, Kefan Dong, Yuan Zhou, Qiang Liu, and Jian Peng. Exploration via hindsight goal
+generation. In Advances in neural information processing systems, 2019.
+
+Tim Salimans, Jonathan Ho, Xi Chen, Szymon Sidor, and Ilya Sutskever. Evolution strategies as a
+scalable alternative to reinforcement learning. arXiv preprint arXiv:1703.03864, 2017.
+
+Archit Sharma, Shixiang Gu, Sergey Levine, Vikash Kumar, and Karol Hausman. Dynamics-aware
+unsupervised discovery of skills. In International conference on learning representations, 2020.
+
+Samarth Sinha, Ajay Mandlekar, and Animesh Garg. S4rl: Surprisingly simple self-supervision for
+offline reinforcement learning. arXiv preprint arXiv:2103.06326, 2021.
+
+Aravind Srinivas, Michael Laskin, and Pieter Abbeel. Curl: Contrastive unsupervised representations
+for reinforcement learning. In International Conference on Machine Learning, 2020.
+
+Rupesh Kumar Srivastava, Pranav Shyam, Filipe Mutz, Wojciech Ja´skowski, and Jürgen Schmidhuber.
+Training agents using upside-down reinforcement learning. arXiv preprint arXiv:1912.02877,
+2019.
+
+Yujin Tang and David Ha. The sensory neuron as a transformer: Permutation-invariant neural
+networks for reinforcement learning. arXiv preprint arXiv:2109.02869, 2021.
+
+Emanuel Todorov, Tom Erez, and Yuval Tassa. Mujoco: A physics engine for model-based control.
+In International Conference on Intelligent Robots and Systems, 2012.
+
+Stephen Tu and Benjamin Recht. The gap between model-based and model-free methods on the
+linear quadratic regulator: An asymptotic viewpoint. In Conference on Learning Theory, 2019.
+
+Aaron van den Oord, Yazhe Li, and Oriol Vinyals. Representation learning with contrastive predictive
+coding. arXiv preprint arXiv:1807.03748, 2018.
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in neural information
+_processing systems, 2017._
+
+David Venuto, Elaine Lau, Doina Precup, and Ofir Nachum. Policy gradients incorporating the future.
+_arXiv preprint arXiv:2108.02096, 2021._
+
+Martin J Wainwright and Michael Irwin Jordan. Graphical models, exponential families, and
+_variational inference. Now Publishers Inc, 2008._
+
+Jane X Wang, Zeb Kurth-Nelson, Dhruva Tirumala, Hubert Soyer, Joel Z Leibo, Remi Munos,
+Charles Blundell, Dharshan Kumaran, and Matt Botvinick. Learning to reinforcement learn. arXiv
+_preprint arXiv:1611.05763, 2016._
+
+Yifan Wu, George Tucker, and Ofir Nachum. Behavior Regularized Offline Reinforcement Learning.
+_arXiv preprint arXiv:1911.11361, 2019._
+
+Kelvin Xu, Ellis Ratner, Anca Dragan, Sergey Levine, and Chelsea Finn. Learning a prior over intent
+via meta-inverse reinforcement learning. In International Conference on Machine Learning, 2019.
+
+
+-----
+
+Mengjiao Yang and Ofir Nachum. Representation matters: Offline pretraining for sequential decision
+making. In International Conference on Machine Learning, 2021.
+
+Lantao Yu, Tianhe Yu, Chelsea Finn, and Stefano Ermon. Meta-inverse reinforcement learning with
+probabilistic context variables. In Advances in Neural Information Processing Systems, 2019.
+
+Rui Zhao and Volker Tresp. Energy-based hindsight experience prioritization. In Conference on
+_Robot Learning, 2018._
+
+Tony Z. Zhao, Jianlan Luo, Oleg Sushkov, Rugile Pevceviciute, Nicolas Heess, Jon Scholz, Stefan
+Schaal, and Sergey Levine. Offline meta-reinforcement learning for industrial insertion. arXiv
+_preprint arXiv:2110.04276, 2021._
+
+Brian D Ziebart, Andrew L Maas, J Andrew Bagnell, Anind K Dey, et al. Maximum entropy inverse
+reinforcement learning. In Twenty-Third AAAI Conference on Artificial Intelligence, 2008.
+
+
+-----
+
+APPENDIX
+
+A HYPER-PARAMETER OF GENERALIZED DECISION TRANSFORMERS
+
+We implement Categorical Decision Transformer and Bi-directional Decision Transformer, built
+[upon the official codebase released by Chen et al. (2021a) (https://github.com/kzl/](https://github.com/kzl/decision-transformer)
+[decision-transformer). We follow the most of hyperparameters as they did (Table 6).](https://github.com/kzl/decision-transformer)
+
+|Hyperparameter|Value|
+|---|---|
+|Number of layers Number of attention heads Embedding dimension Nonlinearity function Batch size Context length N Dropout Learning rate Grad norm clip Weight decay Learning rate decay Training (Gradient) steps|3 1 128 ReLU 64 20 0.1 1e-4 0.25 1e-4 Linear warmup for first 100k training steps 1M|
+|Number of bins for categorical distribution Encoder size (for DT-X) Coefficient of unsupervised loss|31 2 layer MLP, (128, 128) 0.1|
+
+
+
+Table 6: List of hyperparameters for DT, CDT and BDT. We refer Chen et al. (2021a).
+
+B DETAILS OF BASELINES
+
+While, to the best of our knowledge, there are no prior work to tackle the offline state-marginal
+matching problem, we can regard meta or one-shot imitation learning as the methods solving similar
+problem (see Appendix D for further discussion). In this work, we choose Meta-BC and FOCAL (Li
+et al., 2021), a metric-based offline meta RL method, as decent baselines.
+
+**FOCAL** FOCAL is a offline meta RL method combining BRAC (Wu et al., 2019) with metricbased approach. It utilizes deterministic context encoder trained with inverse-power distance metric
+losses and detached from Bellman backup gradients. We follow the hyperparameters in the official
+[implementation (https://github.com/LanqingLi1993/FOCAL-ICLR). Deterministic](https://github.com/LanqingLi1993/FOCAL-ICLR)
+context encoder takes single-step state-action-reward tuple as a context for task inference. We
+parameterize it with (200, 200, 200)-layers MLP. We train deterministic context encoder with 100000
+iteration first, and then train BRAC agent with task-conditioned policy and value functions with
+100000 iteration. We use (256, 256, 256)-layers MLPs for policy and value network, and set batch
+size to 256.
+
+**Meta-BC** We also use metric-based Meta-BC (Duan et al., 2017; Dasari & Gupta, 2020) as a strong
+baseline method for offline multi-task SMM. We adapt deterministic context encoder from FOCAL
+to infer the task. We train Meta-BC in the same way as FOCAL just replacing BRAC to BC. The
+objective is mean-squared error minimization.
+
+Throughout our experiments, Meta-BC shows better results than FOCAL, because RL algorithms
+often struggle to optimize Eq. 4 for distribution matching and FOCAL tries to maximize the task
+reward, which is not necessarily required for distribution matching problem. In addition, BC often
+converges faster than offline RL methods.
+
+
+-----
+
+C DETAILS OF EVALUATION
+
+Throughout the paper, we evaluate both CDT and BDT from a distribution matching perspective
+by formulating them as offline multi-task SMM or offline multi-task IL problem. However, the
+current distribution matching research in RL (Lee et al., 2020; Ghasemipour et al., 2020; Gu et al.,
+2021) has been suffered from the lack of quantitative metrics for evaluation (while standard RL
+or BC are typically evaluated on the task reward performance). As summarized in Table 7, prior
+works (Lee et al., 2020; Ghasemipour et al., 2020) evaluate the SMM performance by qualitative
+density visualization using rollout particles.
+
+Although the distance between state-marginal and target distribution seems the most intuitive and
+suitable metric to quantify the performance of distribution matching algorithms, it is often intractable
+to measure such distance analytically because both state-marginal and target distribution can be
+non-parametric; we cannot access their densities, and only their samples are available. While a
+concurrent work (Gu et al., 2021) tackles this problem by leveraging sample-based energy distance
+estimation, we introduce a single SMM-inspired evaluation for both offline multi-task SMM and
+offline multi-task IL via estimating Wasserstein-1 distance between empirical categorical distributions.
+Since the discretization of low-dimensional features, such as reward, have success in many RL
+methods (Bellemare et al., 2017; Dabney et al., 2018; 2020; Furuta et al., 2021b), quantification
+of distribution matching performance by Wasserstein-1 distance could be reliable evaluations (in
+addition Wasserstein-1 distance is symmetric, different from KL distance that is asymmetric). We note
+that due to the equivalence between inverse RL and SMM methods, the performance of distribution
+matching methods may be measured via task reward when assuming the accessivity to the expert
+trajectories (Ho & Ermon, 2016; Fu et al., 2018; Kostrikov et al., 2019). However, in our experiments,
+it is not suitable to evaluate the performance based on task reward since we uses the sub-optimal
+trajectories (Section 6.1) or multi-task trajectories from different reward functions (Section 6.2).
+
+Wasserstein-1 distance between state-marginal distribution ρ[π](s) and target distribution p[∗](s) is
+defined as:
+_W1(ρ[π](s), p[∗](s)) =_ inf (5)
+_ν_ Γ(ρ[π],p[∗])[E][(][X,Y][ )][∼][ν][[][|][X][ −] _[Y][ |][]][,]_
+_∈_
+
+where Γ is the set of all possible joint distributions ν whose marginals are ρ[π] and p[∗] respectively
+(X and Y are random variables). In this work, we empirically estimate Eq. 5 by focusing on the
+“manually-specified” feature φ ∈ _F (e.g. reward, xyz-velocities, etc; defined in Section 4) and_
+employing binning and discretization. We discretize the feature space F and obtain B bins (per
+dimension), whose representatives are _φ1,_ _φ[¯]2, . . ._ _φ[¯]B_ . The range of feature space [φmin, φmax] is
+_{_ [¯] _}_
+pre-defined from the given offline datasets. Then, we get categorical distribution from the target
+trajectory τ ; ˆp[∗]τ [(][φ][) =][ {][(¯]φ1, c[∗]τ 1[)][, . . .][ (¯]φB, c[∗]τB[)][}][, and from the rollouts of the policy][ π][ (using 4 seeds]
+20 rollouts); ˆρ[π](φ) = (φ[¯]1, c[π]1 [)][, . . .][ (¯]φB, c[π]B[)][}][, where][ c]τ[∗] [and][ c][π][ are the weights of each bin (i.e.]
+_×_ _B_ _{_
+_l=1_ _[c]τl[∗]_ [= 1][ and][ P]l[B]=1 _[c]l[π]_ [= 1][). We compute the evaluation metric averaging on the test set of the]
+trajectories Dtest:
+P
+
+_B_ _B_
+
+1
+Metric(π, Dtest) = min _wij_ _c[∗]τi_ _j_
+
+_|Dtest|_ _τ_ _∈XDtest_ _wij_ Xi=1 Xj=1 _|_ _[−]_ _[c][π][|][,]_ (6)
+
+
+_j=1_ _wij ≤_ _c[∗]τi[,]_
+
+X
+
+
+_i=1_ _wij ≤_ _c[π]j_ _[,]_
+
+X
+
+
+s.t. wij 0,
+_≥_
+
+
+_wij = 1._
+_j=1_
+
+X
+
+
+_i=1_
+
+
+In practice, we utilize the python package [(https://github.com/pkomiske/](https://github.com/pkomiske/Wasserstein)
+[Wasserstein) released by Komiske et al. (2020) to compute it.](https://github.com/pkomiske/Wasserstein)
+
+|Evaluation|Type|Reference|
+|---|---|---|
+|Density Visualization Energy Distance Task Reward|Qualitative Quantitative Quantitative|Lee et al. (2020); Ghasemipour et al. (2020) Gu et al. (2021) Ho & Ermon (2016); Fu et al. (2018), etc.|
+|Wasserstein-1 Distance|Quantitative|Ours|
+
+
+**Evaluation** **Type** **Reference**
+
+Density Visualization Qualitative Lee et al. (2020); Ghasemipour et al. (2020)
+
+Energy Distance Quantitative Gu et al. (2021)
+
+Task Reward Quantitative Ho & Ermon (2016); Fu et al. (2018), etc.
+
+Wasserstein-1 Distance Quantitative Ours
+
+
+Table 7: A Review of evaluation for distribution matching algorithms.
+
+
+-----
+
+D CONNECTION TO META LEARNING
+
+While we solve offline information matching problems in this paper, our formulations (especially Bi-directional DT) and experimental settings are similar to offline meta RL (Dorfman
+et al., 2021; Mitchell et al., 2021; Li et al., 2021) and meta/one-shot imitation learning (Yu et al.,
+2019; Ghasemipour et al., 2019; Finn et al., 2017; Duan et al., 2017) (especially metric-based approach (Rakelly et al., 2019; Duan et al., 2016; Fakoor et al., 2020)). We briefly clarify the relevance
+and difference between them (Table 8).
+
+**Offline Meta RL Recently, some works deal with offline meta RL problem, assuming task distri-**
+bution and offline training with pre-stored transitions collected by the (sub-) optimal or scripted
+task-conditioned agents (Dorfman et al., 2021; Mitchell et al., 2021; Li et al., 2021; Pong et al., 2021;
+Zhao et al., 2021). In these works, few test-task trajectories, following the same task distribution but
+unseen during training phase, are given at test-time (i.e. few-shot), and the agents adapt the given
+task in an online (Pong et al., 2021; Zhao et al., 2021; Dorfman et al., 2021) or fully-offline (Mitchell
+et al., 2021; Li et al., 2021) manner.
+
+**Meta Imitation Learning Another related domain is meta imitation learning, also assuming task dis-**
+tribution and offline training with pre-stored expert transitions per tasks (Yu et al., 2019; Ghasemipour
+et al., 2019; Finn et al., 2017; Duan et al., 2017; Xu et al., 2019; Gleave & Habryka, 2018; Dasari &
+Gupta, 2020). While meta inverse RL methods (Yu et al., 2019; Xu et al., 2019; Gleave & Habryka,
+2018) require online samples during test-time adaptation, its off-policy extension and BC-based
+approach performs offline adaptation with given unseen trajectories (Ghasemipour et al., 2019; Finn
+et al., 2017; Dasari & Gupta, 2020).
+
+Our work, in contrast, assume no-adaptation at test time and evaluation criteria is a distance between
+the feature distributions, not the task rewards.
+
+|Method|Problem|Train|Test|Demo|
+|---|---|---|---|---|
+|Pong et al. (2021) Zhao et al. (2021) Dorfman et al. (2021) Mitchell et al. (2021) Li et al. (2021)|Offline Meta RL Offline Meta RL Offline Meta RL Offline Meta RL Offline Meta RL|offline offline offline offline offline|online online online offline offline|few-shot few-shot few-shot few-shot few-shot|
+|Yu et al. (2019) Xu et al. (2019) Ghasemipour et al. (2019) Finn et al. (2017) Duan et al. (2017)|Meta IL Meta IL Meta IL Meta IL Meta IL|online online online offline offline|online online offline offline (no-adaptation)|few-shot few-shot few-shot one-shot one-shot|
+|Ours|Offline multi-task SMM/IL|offline|(no-adaptation)|one-shot|
+
+
+**Method** **Problem** **Train** **Test** **Demo**
+
+Pong et al. (2021) Offline Meta RL offline online few-shot
+
+Zhao et al. (2021) Offline Meta RL offline online few-shot
+
+Dorfman et al. (2021) Offline Meta RL offline online few-shot
+
+Mitchell et al. (2021) Offline Meta RL offline offline few-shot
+
+Li et al. (2021) Offline Meta RL offline offline few-shot
+
+Yu et al. (2019) Meta IL online online few-shot
+
+Xu et al. (2019) Meta IL online online few-shot
+
+Ghasemipour et al. (2019) Meta IL online offline few-shot
+
+Finn et al. (2017) Meta IL offline offline one-shot
+
+Duan et al. (2017) Meta IL offline (no-adaptation) one-shot
+
+Ours Offline multi-task SMM/IL offline (no-adaptation) one-shot
+
+
+Table 8: Review of problem settings among offline meta RL, meta IL, and ours. In offline meta RL, the agents
+are trained offline and tested with several demonstrations (few-shot), in a fully-offline manner or allowing online
+data-collection for adaptation. In meta IL, IRL-based methods train the agents online (Yu et al., 2019; Xu et al.,
+2019; Ghasemipour et al., 2019) while BC-based methods (Finn et al., 2017; Duan et al., 2017) do offline.
+Similar to our settings, Duan et al. (2017) test the agents with single demonstration and no-adaptation process,
+they evaluate the agent on the task reward, while we do on the distance between the two distributions.
+
+
+-----
+
+E DETAILS OF EXPERIMENTS
+
+In this section, we provide the details and supplemental quantitative/qualitative results of the experiments in Section 6.
+
+Figure 3 visualizes the dataset distributions we use in the experiments. When we sort all the
+trajectories based on their cumulative rewards, each quality of trajectory (best, middle, worst) shows
+a different shape of distribution, and the distribution of the whole dataset seems a weighted mixture
+of those.
+
+
+Dataset Best Middle Worst
+
+halfcheetah-medium-expert-v2 hopper-medium-expert-v2 walker2d-medium-expert-v2
+
+0.30
+
+0.35
+
+0.30 0.25 0.4
+
+0.25 0.20 0.3
+
+0.20 0.15
+
+Probbility 0.15 0.10 0.2
+
+0.100.05 0.05 0.1
+
+0.00 −2.5 0.0 2.5Reward5.0 7.5 10.0 12.5 0.00 1 2 Reward3 4 5 6 0.0 −2 0 Reward2 4 6 8
+
+
+Dataset Best Middle Worst
+
+halfcheetah-medium-expert-v2 hopper-medium-expert-v2 walker2d-medium-expert-v2
+
+0.4 0.30 0.4
+
+0.25
+
+0.3 0.20 0.3
+
+0.2 0.15 0.2
+
+Probbility 0.10
+
+0.1 0.05 0.1
+
+0.0 −2.5 0.0 2.5x-Velocity5.0 7.5 10.0 12.5 15.00.00 0 1 x-Velocity2 3 4 5 0.0 −4 −2 0x-Velocity2 4 6 8
+
+
+(a) Reward
+
+
+(b) X-Velocity
+
+
+Figure 3: Distributions of the features (reward, and x-velocity) in the D4RL medium-expert datasets.
+
+E.1 QUANTITATIVE AND QUALITATIVE RESULTS OF REWARD AND STATE-FEATURE
+MATCHING
+
+
+We provide the quantitative comaprison of Section 6.1 between Categorical DT and DT in the reward
+(Table 9) matching problem, computing Wasserstein-1 distance between the discretized rollout and
+target feature distributions. Generally, similar to the x-velocity case, CDT shows the better results in
+offline multi-task SMM compared to original DT. We also visualize some of CDT results in Figure 4.
+
+
+|Method|halfcheetah Expert Medium|hopper Total Expert Medium Total|walker2d Expert Medium Total|Average|
+|---|---|---|---|---|
+|Categorical DT DT BC (no-context) Meta-BC FOCAL (Li et al., 2021)|0.674 ± 0.213 1.002 ± 1.458 0 0.652 ± 0.319 1.039 ± 1.548 0 3.240 ± 0.559 2.880 ± 0.614 3 0.839 ± 0.682 0.830 ± 1.130 0 1.623 ± 0.501 1.115 ± 1.534 1|.838 ± 1.054 0.159 ± 0.085 0.064 ± 0.017 0.111 ± 0.077 0. .846 ± 1.134 0.227 ± 0.119 0.091 ± 0.035 0.159 ± 0.111 0. .060 ± 0.614 0.597 ± 0.056 0.119 ± 0.067 0.358 ± 0.247 0. .835 ± 0.933 0.803 ± 0.505 0.134 ± 0.056 0.468 ± 0.491 0. .369 ± 0.516 1.463 ± 0.472 0.492 ± 0.384 0.977 ± 0.649 1.|095 ± 0.017 0.114 ± 0.037 0.105 ± 0. 056 ± 0.015 0.626 ± 0.495 0.341 ± 0. 977 ± 0.501 0.431 ± 0.396 0.704 ± 0. 113 ± 0.085 1.441 ± 1.113 0.777 ± 1. 584 ± 0.570 0.604 ± 0.421 1.094 ± 0.|030 0.351 452 0.448 528 1.374 032 0.693 701 1.147|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+Categorical DTDTBC (no-context)Meta-BCFOCAL (Li et al., 2021) 0.6740.6523.2400.8391.623 ± ± ± ± ± 0.213 0.319 0.559 0.682 0.501 1.0021.0392.8800.8301.115 ± ± ± ± ± 1.458 1.548 0.614 1.130 1.534 0.8380.8463.0600.8351.369 ± ± ± ± ± 1.054 1.134 0.614 0.933 0.516 0.1590.2270.5970.8031.463 ± ± ± ± ± 0.085 0.119 0.056 0.505 0.472 0.0640.0910.1190.1340.492 ± ± ± ± ± 0.017 0.035 0.067 0.056 0.384 0.1110.1590.3580.4680.977 ± ± ± ± ± 0.077 0.111 0.247 0.491 0.649 0.0950.0560.9770.1131.584 ± ± ± ± ± 0.017 0.015 0.501 0.085 0.570 0.1140.6260.4311.4410.604 ± ± ± ± ± 0.037 0.495 0.396 1.113 0.421 0.1050.3410.7040.7771.094 ± ± ± ± ± 0.030 0.452 0.528 1.032 0.701 0.3510.4481.3740.6931.147
+
+Table 9: Quantitative evaluation of reward distribution matching via measuring Wasserstein-1 distance between
+the rollout and target distributions. We compare Categorical DT and DT. Since it can capture the multi-modal
+nature of target distributions, CDT matches the distribution better than the original DT.
+
+
+Target Rollout
+
+0.35 halfcheetah best 1 0.35 halfcheetah best 2 0.30 halfcheetah middle 1 0.30 halfcheetah middle 2
+
+0.300.250.200.15 0.300.250.200.15 0.250.200.15 0.250.200.15
+
+Probability 0.10 0.10 0.10 0.10
+
+0.05 0.05 0.05 0.05
+
+0.000.25 −2.5 0.0 hopper best 12.5 5.0 7.5 10.0 12.5 0.000.25 −2.5 0.0 hopper best 22.5 5.0 7.5 10.0 12.5 0.000.14 −2.5 0.0hopper middle 12.5 5.0 7.5 10.0 12.5 0.000.14 −2.5 0.0hopper middle 22.5 5.0 7.5 10.0 12.5
+
+0.20 0.20 0.12 0.12
+
+0.15 0.15 0.100.08 0.100.08
+
+Probability 0.100.05 0.100.05 0.060.040.02 0.060.040.02
+
+0.000.5 1 walker2d best 12 3 4 5 6 0.000.5 1 walker2d best 22 3 4 5 6 0.000.30 1 walker2d middle 12 3 4 5 6 0.000.30 1 walker2d middle 22 3 4 5 6
+
+0.4 0.4 0.25 0.25
+
+0.3 0.3 0.20 0.20
+
+Probability 0.2 0.2 0.150.10 0.150.10
+
+0.1 0.1 0.05 0.05
+
+0.0 −2 0 Reward2 4 6 8 0.0 −2 0 Reward2 4 6 8 0.00 −2 0 Reward2 4 6 8 0.00 −2 0 Reward2 4 6 8
+
+
+Target Rollout
+
+halfcheetah best 1 halfcheetah best 2 halfcheetah middle 1 halfcheetah middle 2
+
+0.25 0.25 0.25 0.25
+
+0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15
+
+Probability 0.10 0.10 0.10 0.10
+
+0.05 0.05 0.05 0.05
+
+0.000.25 −2.5 0.0 hopper best 12.5 5.0 7.5 10.0 12.5 15.0 0.000.25 −2.5 0.0 hopper best 22.5 5.0 7.5 10.0 12.5 15.0 0.000.14 −2.5 0.0hopper middle 12.5 5.0 7.5 10.0 12.5 15.0 0.000.14 −2.5 0.0hopper middle 22.5 5.0 7.5 10.0 12.5 15.0
+
+0.20 0.20 0.120.10 0.120.10
+
+0.15 0.15 0.08 0.08
+
+Probability 0.100.05 0.100.05 0.060.040.02 0.060.040.02
+
+0.00 0 walker2d best 11 2 3 4 5 0.00 0 walker2d best 21 2 3 4 5 0.00 0 walker2d middle 11 2 3 4 5 0.00 0 walker2d middle 21 2 3 4 5
+
+0.5 0.5 0.30 0.30
+
+0.4 0.4 0.25 0.25
+
+0.3 0.3 0.20 0.20
+
+Probability 0.2 0.2 0.150.10 0.150.10
+
+0.1 0.1 0.05 0.05
+
+0.0−4 −2 0x-Velocity2 4 6 8 0.0−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8
+
+
+(a) Reward
+
+
+(b) X-Velocity
+
+
+Figure 4: (a) Reward and (b) state-feature (x-velocity) distribution matching in halfcheetah (top), hopper
+(middle), and walker2d (bottom). The left two examples are the distributions from the best trajectories, and right
+two are the distributions from the middle trajectories in the held-out test set. The rollout distributions of CDT
+(red) match the target distributions (blue) very well in all cases.
+
+
+-----
+
+E.2 EVALUATION ON TASK PERFORMANCE
+
+While in this paper we focus on the evaluation with the SMM-inspired distribution matching objective,
+such as Wasserstein-1 distance, we here provide the evaluation on the task rewards. Table 10 shows
+that DT seems consistently better methods than Categorical DT on the task rewards evaluations, and
+achieves similar performances to the held-out trajectories.
+
+|Method|halfcheetah Expert Medium|hopper Expert Medium|walker2d Expert Medium|
+|---|---|---|---|
+|Categorical DT DT|10476.746 ± 218.957 5782.557 ± 1666.716 10500.273 ± 312.778 4985.518 ± 67.322|2614.559 ± 657.722 1518.757 ± 63.062 2113.207 ± 807.246 1528.743 ± 30.780|4907.475 ± 11.711 3264.585 ± 209.905 4965.024 ± 11.814 4055.039 ± 849.109|
+|Held-out|11146.200 ± 59.070 5237.348 ± 37.970|3741.854 ± 7.223 1600.196 ± 0.772|4995.553 ± 5.413 3801.313 ± 0.994|
+
+
+Method **halfcheetah** **hopper** **walker2d**
+
+Expert Medium Expert Medium Expert Medium
+
+Categorical DTDTHeld-out 10476.74610500.27311146.200 ± ± ± 218.957 312.778 59.070 5782.5575237.3484985.518 ± ± ± 1666.716 67.322 37.970 2614.5592113.2073741.854 ± ± ± 657.722 807.246 7.223 1518.7571528.7431600.196 ± ± ± 63.062 30.780 0.772 4907.4754965.0244995.553 ± ± ± 11.711 11.814 5.413 3264.5854055.0393801.313 ± ± ± 209.905 849.109 0.994
+
+
+Table 10: Evaluation on the task rewards; conditioning on the held-out trajectories as done in Section 6. We
+compare the performance between Categorical DT, and DT. DT seems consistently better methods on the task
+rewards evaluations, and achieves similar performances to the held-out trajectories (averaged over 5 trajectories).
+
+E.3 2D STATE-FEATURE DISTRIBUTION MATCHING
+
+We also consider two-dimensional state-features (xy-velocities) distribution matching in Ant-v3. Same
+as 1D state-feature distribution matching in HalfCheetah, Hopper, and Walker2d-v3 (Section 6.1),
+we also use medium-expert(-v2) datasets from D4RL (Fu et al., 2020). We bin the state-features per
+dimension separately to reduce the dimension of the categorical distribution that CDT takes as input,
+while in test-time we evaluate the performance with Wasserstein-1 metric on the joint distribution.
+For DT, we compute the summation of x- and y-velocity each over trajectories and normalize them
+with the maximum horizon. DT feeds these two scalars as information statistics to match.
+
+Table 11 reveals that CDT performs better even in the case of two-dimensional state-features distributions, while DT doesn’t generalize to expert-quality trajectories. As shown in Figure 5, while
+CDT could cope with the distribution shift between expert and medium target distribution, DT always
+fits the medium one even if the expert trajectory is given as a target. CDT successfully scales to the
+offline multi-task SMM problem in the multi-dimensional feature spaces.
+
+**ant**
+Method
+
+Expert Medium Average
+
+Categorical DT 0.797 ± 0.216 0.244 ± 0.063 0.521
+
+DT 1.714 ± 0.121 0.260 ± 0.067 0.987
+
+Meta-BC 1.295 ± 0.708 0.351 ± 0.205 0.823
+
+FOCAL (Li et al., 2021) 1.473 ± 0.892 0.913 ± 0.455 1.193
+
+
+Table 11: Quantitative evaluation of 2D state-feature (xy-velocities) distribution matching, measuring
+Wasserstein-1 distance. CDT performs better even in the two-dimensional problem.
+
+Target CDT DT
+
+0.200 0.200 0.175 0.175
+
+0.175 0.175 0.150 0.150
+
+0.150 0.150 0.125 0.125
+
+0.125 0.125 0.100 0.100
+
+Expert 0.1000.075 0.1000.075 0.075 0.075
+
+Probability 0.050 0.050 0.050 0.050
+
+0.025 0.025 0.025 0.025
+
+0.000 −2 0 2 4 6 8 0.000 −2 0 2 4 6 8 0.000 −4 −2 0 2 4 0.000 −2 0 2 4 6 8
+
+0.16 0.16
+
+0.14 0.14 0.14 0.14
+
+0.12 0.12 0.12 0.12
+
+0.10 0.10 0.10 0.10
+
+0.08 0.08 0.08 0.08
+
+Medium 0.06 0.06 0.06 0.06
+
+Probability 0.04 0.04 0.04 0.04
+
+0.02 0.02 0.02 0.02
+
+0.00 −2 0 2 4 6 8 0.00 −2 0 2 4 6 8 0.00 −4 −2 0 2 4 0.00 −2 0 2 4 6 8
+
+x-Velocity x-Velocity y-Velocity y-Velocity
+
+
+Figure 5: Visualization of 2D state-feature (xy-velocities) distribution matching, binning each dimension
+separately. Top row shows the results from an expert target trajectory, and bottom row from a medium one.
+
+
+-----
+
+E.4 DETAILS OF SYNTHESIZING UNSEEN BI-MODAL DISTRIBUTION
+
+To construct the dataset, we modified the original reward function in HalfCheetah-v3, adding absolute z-velocity term (such as +np.abs(z_vel)), where the expert cheetah backflips towards -x
+direction.
+
+We trained SAC agent until convergence (3 million gradient steps), using pytorch implementation
+released by Furuta et al. (2021a), and then collected 500 trajectories × 1000 time steps. We combined
+them with 500 trajectories × 1000 time steps from halfcheetah-expert-v2 dataset in D4RL, which
+consists of both backflipping and running forward behaviors.
+
+For the evaluation, we prepared additional 5 trajectories of backflipping and 5 of running forward as
+uni-modal behaviors (10 test trajectories in total). In addition, we synthesized a bi-modal behavior by
+dividing each 1000-step trajectories into 500-step sub-trajectories, and concatenating them across
+different behaviors, which results in the patchworked trajectories of first 500-step running forward
+and next 500-step backflipping (also 10 trajectories in total).
+
+E.5 DETAILS OF DIVERSE UNSEEN DISTRIBUTION FROM META LEARNING TASK
+
+Following prior meta RL/IL works (Rakelly et al., 2019; Ghasemipour et al., 2019; Pong et al.,
+2021; Li et al., 2021; Fakoor et al., 2020), we modified the reward function for the cheetah to run
+with specified velocity (such as -np.abs(x_vel - target_vel)), and set the horizon to 200
+steps.
+
+We prepared 31 target x-velocities; taken from [0.0, 3.0], uniformly spaced at 0.1 intervals. We also
+trained the SAC agents until convergence (3 million gradient steps), using pytorch implementation
+released by Furuta et al. (2021a), and collected 250 trajectories × 200 time steps each. To simplify the
+problem than meta learning settings, we held out the 10 trajectories whose x-velocity is {0.5, 1.5, 2.5}
+as a test set, and used the rest as a train data.
+
+E.6 QUANTITATIVE AND QUALITATIVE RESULTS OF ONE-SHOT DISTRIBUTION MATCHING IN
+FULL STATE
+
+Table 12 and Table 13 show the one-shot reward and state-feature distribution matching results
+respectively. In addition to the embedding size m, we also sweep the different context window
+_N = 20, 50, 100 for BDT (m = 16). While even simple auto-encoder regularizer (DT-AE or_
+DT-AE (frozen)) sometimes works well compared to no-context BC baselines presented in Table 2
+and Table 9, BDT, using (second) anti-causal transformer as an encoder Φ and its aggregator, seems
+consistently better than other strategies or Meta-BC baseline for offline multi-task SMM and is
+comparable to CDT or DT results (also presented in Table 2 and Table 9) with longer context length
+(N = 50). Through the experiment we observe that while there are no clear trends in DT-AE, -CPC
+or -E2E as the size of context embedding m grows, BDT improves its performance with larger size
+of embedding. Such intuitive properties might a good features to design the architectures.
+
+We visualize the qualitative results of BDT (m = 16, N = 20) in Figure 6.
+
+
+-----
+
+|Method|halfcheetah Expert Medium Total|hopper Expert Medium Total|walker2d Expert Medium Total|Average|
+|---|---|---|---|---|
+|DT-AE (m=1) DT-CPC (m=1) DT-AE (m=4) DT-CPC (m=4) DT-AE (m=16) DT-CPC (m=16)|2.494 ± 1.050 2.877 ± 0.762 2.686 ± 0.937 0 3.595 ± 0.676 2.275 ± 0.341 2.935 ± 0.849 0 0.782 ± 0.329 1.720 ± 1.685 1.251 ± 1.301 0 5.887 ± 0.357 1.370 ± 1.338 3.628 ± 2.462 0 2.041 ± 1.080 1.074 ± 0.814 1.558 ± 1.071 0 6.022 ± 0.316 1.406 ± 1.371 3.714 ± 2.513 0|.586 ± 0.016 0.089 ± 0.029 0.337 ± 0.249 0. .600 ± 0.007 0.130 ± 0.039 0.365 ± 0.237 1. .613 ± 0.108 0.140 ± 0.068 0.376 ± 0.253 0. .737 ± 0.018 0.238 ± 0.060 0.487 ± 0.254 1. .613 ± 0.060 0.146 ± 0.051 0.379 ± 0.240 0. .614 ± 0.019 0.104 ± 0.025 0.359 ± 0.256 1.|733 ± 0.522 0.586 ± 0.445 0.660 ± 0.490 180 ± 0.019 0.139 ± 0.032 0.660 ± 0.521 889 ± 0.402 0.265 ± 0.137 0.577 ± 0.433 286 ± 0.018 0.145 ± 0.031 0.715 ± 0.571 837 ± 0.345 0.324 ± 0.126 0.581 ± 0.365 284 ± 0.020 0.140 ± 0.039 0.712 ± 0.572|1.228 1.320 0.735 1.610 0.839 1.595|
+|DT-AE (m=1, joint) DT-CPC (m=1, joint) DT-AE (m=4, joint) DT-CPC (m=4, joint) DT-AE (m=16, joint) DT-CPC (m=16, joint)|3.824 ± 1.114 1.988 ± 0.970 2.906 ± 1.391 0 4.460 ± 1.106 2.036 ± 1.032 3.248 ± 1.616 0 5.563 ± 0.449 1.028 ± 1.265 3.295 ± 2.458 1 3.486 ± 1.503 2.265 ± 1.077 2.876 ± 1.443 0 8.450 ± 0.623 2.168 ± 0.701 5.309 ± 3.210 1 4.543 ± 1.179 1.869 ± 1.453 3.206 ± 1.881 0|.687 ± 0.097 0.137 ± 0.057 0.412 ± 0.286 0. .587 ± 0.015 0.106 ± 0.042 0.347 ± 0.243 0. .320 ± 0.208 0.485 ± 0.235 0.902 ± 0.473 0. .690 ± 0.159 0.220 ± 0.176 0.455 ± 0.288 1. .257 ± 0.361 0.655 ± 0.242 0.956 ± 0.430 2. .577 ± 0.032 0.098 ± 0.028 0.338 ± 0.241 0.|723 ± 0.596 0.614 ± 0.462 0.668 ± 0.536 815 ± 0.711 0.710 ± 0.398 0.763 ± 0.578 917 ± 0.319 0.218 ± 0.112 0.567 ± 0.423 021 ± 0.708 0.554 ± 0.383 0.788 ± 0.615 112 ± 0.618 0.994 ± 0.413 1.553 ± 0.767 953 ± 0.483 0.414 ± 0.376 0.683 ± 0.510|1.329 1.452 1.588 1.373 2.606 1.409|
+|DT-E2E (m=1) DT-E2E (m=4) DT-E2E (m=16)|3.220 ± 2.325 1.026 ± 1.398 2.123 ± 2.210 1 8.076 ± 0.551 2.552 ± 0.571 5.314 ± 2.818 1 8.049 ± 0.990 1.859 ± 0.839 4.954 ± 3.228 1|.615 ± 0.536 0.540 ± 0.293 1.078 ± 0.690 1. .205 ± 0.390 0.493 ± 0.247 0.849 ± 0.483 2. .102 ± 0.216 0.549 ± 0.189 0.826 ± 0.343 2.|079 ± 0.209 0.455 ± 0.085 0.767 ± 0.351 835 ± 0.946 1.239 ± 0.460 2.037 ± 1.091 095 ± 0.434 1.241 ± 0.709 1.668 ± 0.726|1.323 2.733 2.482|
+|DT-AE (m=1, frozen) DT-CPC (m=1, frozen) DT-AE (m=4, frozen) DT-CPC (m=4, frozen) DT-AE (m=16, frozen) DT-CPC (m=16, frozen)|2.225 ± 1.017 2.804 ± 1.051 2.514 ± 1.074 0 4.110 ± 0.799 2.172 ± 0.789 3.141 ± 1.253 0 0.815 ± 0.183 1.415 ± 1.755 1.115 ± 1.283 0 3.275 ± 1.186 2.752 ± 1.088 3.014 ± 1.168 0 1.796 ± 0.578 1.312 ± 0.852 1.554 ± 0.767 0 3.486 ± 1.164 2.538 ± 0.905 3.012 ± 1.145 0|.582 ± 0.042 0.131 ± 0.058 0.357 ± 0.231 1. .582 ± 0.021 0.102 ± 0.041 0.342 ± 0.242 1. .681 ± 0.106 0.197 ± 0.061 0.439 ± 0.257 1. .633 ± 0.055 0.139 ± 0.082 0.386 ± 0.257 1. .637 ± 0.039 0.142 ± 0.063 0.389 ± 0.253 1. .636 ± 0.093 0.178 ± 0.132 0.407 ± 0.256 1.|396 ± 0.149 0.259 ± 0.083 0.827 ± 0.581 422 ± 0.099 0.275 ± 0.109 0.848 ± 0.583 066 ± 0.495 0.419 ± 0.321 0.742 ± 0.528 119 ± 0.598 0.508 ± 0.354 0.814 ± 0.578 184 ± 0.326 0.405 ± 0.169 0.795 ± 0.469 318 ± 0.328 0.282 ± 0.126 0.800 ± 0.574|1.233 1.444 0.765 1.404 0.913 1.407|
+|BDT (m=1, N=20) BDT (m=4, N=20) BDT (m=16, N=20) BDT (m=16, N=50) BDT (m=16, N=100)|1.385 ± 0.207 1.180 ± 1.753 1.282 ± 1.253 0 1.660 ± 0.167 1.058 ± 1.580 1.359 ± 1.163 0 1.565 ± 0.190 1.191 ± 1.830 1.378 ± 1.315 0 0.831 ± 0.064 1.204 ± 1.803 1.018 ± 1.290 0 0.936 ± 0.166 1.280 ± 1.861 1.108 ± 1.332 0|.291 ± 0.096 0.110 ± 0.043 0.201 ± 0.117 1. .494 ± 0.281 0.096 ± 0.029 0.295 ± 0.282 0. .321 ± 0.093 0.086 ± 0.017 0.204 ± 0.135 0. .144 ± 0.011 0.104 ± 0.026 0.124 ± 0.028 0. .240 ± 0.047 0.162 ± 0.033 0.201 ± 0.056 0.|113 ± 0.044 0.155 ± 0.046 0.634 ± 0.481 181 ± 0.023 0.414 ± 0.537 0.298 ± 0.397 204 ± 0.033 0.396 ± 0.186 0.300 ± 0.165 199 ± 0.052 0.167 ± 0.024 0.183 ± 0.044 057 ± 0.007 0.873 ± 0.607 0.465 ± 0.593|0.706 0.650 0.627 0.442 0.591|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-E2E (DT-E2E (DT-E2E (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (BDT (BDT (mm=1,=4,mmmmmmmmmmmmmmmmmmmmm=1)=4)=16)=1, joint)=4, joint)=16, joint)=1, frozen)=4, frozen)=16, frozen)=1)=4)=16) N N=1)=4)=16)=1, joint)=4, joint)=16, joint)=1, frozen)=4, frozen)=16, frozen)=20)=20) 2.4943.5950.7825.8872.0416.0223.8244.4605.5633.4868.4504.5433.2208.0768.0492.2254.1100.8153.2751.7963.4861.3851.660 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 1.050 0.676 0.329 0.357 1.080 0.316 1.114 1.106 0.449 1.503 0.623 1.179 2.325 0.551 0.990 1.017 0.799 0.183 1.186 0.578 1.164 0.207 0.167 2.8772.2751.7201.3701.0741.4061.9882.0361.0282.2652.1681.8691.0262.5521.8592.8042.1721.4152.7521.3122.5381.1801.058 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.762 0.341 1.685 1.338 0.814 1.371 0.970 1.032 1.265 1.077 0.701 1.453 1.398 0.571 0.839 1.051 0.789 1.755 1.088 0.852 0.905 1.753 1.580 2.6862.9351.2513.6281.5583.7142.9063.2483.2952.8765.3093.2062.1235.3144.9542.5143.1411.1153.0141.5543.0121.2821.359 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.937 0.849 1.301 2.462 1.071 2.513 1.391 1.616 2.458 1.443 3.210 1.881 2.210 2.818 3.228 1.074 1.253 1.283 1.168 0.767 1.145 1.253 1.163 0.5860.6000.6130.7370.6130.6140.6870.5871.3200.6901.2570.5771.6151.2051.1020.5820.5820.6810.6330.6370.6360.2910.494 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.016 0.007 0.108 0.018 0.060 0.019 0.097 0.015 0.208 0.159 0.361 0.032 0.536 0.390 0.216 0.042 0.021 0.106 0.055 0.039 0.093 0.096 0.281 0.0890.1300.1400.2380.1460.1040.1370.1060.4850.2200.6550.0980.5400.4930.5490.1310.1020.1970.1390.1420.1780.1100.096 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.029 0.039 0.068 0.060 0.051 0.025 0.057 0.042 0.235 0.176 0.242 0.028 0.293 0.247 0.189 0.058 0.041 0.061 0.082 0.063 0.132 0.043 0.029 0.3370.3650.3760.4870.3790.3590.4120.3470.9020.4550.9560.3381.0780.8490.8260.3570.3420.4390.3860.3890.4070.2010.295 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.249 0.237 0.253 0.254 0.240 0.256 0.286 0.243 0.473 0.288 0.430 0.241 0.690 0.483 0.343 0.231 0.242 0.257 0.257 0.253 0.256 0.117 0.282 0.7331.1800.8891.2860.8371.2840.7230.8150.9171.0212.1120.9531.0792.8352.0951.3961.4221.0661.1191.1841.3181.1130.181 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.522 0.019 0.402 0.018 0.345 0.020 0.596 0.711 0.319 0.708 0.618 0.483 0.209 0.946 0.434 0.149 0.099 0.495 0.598 0.326 0.328 0.044 0.023 0.5860.2650.1450.3240.1400.6140.7100.2180.5540.9940.4140.4551.2391.2410.2590.2750.4190.5080.4050.2820.1550.4140.139 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.445 0.137 0.031 0.126 0.039 0.462 0.398 0.112 0.383 0.413 0.376 0.085 0.460 0.709 0.083 0.109 0.321 0.354 0.169 0.126 0.046 0.537 0.032 0.6600.5770.7150.5810.7120.6680.7630.5670.7881.5530.6830.7672.0371.6680.8270.8480.7420.8140.7950.8000.6340.2980.660 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.490 0.433 0.571 0.365 0.572 0.536 0.578 0.423 0.615 0.767 0.510 0.351 1.091 0.726 0.581 0.583 0.528 0.578 0.469 0.574 0.481 0.397 0.521 1.2281.3200.7351.6100.8391.5951.3291.4521.5881.3732.6061.4091.3232.7332.4821.2331.4440.7651.4040.9131.4070.7060.650
+
+BDT (m=16, N =20) 1.565 ± 0.190 1.191 ± 1.830 1.378 ± 1.315 0.321 ± 0.093 0.086 ± 0.017 0.204 ± 0.135 0.204 ± 0.033 0.396 ± 0.186 0.300 ± 0.165 0.627
+
+BDT (m=16, N =50) 0.831 ± 0.064 1.204 ± 1.803 1.018 ± 1.290 0.144 ± 0.011 0.104 ± 0.026 0.124 ± 0.028 0.199 ± 0.052 0.167 ± 0.024 0.183 ± 0.044 0.442
+
+BDT (m=16, N =100) 0.936 ± 0.166 1.280 ± 1.861 1.108 ± 1.332 0.240 ± 0.047 0.162 ± 0.033 0.201 ± 0.056 0.057 ± 0.007 0.873 ± 0.607 0.465 ± 0.593 0.591
+
+
+Table 12: The results of BDT and DT-X variants on the reward distribution matching problem (m = 1, 4, 16).
+
+
+|Method|halfcheetah Expert Medium Total|hopper Expert Medium Total|walker2d Expert Medium Total|Average|
+|---|---|---|---|---|
+|DT-AE (m=1) DT-CPC (m=1) DT-AE (m=4) DT-CPC (m=4) DT-AE (m=16) DT-CPC (m=16)|2.504 ± 1.050 2.880 ± 0.778 2.692 ± 0.943 0 3.595 ± 0.670 2.277 ± 0.349 2.936 ± 0.848 0 0.789 ± 0.333 1.729 ± 1.714 1.259 ± 1.321 0 5.883 ± 0.361 1.371 ± 1.347 3.627 ± 2.462 0 2.060 ± 1.076 1.089 ± 0.827 1.574 ± 1.075 0 6.011 ± 0.324 1.403 ± 1.384 3.707 ± 2.514 0|.580 ± 0.015 0.084 ± 0.027 0.332 ± 0.249 0. .601 ± 0.008 0.130 ± 0.037 0.365 ± 0.237 1. .612 ± 0.108 0.138 ± 0.066 0.375 ± 0.254 0. .731 ± 0.018 0.229 ± 0.057 0.480 ± 0.255 1. .611 ± 0.060 0.142 ± 0.049 0.377 ± 0.241 0. .610 ± 0.019 0.101 ± 0.024 0.355 ± 0.256 1.|729 ± 0.522 0.584 ± 0.447 0.656 ± 0.491 177 ± 0.021 0.135 ± 0.033 0.656 ± 0.522 884 ± 0.402 0.262 ± 0.138 0.573 ± 0.433 282 ± 0.022 0.141 ± 0.032 0.712 ± 0.571 833 ± 0.346 0.321 ± 0.126 0.577 ± 0.365 281 ± 0.022 0.138 ± 0.040 0.710 ± 0.572|1.227 1.319 0.736 1.606 0.843 1.591|
+|DT-AE (m=1, joint) DT-CPC (m=1, joint) DT-AE (m=4, joint) DT-CPC (m=4, joint) DT-AE (m=16, joint) DT-CPC (m=16, joint)|3.825 ± 1.115 1.990 ± 0.988 2.908 ± 1.397 0 4.460 ± 1.101 2.035 ± 1.055 3.248 ± 1.622 0 5.589 ± 0.458 1.040 ± 1.270 3.315 ± 2.467 1 3.484 ± 1.498 2.270 ± 1.099 2.877 ± 1.448 0 8.643 ± 0.679 2.260 ± 0.690 5.451 ± 3.264 1 4.544 ± 1.184 1.884 ± 1.465 3.214 ± 1.882 0|.683 ± 0.094 0.132 ± 0.055 0.407 ± 0.286 0. .583 ± 0.015 0.099 ± 0.041 0.341 ± 0.244 0. .318 ± 0.208 0.481 ± 0.234 0.899 ± 0.473 0. .685 ± 0.157 0.214 ± 0.174 0.449 ± 0.288 1. .255 ± 0.363 0.649 ± 0.241 0.952 ± 0.432 2. .575 ± 0.032 0.096 ± 0.028 0.335 ± 0.241 0.|719 ± 0.597 0.611 ± 0.463 0.665 ± 0.537 811 ± 0.711 0.709 ± 0.399 0.760 ± 0.579 912 ± 0.319 0.216 ± 0.112 0.564 ± 0.422 018 ± 0.713 0.555 ± 0.384 0.786 ± 0.618 104 ± 0.620 0.988 ± 0.413 1.546 ± 0.767 949 ± 0.484 0.412 ± 0.378 0.680 ± 0.510|1.327 1.450 1.593 1.371 2.650 1.410|
+|DT-E2E (m=1) DT-E2E (m=4) DT-E2E (m=16)|3.265 ± 2.346 1.050 ± 1.413 2.158 ± 2.231 1 8.215 ± 0.604 2.684 ± 0.575 5.449 ± 2.828 1 8.208 ± 1.087 1.928 ± 0.838 5.068 ± 3.287 1|.613 ± 0.540 0.534 ± 0.293 1.073 ± 0.692 1. .202 ± 0.392 0.487 ± 0.246 0.845 ± 0.485 2. .097 ± 0.217 0.542 ± 0.187 0.820 ± 0.344 2.|073 ± 0.211 0.451 ± 0.084 0.762 ± 0.350 832 ± 0.951 1.235 ± 0.463 2.034 ± 1.094 086 ± 0.437 1.239 ± 0.712 1.662 ± 0.727|1.331 2.776 2.517|
+|DT-AE (m=1, frozen) DT-CPC (m=1, frozen) DT-AE (m=4, frozen) DT-CPC (m=4, frozen) DT-AE (m=16, frozen) DT-CPC (m=16, frozen)|2.238 ± 1.011 2.807 ± 1.056 2.523 ± 1.072 0 4.110 ± 0.794 2.173 ± 0.806 3.141 ± 1.257 0 0.825 ± 0.189 1.431 ± 1.782 1.128 ± 1.303 0 3.274 ± 1.187 2.756 ± 1.094 3.015 ± 1.170 0 1.821 ± 0.582 1.319 ± 0.863 1.570 ± 0.778 0 3.489 ± 1.159 2.543 ± 0.903 3.016 ± 1.141 0|.577 ± 0.043 0.126 ± 0.056 0.352 ± 0.231 1. .578 ± 0.022 0.097 ± 0.039 0.338 ± 0.242 1. .679 ± 0.106 0.193 ± 0.060 0.436 ± 0.258 1. .629 ± 0.054 0.135 ± 0.081 0.382 ± 0.257 1. .634 ± 0.038 0.137 ± 0.062 0.385 ± 0.253 1. .631 ± 0.091 0.171 ± 0.130 0.401 ± 0.256 1.|391 ± 0.149 0.256 ± 0.083 0.824 ± 0.580 417 ± 0.100 0.272 ± 0.109 0.845 ± 0.582 063 ± 0.495 0.418 ± 0.322 0.740 ± 0.527 115 ± 0.600 0.507 ± 0.353 0.811 ± 0.578 180 ± 0.328 0.404 ± 0.170 0.792 ± 0.468 315 ± 0.329 0.279 ± 0.127 0.797 ± 0.575|1.233 1.441 0.768 1.403 0.916 1.405|
+|BDT (m=1, N=20) BDT (m=4, N=20) BDT (m=16, N=20) BDT (m=16, N=50) BDT (m=16, N=100)|1.414 ± 0.210 1.197 ± 1.770 1.305 ± 1.265 0 1.694 ± 0.171 1.071 ± 1.594 1.382 ± 1.175 0 1.592 ± 0.201 1.208 ± 1.854 1.400 ± 1.333 0 0.840 ± 0.063 1.223 ± 1.828 1.031 ± 1.307 0 0.953 ± 0.168 1.308 ± 1.881 1.130 ± 1.347 0|.288 ± 0.096 0.108 ± 0.041 0.198 ± 0.116 1. .490 ± 0.280 0.092 ± 0.030 0.291 ± 0.281 0. .318 ± 0.093 0.081 ± 0.013 0.200 ± 0.136 0. .142 ± 0.010 0.098 ± 0.025 0.120 ± 0.029 0. .240 ± 0.044 0.156 ± 0.032 0.198 ± 0.057 0.|108 ± 0.045 0.152 ± 0.051 0.630 ± 0.480 173 ± 0.024 0.411 ± 0.547 0.292 ± 0.405 196 ± 0.031 0.392 ± 0.184 0.294 ± 0.164 192 ± 0.051 0.163 ± 0.027 0.178 ± 0.043 051 ± 0.006 0.883 ± 0.614 0.467 ± 0.601|0.711 0.655 0.631 0.443 0.598|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-E2E (DT-E2E (DT-E2E (DT-AE (DT-CPC (DT-AE (DT-CPC (DT-AE (DT-CPC (BDT (BDT (mm=1,=4,mmmmmmmmmmmmmmmmmmmmm=1)=4)=16)=1, joint)=4, joint)=16, joint)=1, frozen)=4, frozen)=16, frozen)=1)=4)=16) N N=1)=4)=16)=1, joint)=4, joint)=16, joint)=1, frozen)=4, frozen)=16, frozen)=20)=20) 2.5043.5950.7895.8832.0606.0113.8254.4605.5893.4848.6434.5443.2658.2158.2082.2384.1100.8253.2741.8213.4891.4141.694 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 1.050 0.670 0.333 0.361 1.076 0.324 1.115 1.101 0.458 1.498 0.679 1.184 2.346 0.604 1.087 1.011 0.794 0.189 1.187 0.582 1.159 0.210 0.171 2.8802.2771.7291.3711.0891.4031.9902.0351.0402.2702.2601.8841.0502.6841.9282.8072.1731.4312.7561.3192.5431.1971.071 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.778 0.349 1.714 1.347 0.827 1.384 0.988 1.055 1.270 1.099 0.690 1.465 1.413 0.575 0.838 1.056 0.806 1.782 1.094 0.863 0.903 1.770 1.594 2.6922.9361.2593.6271.5743.7072.9083.2483.3152.8775.4513.2142.1585.4495.0682.5233.1411.1283.0151.5703.0161.3051.382 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.943 0.848 1.321 2.462 1.075 2.514 1.397 1.622 2.467 1.448 3.264 1.882 2.231 2.828 3.287 1.072 1.257 1.303 1.170 0.778 1.141 1.265 1.175 0.5800.6010.6120.7310.6110.6100.6830.5831.3180.6851.2550.5751.6131.2021.0970.5770.5780.6790.6290.6340.6310.2880.490 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.015 0.008 0.108 0.018 0.060 0.019 0.094 0.015 0.208 0.157 0.363 0.032 0.540 0.392 0.217 0.043 0.022 0.106 0.054 0.038 0.091 0.096 0.280 0.0840.1300.1380.2290.1420.1010.1320.0990.4810.2140.6490.0960.5340.4870.5420.1260.0970.1930.1350.1370.1710.1080.092 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.027 0.037 0.066 0.057 0.049 0.024 0.055 0.041 0.234 0.174 0.241 0.028 0.293 0.246 0.187 0.056 0.039 0.060 0.081 0.062 0.130 0.041 0.030 0.3320.3650.3750.4800.3770.3550.4070.3410.8990.4490.9520.3351.0730.8450.8200.3520.3380.4360.3820.3850.4010.1980.291 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.249 0.237 0.254 0.255 0.241 0.256 0.286 0.244 0.473 0.288 0.432 0.241 0.692 0.485 0.344 0.231 0.242 0.258 0.257 0.253 0.256 0.116 0.281 0.7291.1770.8841.2820.8331.2810.7190.8110.9121.0182.1040.9491.0732.8322.0861.3911.4171.0631.1151.1801.3151.1080.173 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.522 0.021 0.402 0.022 0.346 0.022 0.597 0.711 0.319 0.713 0.620 0.484 0.211 0.951 0.437 0.149 0.100 0.495 0.600 0.328 0.329 0.045 0.024 0.5840.1350.2620.1410.3210.1380.6110.7090.2160.5550.9880.4120.4511.2351.2390.2560.2720.4180.5070.4040.2790.1520.411 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.447 0.033 0.138 0.032 0.126 0.040 0.463 0.399 0.112 0.384 0.413 0.378 0.084 0.463 0.712 0.083 0.109 0.322 0.353 0.170 0.127 0.051 0.547 0.6560.6560.5730.7120.5770.7100.6650.7600.5640.7861.5460.6800.7622.0341.6620.8240.8450.7400.8110.7920.7970.6300.292 ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± ± 0.491 0.522 0.433 0.571 0.365 0.572 0.537 0.579 0.422 0.618 0.767 0.510 0.350 1.094 0.727 0.580 0.582 0.527 0.578 0.468 0.575 0.480 0.405 1.2271.3190.7361.6060.8431.5911.3271.4501.5931.3712.6501.4101.3312.7762.5171.2331.4410.7681.4030.9161.4050.7110.655
+
+BDT (m=16, N =20) 1.592 ± 0.201 1.208 ± 1.854 1.400 ± 1.333 0.318 ± 0.093 0.081 ± 0.013 0.200 ± 0.136 0.196 ± 0.031 0.392 ± 0.184 0.294 ± 0.164 0.631
+
+BDT (m=16, N =50) 0.840 ± 0.063 1.223 ± 1.828 1.031 ± 1.307 0.142 ± 0.010 0.098 ± 0.025 0.120 ± 0.029 0.192 ± 0.051 0.163 ± 0.027 0.178 ± 0.043 0.443
+
+BDT (m=16, N =100) 0.953 ± 0.168 1.308 ± 1.881 1.130 ± 1.347 0.240 ± 0.044 0.156 ± 0.032 0.198 ± 0.057 0.051 ± 0.006 0.883 ± 0.614 0.467 ± 0.601 0.598
+
+
+Table 13: The results of BDT and DT-X variants on the state-feature (x-velocity) distribution matching problem
+(m = 1, 4, 16).
+
+
+halfcheetah best 1
+
+
+0.35 halfcheetah best 2
+
+
+halfcheetah middle 1
+
+
+halfcheetah middle 2
+
+
+0.35
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 −2.5 0.0 2.5 5.0 7.5 10.0 12.5
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 −2.5 0.0 2.5 5.0 7.5 10.0 12.5
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 −2.5 0.0 2.5 5.0 7.5 10.0 12.5
+
+
+0.00 −2.5 0.0 hopper best 22.5 5.0 7.5 10.0 12.5
+
+|35|halfcheetah b|best 2|
+|---|---|---|
+|35 30 25|||
+|20 15|||
+|10|||
+|05|||
+
+
+hopper best 1
+
+walker2d best 12 3 4 5
+
+
+hopper middle 1
+
+walker2d middle 12 3 4 5
+
+
+hopper middle 2
+
+walker2d middle 22 3 4 5
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+0.0
+
+
+0.000.5 1 walker2d best 22 3 4 5
+
+
+0.14
+
+0.12
+
+0.10
+
+0.08
+
+0.06
+
+0.04
+
+0.02
+
+0.00
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00
+
+
+0.14
+
+0.12
+
+0.10
+
+0.08
+
+0.06
+
+0.04
+
+0.02
+
+0.00
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00
+
+|25 20|Col2|Col3|
+|---|---|---|
+|15|||
+||||
+|10|||
+|05|||
+
+
+0.0
+
+
+−2
+
+
+|0.5|walker2d be|est 2|
+|---|---|---|
+|.5 .4|||
+||||
+|.3 .2|||
+|.1|||
+||||
+
+
+−2
+
+
+−2
+
+
+−2
+
+
+Reward
+
+
+Reward
+
+(a) Reward
+
+
+Reward
+
+
+Reward
+
+
+Target Rollout
+
+0.35 halfcheetah best 1 0.35 halfcheetah best 2 0.30 halfcheetah middle 1 0.30 halfcheetah middle 2
+
+0.300.250.200.15 0.300.250.200.15 0.250.200.15 0.250.200.15
+
+Probability 0.10 0.10 0.10 0.10
+
+0.05 0.05 0.05 0.05
+
+0.000.25 −2.5 0.0 hopper best 12.5 5.0 7.5 10.0 12.5 0.000.25 −2.5 0.0 hopper best 22.5 5.0 7.5 10.0 12.5 0.000.14 −2.5 0.0hopper middle 12.5 5.0 7.5 10.0 12.5 0.000.14 −2.5 0.0hopper middle 22.5 5.0 7.5 10.0 12.5
+
+0.20 0.20 0.120.10 0.120.10
+
+0.15 0.15 0.08 0.08
+
+Probability 0.100.05 0.100.05 0.060.040.02 0.060.040.02
+
+0.000.5 1 walker2d best 12 3 4 5 6 0.000.5 1 walker2d best 22 3 4 5 6 0.000.30 1 walker2d middle 12 3 4 5 6 0.000.30 1 walker2d middle 22 3 4 5 6
+
+0.4 0.4 0.25 0.25
+
+0.3 0.3 0.20 0.20
+
+Probability 0.2 0.2 0.150.10 0.150.10
+
+0.1 0.1 0.05 0.05
+
+0.0 −2 0 Reward2 4 6 8 0.0 −2 0 Reward2 4 6 8 0.00 −2 0 Reward2 4 6 8 0.00 −2 0 Reward2 4 6 8
+
+
+(b) x-Velocity
+
+
+Figure 6: (a) Reward and (b) state-feature distribution matching by Bi-directional Decision Transformer
+(m = 16) in halfcheetah (top), hopper (middle), and walker2d (bottom). The left two examples are the
+distributions from the best trajectories, and right two are the distributions from the middle trajectories.
+
+
+-----
+
+E.7 SHIFTING THE TARGET DISTRIBUTION
+
+To generate the unseen but manageable generalization-test trajectories within the support of dataset
+distribution, we make the reward and velocities values of trajectories in the test set shift with a constant
+offset: bin_size ×{−3.0, −2.0, −1.0, 0.0, +1.0, +2.0, +3.0}. Table 14 shows the quantitative
+comparison between CDT and DT, based on Wasserstein-1 distance between two distributions. CDT
+successfully handles the distribution shifts (especially in hopper) better than DT. We also provide the
+state-feature results (Table 15) and qualitative visualizations (Figure 7 and Figure 8), which reveals
+that CDT can match the rollouts to the shifted target distributions when they are within the support of
+dataset distributions.
+
+
+|halfcheetah Expert Medium Total|hopper Expert Medium Total|Expert w Ma elk de iur m2d Total Aver|
+|---|---|---|
+|al DT 1.126 ± 0.245 2.026 ± 1.180 1.576 ± 0.96 1.133 ± 0.197 1.978 ± 1.104 1.555 ± 0.89|4 0.147 ± 0.034 0.302 ± 0.085 0.224 ± 0.101 9 0.521 ± 0.041 0.531 ± 0.045 0.526 ± 0.043|0.285 ± 0.044 1.024 ± 0.076 0.655 ± 0.375 0.8 0.656 ± 0.380 0.915 ± 0.106 0.786 ± 0.308 0.9|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+Categorical DTDT 1.1261.133 ± ± 0.245 0.197 2.0261.978 ± ± 1.180 1.104 1.5761.555 ± ± 0.964 0.899 0.1470.521 ± ± 0.034 0.041 0.3020.531 ± ± 0.085 0.045 0.2240.526 ± ± 0.101 0.043 0.2850.656 ± ± 0.044 0.380 1.0240.915 ± ± 0.076 0.106 0.6550.786 ± ± 0.375 0.308 0.8180.956
+
+
+Table 14: Wasserstein-1 distance between shifted reward distribution and the rollout distributions. Categorical
+DT handles the target distribution shifts and matches the distributions better than DT, since CDT is aware of
+distributional information of entire trajectories.
+
+|halfcheetah Expert Medium Total|hopper Expert Medium Total|Expert w Ma elk de iur m2d Total Aver|
+|---|---|---|
+|al DT 1.270 ± 0.242 2.371 ± 1.747 1.821 ± 1.36 1.173 ± 0.372 2.056 ± 1.045 1.614 ± 0.90|3 0.157 ± 0.038 0.337 ± 0.088 0.247 ± 0.112 1 0.432 ± 0.087 0.531 ± 0.053 0.482 ± 0.088|0.289 ± 0.052 0.964 ± 0.104 0.626 ± 0.347 0.8 0.408 ± 0.246 0.885 ± 0.143 0.646 ± 0.312 0.9|
+
+
+Method Expert **halfcheetahMedium** Total Expert Mediumhopper Total Expert **walker2dMedium** Total **Average**
+
+Categorical DTDT 1.2701.173 ± ± 0.242 0.372 2.3712.056 ± ± 1.747 1.045 1.8211.614 ± ± 1.363 0.901 0.1570.432 ± ± 0.038 0.087 0.3370.531 ± ± 0.088 0.053 0.2470.482 ± ± 0.112 0.088 0.2890.408 ± ± 0.052 0.246 0.9640.885 ± ± 0.104 0.143 0.6260.646 ± ± 0.347 0.312 0.8980.914
+
+
+Table 15: Wasserstein-1 distance between shifted state-feature (x-velocity) distribution and the rollout distri
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+
+0.00−2.5 0.0 Reward2.5 5.0 7.5
+
+|al DT Rollout halfcheeta|handle Deter h best 0.0|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+|||
+|0 5 halfcheetah|10 middle 0.0|
+|||
+|||
+|||
+|||
+|||
+|||
+|0 5 hopper b|10 est 0.0|
+|||
+|||
+|||
+|||
+|||
+|2 hopper m|4 6 iddle 0.0|
+|||
+|||
+|||
+|||
+|||
+|2 walker2d|4 6 best 0.0|
+|||
+|||
+|||
+|||
+|||
+|−2.5 0.0 2.5 walker2d m|5.0 7.5 iddle 0.0|
+|||
+|||
+|||
+|||
+|||
+|||
+|||
+
+
+distributions better than DT.
+
+halfcheetah best -3.0
+
+0 5 10
+
+halfcheetah middle -3.0
+
+0 5 10
+
+hopper best -3.0
+
+2 4 6
+
+hopper middle -3.0
+
+2 4 6
+
+walker2d best -3.0
+
+−2.5 0.0 2.5 5.0 7.5
+
+walker2d middle -3.0
+
+
+halfcheetah best -2.0
+
+0 5 10
+
+halfcheetah middle -2.0
+
+0 5 10
+
+hopper best -2.0
+
+2 4 6
+
+hopper middle -2.0
+
+2 4 6
+
+walker2d best -2.0
+
+−2.5 0.0 2.5 5.0 7.5
+
+walker2d middle -2.0
+
+
+halfcheetah best -1.0
+
+0 5 10
+
+halfcheetah middle -1.0
+
+0 5 10
+
+hopper best -1.0
+
+2 4 6
+
+hopper middle -1.0
+
+2 4 6
+
+walker2d best -1.0
+
+−2.5 0.0 2.5 5.0 7.5
+
+walker2d middle -1.0
+
+
+halfcheetah best +1.0
+
+0 5 10
+
+halfcheetah middle +1.0
+
+0 5 10
+
+hopper best +1.0
+
+2 4 6
+
+hopper middle +1.0
+
+2 4 6
+
+walker2d best +1.0
+
+−2.5 0.0 2.5 5.0 7.5
+
+walker2d middle +1.0
+
+
+halfcheetah best +2.0
+
+0 5 10
+
+halfcheetah middle +2.0
+
+0 5 10
+
+hopper best +2.0
+
+2 4 6
+
+hopper middle +2.0
+
+2 4 6
+
+walker2d best +2.0
+
+−2.5 0.0 2.5 5.0 7.5
+
+walker2d middle +2.0
+
+
+halfcheetah best +3.0
+
+0 5 10
+
+halfcheetah middle +3.0
+
+0 5 10
+
+hopper best +3.0
+
+2 4 6
+
+hopper middle +3.0
+
+2 4 6
+
+walker2d best +3.0
+
+−2.5 0.0 2.5 5.0 7.5
+
+walker2d middle +3.0
+
+
+Figure 7: Reward distribution matching in halfcheetah (top two rows; best and middle), hopper (middle two
+rows; best and middle), and walker2d (bottom two rows; best and middle). We shift the target distribution with
+(from left to right column); bin_size ×{−3.0, −2.0, −1.0, 0.0, +1.0, +2.0, +3.0} (Table 14). Categorical
+DT (red) can match the rollouts to the shifted target distributions (blue) when the shifted targets are within
+the support of dataset distributions. For DT (yellow, captioned as Deterministic), we only visualize the delta
+function at the means of rollouts.
+
+
+-----
+
+|halfcheeta|Ta h best -1.0|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+|0 5 halfcheetah|10 1 middle -1.0|
+|||
+|||
+|||
+|||
+|||
+|||
+|0 5 hopper b|10 1 est -1.0|
+|||
+|||
+|||
+|||
+|||
+|0 2 hopper m|4 iddle -1.0|
+|||
+|||
+|||
+|||
+|||
+|0 2 walker2d|4 best -1.0|
+|||
+|||
+|||
+|||
+|||
+|−2.5 0.0 walker2d|2.5 5.0 7.5 middle -1.0|
+|||
+|||
+|||
+|||
+|||
+|||
+|||
+
+
+Target Rollout Deterministic
+
+0.5 halfcheetah best -3.0 0.5 halfcheetah best -2.0 0.5 halfcheetah best -1.0 0.5 halfcheetah best 0.0 0.5 halfcheetah best +1.0 0.5 halfcheetah best +2.0 0.5 halfcheetah best +3.0
+
+0.4 0.4 0.4 0.4 0.4 0.4 0.4
+
+0.3 0.3 0.3 0.3 0.3 0.3 0.3
+
+0.2 0.2 0.2 0.2 0.2 0.2 0.2
+
+Probability
+
+0.1 0.1 0.1 0.1 0.1 0.1 0.1
+
+0.0 0 5 10 15 0.0 0 5 10 15 0.0 0 5 10 15 0.0 0 5 10 15 0.0 0 5 10 15 0.0 0 5 10 15 0.0 0 5 10 15
+
+halfcheetah middle -3.0 halfcheetah middle -2.0 halfcheetah middle -1.0 halfcheetah middle 0.0 halfcheetah middle +1.0 halfcheetah middle +2.0 halfcheetah middle +3.0
+
+0.25 0.25 0.25 0.25 0.25 0.25 0.25
+
+0.20 0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15 0.15
+
+Probability0.10 0.10 0.10 0.10 0.10 0.10 0.10
+
+0.05 0.05 0.05 0.05 0.05 0.05 0.05
+
+0.00 0 5 10 15 0.00 0 5 10 15 0.00 0 5 10 15 0.00 0 5 10 15 0.00 0 5 10 15 0.00 0 5 10 15 0.00 0 5 10 15
+
+0.25 hopper best -3.0 0.25 hopper best -2.0 0.25 hopper best -1.0 0.25 hopper best 0.0 0.25 hopper best +1.0 0.25 hopper best +2.0 0.25 hopper best +3.0
+
+0.20 0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15 0.15
+
+0.10 0.10 0.10 0.10 0.10 0.10 0.10
+
+Probability
+
+0.05 0.05 0.05 0.05 0.05 0.05 0.05
+
+0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4
+
+hopper middle -3.0 hopper middle -2.0 hopper middle -1.0 hopper middle 0.0 hopper middle +1.0 hopper middle +2.0 hopper middle +3.0
+
+0.20 0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15 0.15
+
+0.10 0.10 0.10 0.10 0.10 0.10 0.10
+
+Probability0.05 0.05 0.05 0.05 0.05 0.05 0.05
+
+0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4 0.00 0 2 4
+
+walker2d best -3.0 walker2d best -2.0 walker2d best -1.0 walker2d best 0.0 walker2d best +1.0 walker2d best +2.0 walker2d best +3.0
+
+0.5 0.5 0.5 0.5 0.5 0.5 0.5
+
+0.4 0.4 0.4 0.4 0.4 0.4 0.4
+
+0.3 0.3 0.3 0.3 0.3 0.3 0.3
+
+0.2 0.2 0.2 0.2 0.2 0.2 0.2
+
+Probability
+
+0.1 0.1 0.1 0.1 0.1 0.1 0.1
+
+0.0 −2.5 0.0 2.5 5.0 7.5 0.0 −2.5 0.0 2.5 5.0 7.5 0.0 −2.5 0.0 2.5 5.0 7.5 0.0 −2.5 0.0 2.5 5.0 7.5 0.0 −2.5 0.0 2.5 5.0 7.5 0.0 −2.5 0.0 2.5 5.0 7.5 0.0 −2.5 0.0 2.5 5.0 7.5
+
+walker2d middle -3.0 walker2d middle -2.0 walker2d middle -1.0 walker2d middle 0.0 walker2d middle +1.0 walker2d middle +2.0 walker2d middle +3.0
+
+0.30 0.30 0.30 0.30 0.30 0.30 0.30
+
+0.25 0.25 0.25 0.25 0.25 0.25 0.25
+
+0.20 0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15 0.15
+
+Probability0.10 0.10 0.10 0.10 0.10 0.10 0.10
+
+0.05 0.05 0.05 0.05 0.05 0.05 0.05
+
+0.00 −2.5 0.0x-Velocity2.5 5.0 7.5 0.00 −2.5 0.0x-Velocity2.5 5.0 7.5 0.00 −2.5 0.0x-Velocity2.5 5.0 7.5 0.00 −2.5 0.0x-Velocity2.5 5.0 7.5 0.00 −2.5 0.0x-Velocity2.5 5.0 7.5 0.00 −2.5 0.0x-Velocity2.5 5.0 7.5 0.00 −2.5 0.0x-Velocity2.5 5.0 7.5
+
+
+Figure 8: State-feature distribution matching, especially x-velocity, in halfcheetah (top two rows; best
+and middle), hopper (middle two rows; best and middle), and walker2d (bottom two rows; best and
+middle). We shift the target distribution with constant offset (from left to right column); bin_size
+_×{−3.0, −2.0, −1.0, 0.0, +1.0, +2.0, +3.0} (Table 15). For DT (yellow, captioned as Deterministic), we_
+only visualize the delta function at the means of rollouts.
+
+
+-----
+
+E.8 SYNTHESIZING UNREALISTIC TARGET DISTRIBUTION
+
+We synthesize six target distributions manually generating x-velocity samples from Gaussian distributions via python scripts as done in prior works (Ghasemipour et al., 2020; Gu et al., 2021). Since we
+consider the one-dimensional feature space (x-velocity), we simply specify the mean and standard
+deviation of Gaussian distributions referring each dataset distribution, as shown in Figure 3, and then
+generate the 1000 samples per trajectory. While these targets are designed at least within the support
+of the dataset, we do not consider physical realizability.
+
+-  HalfCheetah: (µ, σ) = (5.0, 1.0), (13.0, 1.0), (9.0, 1.0), (2.5, 1.0), {(5.0, 1.0), (13.0, 1.0)}, {(9.0,
+1.0), (2.5, 1.0)}.
+
+-  Hopper: (µ, σ) = (2.5, 1.0), (1.5, 1.0), (3.5, 1.0), (2.5, 0.5), {(3.5, 1.0), (1.5, 1.0)}, {(3.5, 0.5), (1.5,
+0.5)}.
+
+-  Walker2d: (µ, σ) = (3.5, 1.0), (2.5, 1.0), (4.5, 1.0), (1.5, 1.0), {(2.5, 0.5), (4.5, 0.5)}, {(1.5, 0.5),
+(4.5, 0.5)}.
+
+For the last two sets, that have different distributional parameters (µ1, σ1), (µ2, σ2), we sampled
+_{_ _}_
+from two gaussian distributions 500 samples each, and marge them as one trajectory that has multiple
+modes.
+
+Although they might be unrealistic, Figure 9 implies that CDT tends to match the target distributions,
+even in the cases of bi-modal target distributions. Such generalization to synthesized distribution is
+an important benefit of distribution-conditioned training. We also quantify the performance of CDT
+against DT from distributional matching perspective in Table 16.
+
+Target Rollout
+
+halfcheetah synthesized 1 halfcheetah synthesized 2 halfcheetah synthesized 3 halfcheetah synthesized 4 halfcheetah synthesized 5 halfcheetah synthesized 6
+
+0.25 0.25 0.25 0.25 0.25 0.25
+
+0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15
+
+0.10 0.10 0.10 0.10 0.10 0.10
+
+Probability
+
+0.05 0.05 0.05 0.05 0.05 0.05
+
+0.000.25 −2.5 hopper synthesized 10.0 2.5 5.0 7.5 10.0 12.5 15.00.000.25 −2.5 hopper synthesized 20.0 2.5 5.0 7.5 10.0 12.5 15.00.000.25 −2.5 hopper synthesized 30.0 2.5 5.0 7.5 10.0 12.5 15.00.000.25 −2.5 hopper synthesized 40.0 2.5 5.0 7.5 10.0 12.5 15.00.000.25 −2.5 hopper synthesized 50.0 2.5 5.0 7.5 10.0 12.5 15.00.000.25 −2.5 hopper synthesized 60.0 2.5 5.0 7.5 10.0 12.5 15.0
+
+0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15
+
+0.10 0.10 0.10 0.10 0.10 0.10
+
+Probability
+
+0.05 0.05 0.05 0.05 0.05 0.05
+
+0.00 0walker2d synthesized 11 2 3 4 5 0.00 0walker2d synthesized 21 2 3 4 5 0.00 0walker2d synthesized 31 2 3 4 5 0.00 0walker2d synthesized 41 2 3 4 5 0.00 0walker2d synthesized 51 2 3 4 5 0.00 0walker2d synthesized 61 2 3 4 5
+
+0.25 0.25 0.25 0.25 0.25 0.25
+
+0.20 0.20 0.20 0.20 0.20 0.20
+
+0.15 0.15 0.15 0.15 0.15 0.15
+
+0.10 0.10 0.10 0.10 0.10 0.10
+
+Probability
+
+0.05 0.05 0.05 0.05 0.05 0.05
+
+0.00−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8 0.00−4 −2 0x-Velocity2 4 6 8
+
+
+Figure 9: State-feature distribution matching in halfcheetah (top), hopper (middle), and walker2d (bottom).
+We synthesize the each target distribution from Gaussian distributions. While the results are worse than for
+realistic test target distributions in Figure 4, considering that many of these arbitrary synthetic targets could
+be unrealizable, seeing bi-modal matching results show that indeed CDT has learned to generalize something
+non-trivial.
+
+|halfcheetah|hopper|walker2d|
+|---|---|---|
+|2.059 ± 0.772 4.256 ± 2.220|0.536 ± 0.22 0.584 ± 0.29|5 0.920 ± 0.428 8 0.974 ± 0.540|
+
+
+Method **halfcheetah** **hopper** **walker2d** **Average**
+
+Categorical DT 2.059 ± 0.772 0.536 ± 0.225 0.920 ± 0.428 1.172
+
+DT 4.256 ± 2.220 0.584 ± 0.298 0.974 ± 0.540 1.938
+
+
+Table 16: State-feature (x-velocity) distribution matching with synthesized, physically unrealistic target distributions generated from scripted Gaussian distributions. We compare Categorical DT and DT. Categorical DT
+manages to deal with such unrealistic target matching.
+
+
+-----
+
+F DETAILS FOR CATEGORICAL DECISION TRANSFORMER
+
+Categorical Decision Transformer (CDT) takes histograms of categorical distribution (i.e. discrete
+approximations of feature distributions; B-dim vector) as the inputs of the transformer. Here we
+describe how to compute the distributions for all timesteps given a trajectory t ∈ [0, 1, . . ., T ]. For
+simplicity, we explain the case of one-dimensional feature (e.g. scalar reward), but for n-dimensional
+features, we can adopt following procedure per each dimension and arrive at n categorical features.
+This essentially approximates the full joints with a product of independent marginal distribution per
+dimension, and ensures that number of samples for getting reasonably discretized approximations do
+not need to grow exponentially as the dimension grows.
+
+At first, we discretize the feature space F using B bins (per dimension), and convert the feature φt
+into the one-hot representation _φ[˜]t. The range of feature space [φmin, φmax] is pre-defined from the_
+given offline datasets. zΦhist(t), the categorical feature distribution at time step t, can be computed
+recursively following Bellman-like equation:
+
+_zΦhist(t) ∝_ _φ[˜]t + γ(1 −_ 1[t = T ])zΦhist(t + 1), (7)
+
+where 1 is the indicator function. We compute a series of zΦhist in a backward manner starting from T .
+After we obtain the desired information statistics for all trajectories, we feed them to the categorical
+transformer during training/test time. We describe the python-like pseudocode in Algorithm 1,
+coloring the changes from the original Decision Transformer (Chen et al., 2021a).
+
+G DETAILS OF DECISION TRANSFORMER WITH LEARNED Φ
+
+While any unsupervised regularizer for an encoder could be combined into the action MSE loss of
+Decision Transformer to obtain the learned Φ efficiently, we observe that even simple objectives,
+such as auto-encoder and contrastive loss, sometimes perform well. For auto-encoder regularization
+(DT-AE), we train the MLP encoder (parameterized by ψ) and decoder with MSE loss of current
+state reconstruction:
+min Es _D_ _s_ decoderψ(encoderψ(s)) _._
+
+Then, we use the output of the encoder as a learned information statistics. In addition, for contrastiveψ _∼_ ∥ _−_ _∥[2][]_
+loss (DT-CPC), we adopt CURL objective (Srinivas et al., 2020) for state input while adding gaussian
+perturbation ϵ ∼N (µ = 0.0, σ = 0.1) as data argumentation (following Sinha et al. (2021)). We
+train the MLP encoder as a query, use its momentum encoder as a key:
+
+
+exp (encoderψ(s)[T] _W_ encoder ˜ψ[(][s][ +][ ϵ][))]
+log
+
+_ϵ[′]≠_ _ϵ_ [exp (][encoder][ψ][(][s][)][T][ W] [encoder][ ˜]ψ[(][s][ +][ ϵ][′][))]
+
+P
+
+
+min E _s_ _D,_
+_ψ_ _ϵ,ϵ[′]∼N∼_ (0,σ)
+
+
+where W is a learned parameter matrix for the bi-linear inner-product, and _ψ[˜] is the weights of the_
+momentum encoder, updated as _ψ[˜] ←_ _mψ[˜] + (1 −_ _m)ψ, and m = 0.95. We treat its trained encoder_
+output as a learned information statistics. It remains as future work to combine more advanced,
+temporary-extended objectives, such as attentive contrastive learning approach proposed in Yang
+& Nachum (2021). As described in Section 6.3, we consider three strategies to train the encoder
+for DT-AE and -CPC: training with only unsupervised loss, training with unsupervised and DT’s
+supervised loss jointly (called as “joint”), and pre-training with only unsupervised loss and freezing
+the weights during DT training (called as “frozen”). We train DT-E2E with only DT’s supervised loss
+as in Algorithm 1 for CDT and BDT.
+
+
+-----
+
+**Algorithm 1 Categorical/Bi-directional Decision Transformer Pseudocode: Orange and green**
+texts describe additional details on top of the base DT pseudocode from Chen et al. (2021a).
+
+**# z: information statistics (histogram, or learned representation)**
+**# s, a, t: states, actions, or timesteps**
+**# transformer: transformer with causal masking (GPT)**
+**# embed_s, embed_a, embed_z: linear embedding layers**
+**# anti_causal_tf: second transformer as encoder and aggregator**
+**# embed_t: learned episode positional embedding**
+**# pred_a: linear action prediction layer**
+**# compute_stats: a function to compute information statistics**
+
+**# main model**
+**def DecisionTransformer(z, s, a, t):**
+
+**# compute embeddings for tokens**
+**pos_embedding = embed_t(t)**
+**s_embedding = embed_s(s) + pos_embedding**
+**a_embedding = embed_a(a) + pos_embedding**
+**if categorical:**
+
+**z_embedding = embed_z(z) + pos_embedding**
+**elif bi_directional:**
+
+**# input state sequence in a reverse order**
+**# NOTE: z is a target state sequence here**
+**reversed = flip(z)**
+**z_embedding = embed_z(anti_causal_tf(reversed)) + pos_embedding**
+
+
+**input_embeds = stack(z_embedding, s_embedding, a_embedding)**
+
+**# use transformer to get hidden states**
+**hidden_states = transformer(input_embeds=input_embeds)**
+
+**# select hidden states for action prediction tokens**
+**a_hidden = unstack(hidden_states).actions**
+
+**# predict action**
+**return pred_a(a_hidden)**
+
+**# training loop**
+**train_z = compute_stats(train_dataset)**
+**# dims: (batch_size, K, dim)**
+**for z, (s, a, t) in zip(train_z, train_dataset):**
+**if unsupervised:**
+
+**z = s**
+
+**a_preds = DecisionTransformer(z, s, a, t)**
+**loss = mean((a_preds - a)**2)**
+**optimizer.zero_grad(); loss.backward(); optimizer.step()**
+
+
+**# evaluation loop**
+**test_z = compute_stats(test_dataset)**
+**n_tests = len(test_dataset)**
+**for index in range(n_tests):**
+**test_trajectory = test_dataset[index]**
+**max_time_steps = len(test_trajectory)**
+**s, a, t, done = [env.reset()], [], [1], False**
+**# conditioning on the desired information statistics**
+**if categorical:**
+
+**z = [test_z[index][0]]**
+**elif bi_directional:**
+
+**z = [test_trajectory[’observations’][0]]**
+**for t in range(max_time_steps):**
+**action = DecisionTransformer(z, s, a, t)[-1]**
+**new_s, r, done, _ = env.step(action)**
+**# append new tokens to sequence**
+**if categorical:**
+
+**z = z + [test_z[index][t+1]]**
+
+**elif bi_directional:**
+
+**z = z + [test_trajectory[’observations’][t+1]]**
+
+**s, a, t = s + [new_s], a + [action], t + [len(z)]**
+**z, s, a, t = z[-N:], ...** **# only keep context length of N**
+
+
+-----
+

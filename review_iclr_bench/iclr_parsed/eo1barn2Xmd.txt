@@ -1,0 +1,1300 @@
+# SLIM-QN: A STOCHASTIC, LIGHT, MOMENTUMIZED QUASI-NEWTON OPTIMIZER FOR DEEP NEURAL NET## WORKS
+
+**Anonymous authors**
+Paper under double-blind review
+
+ABSTRACT
+
+We propose SLIM-QN, a light stochastic quasi-Newton optimizer for training
+large-scale deep neural networks (DNNs). SLIM-QN addresses two key barriers in
+existing second-order methods for large-scale DNNs: 1) the high computational
+cost of obtaining the Hessian matrix and its inverse in every iteration (e.g. KFAC);
+2) convergence instability due to stochastic training (e.g. L-BFGS). To tackle the
+first challenge, SLIM-QN uses the BFGS update rule that directly approximates the
+Hessian inverse using past parameters and gradients, without explicitly constructing
+the Hessian matrix and then computing its inverse. To achieve stable convergence,
+SLIM-QN introduces momentum in Hessian updates together with an adaptive
+damping mechanism. We provide rigorous theoretical results on the convergence
+of SLIM-QN in a stochastic setting. We also demonstrate that SLIM-QN has much
+less compute and memory overhead compared to existing second-order methods.
+To better understand the limitations and benefits of SLIM-QN, we evaluate its
+performance on various datasets and network architectures. For instance on large
+datasets such as ImageNet, we show that SLIM-QN achieves near optimal accuracy
+1.5× faster when compared with SGD (1.36× faster in wall-clock time) using the
+same compute resources. We also show that SLIM-QN can readily be applied to
+other contemporary non-convolutional architectures such as Transformers.
+
+1 INTRODUCTION
+
+Second-order methods have been extensively investigated in the classical convex optimization
+literature. Indeed variants such as quasi-Newton methods are known to deliver faster convergence
+than gradient descent (GD) and achieve the best overall run time for many tasks (Gao & Goldfarb,
+2019; Rodomanov & Nesterov, 2021). However, the Achilles heel of second-order methods that has
+impeded their wide adoption for large-scale machine learning problems is their substantial compute
+and memory cost, rendering them less favorable than popular stochastic first-order methods such as
+SGD (Saad, 1998) and its variants (Duchi et al., 2011; Kingma & Ba, 2014).
+
+The aforementioned barriers stem from computing second-order information (loss Hessian w.r.t
+model parameters and its inverse), which typically dominates run-time, especially for large-scale
+models such as ResNet (He et al., 2016) and Vision Transformer (Dosovitskiy et al., 2020a), on large
+datasets such as ImageNet (Deng et al., 2009). To mitigate these issues, approximation methods have
+been developed to either approximate Fisher information matrix (expected Hessian matrix under
+negative log-likelihood loss) (Martens & Grosse, 2015; Ba et al., 2016; Pauloski et al., 2020) or
+directly approximate the Hessian inverse (Fletcher, 2013; Mokhtari & Ribeiro, 2015; Moritz et al.,
+2016; Gower et al., 2016; Gao & Goldfarb, 2018). A prominent example of the first category is
+KFAC (Martens & Grosse, 2015; Ba et al., 2016) which utilizes a gradient conditioner based on
+Fisher information and also approximates the matrix as Kronecker product of small sub-matrices,
+therefore simplifies matrix inversion. An example from the second category is L-BFGS (Nocedal,
+1980; Liu & Nocedal, 1989) which aims to directly approximate the Hessian inverse by iterating over
+the past parameter and gradient changes, without explicitly constructing the Hessian matrix itself.
+
+These methods, while to some extent alleviate the compute and memory costs of second order
+methods, still experience performance or convergence issues when used for training on large-scale
+
+
+-----
+
+models. For instance, even though KFAC has faster per-iteration convergence compared to SGD, this
+gain is often significantly neutralized by the need to run backward passes multiple times to estimate
+Fisher information in each mini-batch iteration and then perform costly matrix inversion (Pauloski
+et al., 2020). Similarly, stochastic BFGS variants (Mokhtari & Ribeiro, 2015; Moritz et al., 2016;
+Gower et al., 2016) have yet to be proven efficient in training large-scale models such as ResNet
+in practice. A key challenge is that computationally intensive techniques are required to address
+convergence instability issues in this literature (Mokhtari & Ribeiro, 2015; Moritz et al., 2016; Chang
+et al., 2019), which unfortunately offset the compute benefits. More recently, authors in (Goldfarb
+et al., 2020) propose to lessen the computation burden of matrix inversion in KFAC via BFGS-like
+updates with promising results on simple architectures. However the efficacy of this approach is yet
+to be demonstrated on practical DNNs and large-scale datasets.
+
+To simultaneously mitigate the computation and instability barriers in second-order methods, we
+propose SLIM-QN, a stochastic light stable BFGS-like method that achieves convergence advantages
+of second-order methods, while only using modest compute and memory cost compared to other
+techniques such as KFAC. SLIM-QN addresses the barriers in second-order methods in two ways.
+To reduce compute cost while maintaining fast convergence of second-order methods, SLIM-QN
+introduces momentum into the Hessian update. By utilizing momentum on past parameter and
+gradient changes, SLIM-QN smooths out the Hessian approximation without incurring costly variance
+reduction methods (e.g. a separate large batch size to estimate the Hessian). Furthermore, to ensure
+stable convergence, SLIM-QN uses an adaptive damping mechanism to adjust gradient changes so as
+to guarantee positive definiteness of the approximated Hessian inverse in stochastic settings. This
+adaptive damping scheme effectively restrains abnormal eigenvalues in the Hessian inverse and steers
+the optimization trajectory towards desirable directions.
+
+SLIM-QN delivers faster convergence compared to SGD in various models and datasets. The
+convergence advantage is even more striking on large-scale models and datasets. Furthermore, due to
+its simplicity, SLIM-QN enjoys much better wall-clock convergence gains than other second-order
+methods such as KFAC.
+
+In summary, our main contributions are as follows:
+
+1. We develop SLIM-QN, a stochastic quasi-Newton algorithm targeting large-scale models, that
+achieves both fast and stable convergence and low computation complexity, via introducing momentum and damping into the Hessian updates.
+
+2. We provide a rigorous analysis for SLIM-QN showing that this algorithm converges at a linear rate
+for stochastic optimization problems.
+
+3. We provide complexity analysis that demonstrates that SLIM-QN is lighter than other second-order
+methods leading to reductions in overall wall-clock training time.
+
+4. Finally, we carry out comprehensive evaluations on various models and datasets that show
+that SLIM-QN delivers faster convergence compared to SGD, especially for large datasets such as
+ImageNet. For instance, to reach near optimal accuracy when training ResNet-50 on ImageNet,
+SLIM-QN is 1.5× than SGD (1.36× faster in wall clock time). Furthermore, when training Vision
+Transformer models, SLIM-QN also achieves faster convergence and higher accuracy.
+
+2 PRELIMINARIES
+
+In this paper we consider a typical empirical loss minimization problem of the form min (θ, ) :=
+_θ_ _L_ _X_
+
+1 _N_
+
+_N_ _i=1_ _[ℓ][(][θ][,][ x][i][)][, where][ θ][ denotes the parameters of the model to be optimized, and][ X][ =][ {][x][i][}]i[N]=1_
+are the training data where xi consists of both features and labels. The loss function is typically
+minimized through some variant of gradient descent, that uses the local gradientsP **_gt = ∇θL(θt)_**
+directly to update the model parameters via iterates of the form
+
+**_θt+1 = θt −_** _ηtgt,_ (1)
+
+where ηt denotes the step size (learning rate) at iteration t. However, such GD updates are typically
+slow especially for ill-conditioned problems (Nesterov, 2003). To speed up the convergence, often
+second-order methods are used. In particular, Quasi-Newton (QN) methods find an approximate
+Hessian inverse _H[ˆ]_ _[−][1]_ to pre-condition the gradient vector and apply the following update to minimize
+
+
+-----
+
+the loss:
+**_θt+1 = θt −_** _ηt ·_ _H[ˆ]_ _[−][1]gt._
+
+In stochastic training, the gradient vector is evaluated on a mini-batch input _t_, namely
+_S_ _⊆X_
+**_gt = ∇θL(θt, St). If_** _H[ˆ]_ _[−][1]_ is the identity matrix, the update above reduces to SGD, whereas if _H[ˆ]_ _[−][1]_
+is a diagonal matrix, it reduces to adaptive training algorithms such as Adagrad (Duchi et al., 2011) or
+Adam (Kingma & Ba, 2014). However, to incorporate more curvature information in the optimization
+process, it often requires approximating _H[ˆ]_ _[−][1]_ with a full symmetric matrix.
+
+A prime challenge in QN methods is the evaluation of _H[ˆ] and in particular its inverse. To address this_
+challenge the well-known Broyden–Fletcher–Goldfarb–Shanno (BFGS) algorithm has been proposed.
+BFGS approaches the Hessian inverse as a minimization problem:
+
+
+2
+_H[ˆ]_ _[−][1]_ _Hk[−][1]1_ _,_ s.t. _Hˆ_ _[−][1]_ **_yk = sk,_** _Hˆ_ _[−][1]_ is symmetric,
+_−_ [ˆ] _−_ _·_
+
+
+min
+_Hˆ_ _[−][1]_
+
+
+where sk = θk **_θk_** 1 denotes the parameter changes, and yk = gk **_gk_** 1 the gradient changes in
+_−_ _−_ _−_ _−_
+two consecutive updates [1]. Knowing _H[ˆ]k[−][1]1_ [from the previous update, the current][ ˆ]H _[−][1]_ is obtained
+_−_
+via:
+**UpdateHessian:** _Hˆk[−][1]_ = (I _ρkyks[T]k_ [)][T][ ˆ]Hk[−][1]1[(][I][ −] _[ρ][k][y][k][s]k[T]_ [) +][ ρ][k][s][k][s]k[T] _[,]_ (2)
+_−_ _−_
+
+where ρk = **_yk[T]1[s][k][ . Therefore,][ ˆ]H_** _[−][1]_ is constructed in an iterative manner without explicitly computing
+
+the Hessian itself. Given such an update rule, methods such as Greedy BFGS (Rodomanov & Nesterov,
+2021) show _H[ˆ]_ _[−][1]_ can converge to the real Hessian at a linear rate.
+
+In real-world problems, θ usually consists of millions of parameters. As a result, it is infeasible to
+store the whole _H[ˆ]k[−][1]_ matrix with O( **_θ_** ) memory cost. To reduce memory footprint and simplify
+_|_ _|[2]_
+computation, _H[ˆ]_ _[−][1]_ in BFGS is stored in the form of a sequence of history vectors **_yi_** and **_si_** . By
+_{_ _}_ _{_ _}_
+exploiting the Hessian update formula in equation 2, the matrix-vector product _H[ˆ]k[−][1]_ **_gt necessary to_**
+
+_·_
+pre-condition the gradient can be replaced by a sequence of fast vector-vector products as shown in
+Algorithm 1. Furthermore, to limit memory and compute costs, a limited-memory version of BFGS,
+L-BFGS (Nocedal, 1980) is proposed that only uses the latest M history vectors when approximating
+the Hessian inverse.
+
+**Algorithm 1 Hessian-Vector in L-BFGS**
+
+
+**Input: gt, {yi}i[M]=1** _[,][ {][s][i][}]i[M]=1_
+**Output: gt**
+
+1: for i = 0, · · ·, M − 1 do
+2: _ρi = s[T]i_
+
+_[·][ y][i]_
+
+3:4: for iα = 0i = _,s · · ·ρ[T]MM−, M−i−i−11[g] −[t]_ 1 do
+
+5: **_gt = gt_** _αi_ **_yM_** _i_ 1
+
+6: gt = H[ˆ]0[−][1] _· − gt ▷ ·H[ˆ]0[−][1]−=−_ **_ys[T]MM[T]_** _−−11[y][y][M][M][−][−][1][1][ ·][ I]_
+
+7: for i = 0, · · ·, M − 1 do
+
+8: _βi =_ **_[y]i[T]ρi[g][t]_**
+
+9: **_gt = gt + (αM_** _i_ 1 _βi)_ **_si_**
+_−_ _−_ _−_ _·_
+
+
+5 12
+
+4 10
+
+3 8
+
+2 2 6
+
+1 LossOptimal 4
+
+SGD
+
+0 Exact NewtonNaive BFGS 2
+
+-1 BFGS with momentum
+
+-5 -4 -3 -2 -1 0 1 2 3 4 5
+
+1
+
+
+Figure 1: Optimization using SGD, Naive BFGS,
+BFGS with momentum and Exact Newton.
+
+
+3 SLIM-QN
+
+While BFGS achieves faster convergence compared to GD in full-batch training, it still suffers
+convergence instability in the stochastic setting, especially for large-scale DNNs. Specifically, Naive
+BFGS, which simply uses parameter θt and gradients gt at each iteration to calculate sk and yk,
+suffers from severe instability due to stochastic noise introduced by mini-batch training (See the
+
+1“k" rather than “t" is used in the equation as parameter/gradient used might be different from the one in
+equation 1
+
+
+-----
+
+Table 1: sk and yk for Naive BFGS and for BFGS with momentum for = [1]2
+_L_ _[∥][θ][∥][2]_
+
+Naive BFGS BFGS with momentum
+
+**_sk_** **_θk+1_** **_θk_** (1 _β1)(θk+1_ **_θk)_**
+_RVyk_ **_θk+1 −_** **_θkθ + (k+12σ −−[2]nθkk+1 −_** **_nk)_** (1 − _β2)(θk+1 − −_ **_θ(1kθ−k) + (1+1β2−)·2θkσ − −[2]_** _β2)(nk+1 −_ **_nk)_**
+
+ablation study in Sec. 5.2). To stabilize the optimization, a common solution is to use a separate large
+batch of data when estimating sk and yk (Moritz et al., 2016; Chang et al., 2019) in order to reduce
+stochastic noise. However, this dramatically increases the computation cost and negates performance
+gains in wall-clock time.
+
+In order to reduce variance in _H[ˆ]_ _[−][1]_ without incurring such expensive additional computation as
+in (Moritz et al., 2016; Chang et al., 2019), we propose a novel quasi-Newton method, SLIM-QN
+which introduces momentum and damping to the Hessian updates. In SLIM-QN, we first obtain the
+momentum of θt and gt, from which we subsequently derive parameter and gradient changes sk and
+**_yk. To guarantee positive definiteness of_** _H[ˆ]_ _[−][1], we further introduce adaptive damping into the update_
+of yk. With the momentumized and damped parameter and gradient changes, we can construct a
+consistent _H[ˆ]_ _[−][1]_ throughout the whole optimization process.
+
+3.1 INTRODUCE MOMENTUM INTO THE HESSIAN UPDATE
+
+Inspired by the success of momentum in first-order methods, we demonstrate that the Hessian
+update in L-BFGS can be stabilized via momentum, without requiring a large batch size or even full
+gradients to reduce stochastic noise. In particular, in this paper we apply momentum Mθt _, Mgt to_
+past parameters θt and gradients gt during mini-batch training as follows:
+
+
+**_θ : Mθt = β1 · Mθt−1 + (1 −_** _β1)θt,_
+
+**_g : Mgt = β2 · Mgt−1 + (1 −_** _β2)gt,_
+
+where β1 and β2 are the momentum coefficients for θt and gt respectively.
+
+Assuming that _H[ˆ]_ _[−][1]_ is updated for every L mini-batch iterations, sk and gk are obtained as
+
+**_sk =_** **_θ(k+1)L_** **_θkL_** _,_ **_yk =_** **_g(k+1)L_** **_gkL_** _._
+_M_ _−M_ _M_ _−M_
+
+
+This simple but effective technique works surprisingly well when gradients are noisy. To intuitively
+show improvements of BFGS with momentum over the naive version, we compare the stochastic
+optimization of a simple quadratic loss function, = 12
+gradients in each mini-batch iteration as gt = θt + L nt, where[∥][θ] n[∥][2][. In stochastic training, we write]t denotes the stochastic noise. For
+the sake of simplicity, we model the noise as i.i.d. Gaussian, that is nt (0, σ[2]).
+_∼N_
+
+Table 1 lists the expression for sk and yk for naive BFGS and for BFGS with momentum in terms of θ
+and the stochastic noise. We compare the stability of yk in the two algorithms via their element-wise
+relative variance RVj = [Var]E([(]y[y]k[k]([(]j[j]))[))] [, where][ y][k][(][j][)][ denotes the][ j][th element of][ y][k][. As shown in Table 1,]
+
+it is easy to observe that, RVj[mom.] using momentum is much lower than RVj[naive] in naive BFGS.
+Hence, given a large momentum, SLIM-QN can significantly suppress noise and obtain a more
+consistent yk. With less noise in yk, BFGS with momentum leads to a better approximation of the
+real Hessian. Figure 1 visualizes the optimization trajectory for SGD, naive BFGS, BFGS with
+momentum and the exact Newton method. With the same initialization, BFGS with momentum is as
+fast as the exact Newton method, and almost twice faster than SGD. On the other hand, naive BFGS
+has difficulties finding the right optimization path due to the noise in yk.
+
+3.2 GUARANTEE POSITIVE DEFINITENESS OF THE HESSIAN VIA DAMPING
+
+Even though adding momentum stabilizes the Hessian inverse, it cannot guarantee that the approximated Hessian is always positive definite, especially in practical stochastic and non-convex
+optimization. As analysed in Sec 5.2, negative or very small positive values in the Hessian spectrum
+
+
+-----
+
+are harmful, and they immediately derail the optimization. To effectively prevent radical changes in
+the Hessian, SLIM-QN further introduces an adaptive damping mechanism to the Hessian update.
+
+Positive definiteness of the Hessian hinges on stable and smooth gradient change vectors **_yi_**,
+_{_ _}_
+especially in non-convex and stochastic settings. Hence, we choose to dampen yi by
+
+**_yˆi = τ · yi + (1 −_** _τ_ ) · si, (3)
+
+where ˆyi is the damped version of yi, and τ is calculated as
+
+
+min( [1]1[−]−[σ]µ[L] _[, τ][0][)]_ _µ ≤_ _σL < 1_
+
+min( _[σ]µ[H]−[−]1[1]_ _[, τ][0][)]_ _µ ≥_ _σH > 1_ (4)
+
+_τ0_ otherwise
+
+
+_τ =_
+
+
+_i_
+where µ = **_[s]s[T][T]i_** _[·][y][i]_ _H_ _[−][1]_
+
+_[·][s][i][,][ σ][L][ and][ σ][H][ are the lower and upper thresholds for restraining eigenvalues in][ ˆ]_
+
+and 0 < τ0 < 1 is a constant coefficient.
+
+The above damping scheme prevents sudden changes of s[T]i **_[y][i][, and guarantees the smoothness of]_**
+_Hˆ_ _[−][1]. Equivalently, equation 3 can be considered as scaling the undamped_ _H[ˆ] and adaptively shifting_
+its spectrum by a positive constant: τ · _H[ˆ] + (1 −_ _τ_ ) · I. As a result, the eigenvalues of _H[ˆ] are well_
+controlled.
+
+3.3 THE OVERALL DESCRIPTION
+
+With momentum and damping introduced above, in this section we present the complete SLIMQN algorithm. As shown in Algorithm 2, for each mini-batch iteration, we use Mθt and Mgt to
+accumulate momentum of parameters and gradients. For every L iterations, we compute sk and
+**_yk, apply damping, and then update the Hessian approximation. Note that in UpdateHessian the_**
+inverse Hessian is never explicitly computed, instead we only compute and store the history vectors
+**_sk and ˆyk that are necessary to perform the pre-conditioning step. Since at the first 2L iterations,_**
+_Hˆ_ _[−][1]_ is not ready yet, we use SGD to conduct a warmup training. After 2L iterations, we use _H[ˆ]_ _[−][1]_ to
+first pre-condition gradients gt and then apply updates to θ. Unlike KFAC, SLIM-QN is compatible
+to various regularizers such as L2 and gradient regularization(Smith et al., 2021), as long as we
+can derive gradients from them. Finally, we add momentum to the parameter update ∆θt after
+pre-conditioning following the same procedure as in SGD with momentum (which is omitted in
+Algorithm 2).
+
+**Algorithm 2 SLIM-QN algorithm**
+
+1: for t = 1, · · ·, max_iter do
+2: Randomly choose mini-batch input _t_
+
+3: Compute gradients gt given St(Forward/Backward) S _∈X_
+
+4: Add weight decay: gt = gt + wd · θt
+
+5:6:7: Compute momentum onCompute momentum onif t ≤ 2L then **_θ g:: M Mgθtt = = β β21 · M · Mgθtt−−11 + (1 + (1 − −_** _ββ21)) · · g θtt_ _▷▷_ _MMθg00 = = θ g00_
+
+9:8: **elseWarmup: θt+1 = θt −** _ηt · gt_
+
+10: Pre-condition: ∆θt = H[ˆ]k[−][1] **_gt_** _▷_ Algorithm 1
+
+_·_
+
+11: Update: θt+1 = θt − _ηt · ∆θt_
+
+12: **if t%L == 0 and t > L then**
+
+13: _k = k + 1_
+
+14: **_s: sk =_** **_θt_** **_θt_** _L_
+
+15: **_y: yk = M_** **_gt −M_** **_gt−_** _L_
+
+16: Damping M: ˆyk = −M τ · yk− + (1 − _τ_ ) · sk _▷τ from equation 4_
+
+17: _Hˆ_ _[−][1]:_ _H[ˆ]k[−][1]_ = UpdateHessian( H[ˆ]k[−][1]1[,][ s][k][,][ ˆ]yk) _▷_ equation 2, not explicitly computed
+_−_
+
+
+-----
+
+4 THEORETICAL GUARANTEES FOR SLIM-QN
+
+In this section, we first present convergence guarantees for SLIM-QN, and then discuss the compute
+and memory costs for SGD, KFAC, and SLIM-QN.
+
+4.1 CONVERGENCE GUARANTEES
+
+Following the framework of quasi-Newton method in Wang et al. (2017) in stochastic optimization,
+we prove that SLIM-QN converges to the optimum at a linear rate, under proper assumptions as
+follows:
+
+**AS 1. L(θ) is λ-PL in that it satisfies Polyak-Lojasiewicz (PL) condition for a constant λ > 0:**
+_∥∇L(θ)∥[2]_ _≥_ _λL(θ)._
+
+**AS 2.Λ** _ℓi(θ) is Λ-smooth for 1 ≤_ _i ≤_ _N_ _, Λ > 0: ∀θ1, θ2, ℓi(θ2) ≤_ _ℓi(θ1) + ⟨∇ℓi(θ1), θ2 −_ **_θ1⟩_** +
+
+2
+
+_[∥][θ][2][ −]_ **_[θ][1][∥][2][.]_**
+
+**AS 3. For every sequence θ1, θ2,** _such that limt_ (θt) = 0, then for all 1 _i_ _N_ _,_
+_· · ·_ _→∞_ _L_ _≤_ _≤_
+limt→∞ _ℓi(θt) = 0_
+
+We note that compared to typical strong convexity assumptions the PL condition in AS 1 (Polyak,
+1963) applies to much broader settings including when the loss is nonconvex as it only requires lower
+bounded variance in gradients, rather than strict positive definiteness required for the Hessian with
+strong convexity. AS 3 assumes that the global minima of the summands ℓi are the same as the global
+minima of their sum. This is in line with what has been observed in over-parameterized deep learning
+models (Ma et al., 2018).
+
+Before we state our main result we require several auxiliary lemmas. First Lemma 1 states that s[T]i **_yi_**
+always lies in [σL, σH ] · s[T]i **_[s][i][. With Lemma 1 in place, in Lemma 2 we bound the approximation][·][ ˆ]_**
+of the Hessian _H[ˆ]k[−][1]_ at kth Hessian update. Lemma 3 further establishes smoothness on (θ) given
+_L_
+each ℓi is smooth. While Lemma 4 further bounds gradient variance in mini-batch training.
+
+**Lemma 1. Given damping scheme in equation 3, if we choose τ according to equation 4, then**
+_σL_ **_si[T]i_** _[·]y[ˆ]i_
+_≤_ **_[s][T]_** _[·][s][i][ ≤]_ _[σ][H]_ _[.]_
+
+**Lemma 2. Given Lemma 1, at the k-th Hessian update,** _H[ˆ]k[−][1]_ _during the optimization is bounded by_
+_ξI ⪯_ _H[ˆ]k[−][1]_ _⪯_ ΞI, where Ξ = (M + 1) _σ[1]L_ _[, and][ ξ][ =]_ _σ1H_ _[.][ σ][L][ and][ σ][H][ is the lower and upper bound]_
+
+_i_ **_yi_**
+_for_ **_[s]s[T][T]i_** _[·]_ [ˆ]
+
+_[·][s][i][ in Lemma 1.]_
+
+**Lemma 3. Assume AS 2 holds, then loss function L(θ) is at least Λ-smooth.**
+
+**Lemma 4. Assume AS 2-3 holds, with Lemma 3, at iteration t with mini-batch input St, where each**
+_sample is randomly sampled from_ _with replacement, gradient_ (θt; _t) satisfies_
+_X_ _∇L_ _S_
+
+_ESt_ [∥∇L(θt; St)∥[2]] ≤ 2Λ · L(θt)
+
+With _H[ˆ]k[−][1]_ and gradient variance bounded, we can derive the following convergence theorem.
+
+**Theorem 1. Assume AS 1-3 hold at each iteration t of SLIM-QN with mini-batch input St where**
+_each sample is randomly sampled from_ _with replacement, then the expectation of_ (θt) satisfies
+_X_ _L_
+
+_ESt_ [L(θt)] ≤ _αt−1ESt−1_ [L(θt−1)],
+
+_where αt_ 1 = 1 _ηt_ 1λξ + ηt[2] 1[Λ][2][Ξ][2][.]
+_−_ _−_ _−_ _−_
+
+Proofs for the lemmas and theorem are provided in the appendix.
+
+**Remark 1. By choosing ηt** 1 such that αt 1 < 1, SLIM-QN converges at a linear rate.
+_−_ _−_
+
+**Remark 2. We note that Theorem 1 also applies to convex settings, as strong convexity implies**
+_∥∇L(θ)∥[2]_ _is lower bounded by L(θ) for an appropriate λ > 0 and hence AS 1 holds._
+
+
+-----
+
+Table 2: Computations and Memory in SGD, KFAC, and SLIM-QN
+
+SGD KFAC sL-BFGS SLIM-QN
+
+Computation
+
+
+|Fwd&Bwd Opt|bC α ∥θ∥+ γbC + L1 P(d3 + ( ∥θ dii ∥)3) α ∥θ∥+ 2bC + L1b HC bC + α ∥θ∥ fb 1 fb i 2 fb fb fb 3 α 0 ∥θ∥ α 0 ∥θ∥+ 2 P(d i + ∥θ dii ∥) ∥θ i∥ α 0 ∥θ∥+ 2M ∥θ∥ α 0 ∥θ∥+ 2M ∥θ∥|
+|---|---|
+
+
+Memory
+
+[P]
+
+|Fwd&Bwd Opt|bM bM + β ∥θ∥ bM + β ∥θ∥+ L1b HM bM + β ∥θ∥ fb fb 1 fb 2 fb fb 3 β ∥θ∥ β ∥θ∥+ 2 P(d2 + ( ∥θ dii ∥)2) β ∥θ∥+ 2M ∥θ∥ β ∥θ∥+ 2M ∥θ∥ 0 0 i 0 0|
+|---|---|
+
+
+
+-  di: input dim in layer i. b: batch size. bH : batch size for the Hessian approx. **_θi_** : #params in layer i.
+
+[P] _∥_ _∥_
+
+4.2 COMPUTE AND MEMORY COST
+
+As mentioned before, SLIM-QN aims to reduce the complexity of approximating the Hessian. In this
+section, we summarize the compute and memory cost of SGD, KFAC, stochastic L-BFGS (sL-BFGS)
+variants(Chang et al., 2019) and SLIM-QN, and demonstrate the cost advantage of SLIM-QN.
+
+Given a model with parameter θ, we use Cfb and Mfb to represent the compute and memory cost
+of a forward/backward (Fwd/Bwd) pass with a batch size of b = 1. Furthermore, Copt denotes the
+compute cost of model updates (Opt) which consists of gradient reduction, computing the update ∆θ,
+and applying it to θ.
+
+Table 2 summarizes the compute and memory cost of SGD, KFAC, sL-BFGS and SLIM-QN.
+Compared to SGD, during the forward and backward passes, SLIM-QN needs to additionally
+compute **_θ_**, **_g_**, for which the complexity increases linearly with model size (α2 **_θ_** ). The main
+extra compute SLIM-QN introduces is the Hessian-vector product, in which we need to iterate over M _M_ _∥_ _∥_
+_{si}i[M]=1_ [and][ {][y][i][}]i[M]=1[, as shown in Algorithm 1. The complexity increases linearly with the number of]
+stored history vectors and model size (2M ∥θ∥). While, compared to O(bCfb) complexity in forward
+and backward pass, such operations add relatively marginal cost.
+
+As a comparison, KFAC though only approximates diagonal blocks of the Fisher matrix, it still adds
+significant additional computations through 1) multiple backward passes to update factors (γbCfb
+with γ ≥ 1), 2) matrix inversion ([P](d[3]i [+ (][ ∥][θ]di[i][∥] [)][3][)][) for every L iterations, and 3) Matrix-vector]
+
+products (2 (di + _[∥][θ]di[i][∥]_ [)][ ∥][θ][i][∥][). If the Fisher matrix is updated more frequently (that is for small][ L][),]
+
+then the amortized cost for matrix inversion is even more striking. On the other hand, sL-BFGS also
+resorts to computation-intensive operations including full-batch gradients and a separate large batch
+
+[P]
+
+to estimate the Hessian, which respectively adds amortized costs of O(bCfb) and _L[1]_ _[b][H]_ _[C][fb][.]_
+
+As for memory usage, compared to SGD, SLIM-QN mainly needs O(2M ∥θ∥) to store history
+vectors {si}i[M]=1 [and][ {][y][i][}]i[M]=1[.][ sL-BFGS needs the same storage for][ s][i][,][ y][i][, and amortized cost of]
+_O(_ _L[1]_ _[b][H]_ _[M][fb][)][ for additional backward passes.][ While KFAC needs][ O][(2][ P][(][d]i[2]_ [+ (][ ∥][θ]di[i][∥] [)][2][))][ to store]
+
+sub-matrices and their inverse, where the actual memory footprint hinges on model architectures. In
+practice, M is set to be 10 ∼ 20, which ensures that memory usage is manageable in SLIM-QN.
+
+5 EMPIRICAL ANALYSES
+
+We conduct various experiments on computer vision (CV) problems, where SGD has been widely used.
+Methods like Adam (Kingma & Ba, 2014) and AdaGrad (Duchi et al., 2011) greatly under-perform
+SGD (Defazio & Jelassi, 2021). Two metrics are used to evaluate the performance: iteration-wise
+convergence and wall-clock convergence. The iteration-wise metric shows the pure convergence
+promises of the optimizer; while the wall-clock convergence further captures the impacts of computation complexity on the run-time. Furthermore, we also conduct an ablation study that investigates
+how the components in SLIM-QN (momentum and damping) affect the optimization process.
+
+The current implementation in PyTorch (Paszke et al., 2019) supports various DNN models in a
+multi-GPU system. During training, after gradients are synchronized across GPUs, we keep updating
+the momentum, Mθt and Mgt on each GPU. As a result, each GPU stores a copy of the Hessian
+
+
+-----
+
+Figure 2: Training loss (left) and validation accuracy (right) of SLIM-QN, KFAC and SGD on
+ImageNet using ResNet-50 model. The model trained with SLIM-QN benefits from faster early-stage
+convergence and achieve comparable generalization performance as SGD. We plot the mean and
+standard error over 3 runs with different random seeds.
+
+inverse and locally performs gradient conditioning without communicating across GPUs. We test
+models: ResNet18, ResNet50, Vision Transformer on datasets: CIFAR-10(Krizhevsky et al., 2009)
+and ImageNet(Deng et al., 2009). We also run SGD and KFAC as two baselines for comparison.
+
+5.1 EXPERIMENTS ON IMAGENET CLASSIFICATION
+
+ImageNet classification has been the gold standard for evaluating performance of different optimization algorithms for CV models. Compared to CIFAR-10, ImageNet consists of much more training
+and test images (∼1.2M training and ∼50K test images), categorized into 1000 classes. Therefore,
+convergence on ImageNet can better reveal the optimizer’s promises in practical problems.
+
+During data pre-processing, we resize images to 256 × 256, and randomly crop to 224 × 224, and
+then randomly flip each image. Each image is normalized using pre-computed mean and variance.
+
+5.1.1 RESNET-50
+
+Figure 2 shows iteration-wise (Top) and wall-clock (Bottom) convergence on ResNet-50 using SGD,
+KFAC and SLIM-QN. Detailed hyper-parameter settings are provided in the appendix. SLIM-QN
+enjoys very fast per-iteration convergence, and reaches near optimal accuracy 1.5× faster than SGD,
+and even 2× faster in the early-stages. Furthermore, it also generalizes well on the validation set, and
+finally reaches comparable validation accuracy to SGD.
+
+The benefit of SLIM-QN is even more striking in terms of wall-clock time. Due to light compute
+costs, it is 1.75 × /1.36× faster in the early and late stages compared to SGD. Whereas in KFAC, the
+wall-clock performance is significantly neutralized by its additional compute costs.
+
+5.1.2 VISION TRANSFORMER
+
+As a step towards understanding the efficacy of second-order optimizers on contemporary Transformerbased CV models, we perform experiments on a small (10M parameters) Vision Transformer (ViT)
+(Dosovitskiy et al., 2020b) using SLIM-QN on ImageNet. Details on hyperparameters, model
+architecture and experiments on further datasets are deferred to the Appendix.
+
+As shown in Fig. 3, SLIM-QN benefits from faster early-stage convergence compared to the SGD,
+which is consistent with our findings for ResNet. Furthermore, we observe that SLIM-QN finds a
+solution with good generalization achieving a final validation accuracy slightly higher than SGD.
+
+5.2 ABLATION STUDY: THE EFFECTS OF MOMENTUM AND DAMPING
+
+In this section, we give more insight into the effects of momentum and damping used in SLIM-QN.
+To this end, we ablate two critical components in SLIM-QN: momentum and damping in the Hessian
+
+
+-----
+
+Figure 3: Training loss (left) and validation accuracy (right) of SLIM-QN and SGD on ImageNet
+using a Vision Transformer model. The model trained with SLIM-QN benefits from faster early-stage
+convergence and achieve better generalization performance compared to SGD. We plot the mean and
+standard error over 3 runs with different random seeds.
+
+Figure 4: Ablation analysis for SLIM-QN on ResNet-18/CIFAR-10 (batch size: 256).
+
+approximation, and then use the ablated version to train ResNet-18 on CIFAR-10. We focus on
+CIFAR-10 since we observed more convergence instability on this dataset compared to others.
+
+Figure 4 shows convergence using the ablated SLIM-QN with only momentum (black), with only
+damping (purple), and with no momentum or damping (red). Due to stochastic noise, the ablated
+version of SLIM-QN without momentum or damping diverges easily in the early stages. With
+momentum (black), the whole optimization is significantly stabilized. However, it still fails to
+converge when there is an abrupt change in the loss landscape (for example, when learning rate
+decays). With damping (purple), the Hessian approximation is effectively restrained, especially when
+such sudden changes in the loss landscape happen. It is interesting to observe that while damping
+prevents divergence, the whole training is still largely affected by stochastic noise. Notable fluctuation
+in the loss and accuracy is commonly observed during training. As a comparison, the complete
+SLIM-QN (blue) effectively addresses these issues achieving much more stable convergence.
+
+6 CONCLUSION
+
+In this paper, we propose SLIM-QN, a quasi-Newton method that simultaneously mitigates computation and convergence instability barriers in second-order methods. SLIM-QN introduces momentum
+and damping into the Hessian update, which obviates the need for estimating the Hessian with high
+costs. Empirical analyses on CV models, such as ResNet-50 and Vision Transformer show that
+SLIM-QN achieves faster convergence in the early stages, and reaches comparable accuracy to SGD.
+
+
+-----
+
+REPRODUCIBILITY STATEMENT
+
+Implementation of SLIM-QN in a multi-GPU platform is described at the beginning of Sec 5. A
+copy of code is included in supplementary materials. Appendix B lists all hyperparameters for
+obtaining results on ImageNet using ResNet-50 and ViT models. Moreover, Appendix C presents
+more results on CIFAR-10 using ResNet-18 and ViT models. We also describe some tips of tuning
+hyperparameters in Appendix F.
+
+For theoretical results, proofs of all lemmas and theorems are provided in Appendix A.
+
+REFERENCES
+
+Jimmy Ba, Roger Grosse, and James Martens. Distributed second-order optimization using kroneckerfactored approximations. 2016.
+
+Daqing Chang, Shiliang Sun, and Changshui Zhang. An accelerated linearly convergent stochastic
+l-bfgs algorithm. IEEE transactions on neural networks and learning systems, 30(11):3338–3346,
+2019.
+
+Aaron Defazio and Samy Jelassi. Adaptivity without compromise: a momentumized, adaptive, dual
+averaged gradient method for stochastic optimization. arXiv preprint arXiv:2101.11075, 2021.
+
+Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. Imagenet: A large-scale
+hierarchical image database. In 2009 IEEE conference on computer vision and pattern recognition,
+pp. 248–255. Ieee, 2009.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep
+bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805, 2018.
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas
+Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An
+image is worth 16x16 words: Transformers for image recognition at scale. _arXiv preprint_
+_arXiv:2010.11929, 2020a._
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas
+Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An
+image is worth 16x16 words: Transformers for image recognition at scale. _arXiv preprint_
+_arXiv:2010.11929, 2020b._
+
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and
+stochastic optimization. Journal of machine learning research, 12(7), 2011.
+
+Roger Fletcher. Practical methods of optimization. John Wiley & Sons, 2013.
+
+Wenbo Gao and Donald Goldfarb. Block bfgs methods. SIAM Journal on Optimization, 28(2):
+1205–1231, 2018.
+
+Wenbo Gao and Donald Goldfarb. Quasi-newton methods: superlinear convergence without line
+searches for self-concordant functions. Optimization Methods and Software, 34(1):194–217, 2019.
+
+Donald Goldfarb, Yi Ren, and Achraf Bahamou. Practical quasi-newton methods for training deep
+neural networks. arXiv preprint arXiv:2006.08877, 2020.
+
+Robert Gower, Donald Goldfarb, and Peter Richtárik. Stochastic block bfgs: Squeezing more
+curvature out of data. In International Conference on Machine Learning, pp. 1869–1878. PMLR,
+2016.
+
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image
+recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition,
+pp. 770–778, 2016.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+_arXiv:1412.6980, 2014._
+
+
+-----
+
+Alex Krizhevsky, Geoffrey Hinton, et al. Learning multiple layers of features from tiny images. 2009.
+
+Dong C Liu and Jorge Nocedal. On the limited memory bfgs method for large scale optimization.
+_Mathematical programming, 45(1):503–528, 1989._
+
+Siyuan Ma, Raef Bassily, and Mikhail Belkin. The power of interpolation: Understanding the
+effectiveness of sgd in modern over-parametrized learning. In International Conference on
+_Machine Learning, pp. 3325–3334. PMLR, 2018._
+
+James Martens and Roger Grosse. Optimizing neural networks with kronecker-factored approximate
+curvature. In International conference on machine learning, pp. 2408–2417. PMLR, 2015.
+
+Aryan Mokhtari and Alejandro Ribeiro. Global convergence of online limited memory bfgs. The
+_Journal of Machine Learning Research, 16(1):3151–3181, 2015._
+
+Philipp Moritz, Robert Nishihara, and Michael Jordan. A linearly-convergent stochastic l-bfgs
+algorithm. In Artificial Intelligence and Statistics, pp. 249–258. PMLR, 2016.
+
+Yurii Nesterov. Introductory lectures on convex optimization: A basic course, volume 87. Springer
+Science & Business Media, 2003.
+
+Jorge Nocedal. Updating quasi-newton matrices with limited storage. Mathematics of computation,
+35(151):773–782, 1980.
+
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor
+Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style,
+high-performance deep learning library. arXiv preprint arXiv:1912.01703, 2019.
+
+J. Gregory Pauloski, Zhao Zhang, Lei Huang, Weijia Xu, and Ian T. Foster. Convolutional Neural
+Network Training with Distributed K-FAC. In Proceedings of the International Conference for
+_High Performance Computing, Networking, Storage and Analysis, SC ’20. IEEE Press, 2020. ISBN_
+9781728199986. doi: 10.5555/3433701.3433826.
+
+Boris Teodorovich Polyak. Gradient methods for minimizing functionals. Zhurnal vychislitel’noi
+_matematiki i matematicheskoi fiziki, 3(4):643–653, 1963._
+
+Alec Radford, Karthik Narasimhan, Tim Salimans, and Ilya Sutskever. Improving language understanding by generative pre-training. 2018.
+
+Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. Zero: Memory optimizations
+toward training trillion parameter models. In SC20: International Conference for High Performance
+_Computing, Networking, Storage and Analysis, pp. 1–16. IEEE, 2020._
+
+Anton Rodomanov and Yurii Nesterov. Greedy quasi-newton methods with explicit superlinear
+convergence. SIAM Journal on Optimization, 31(1):785–811, 2021.
+
+David Saad. Online algorithms and stochastic approximations. Online Learning, 5:6–3, 1998.
+
+Samuel L Smith, Benoit Dherin, David GT Barrett, and Soham De. On the origin of implicit
+regularization in stochastic gradient descent. arXiv preprint arXiv:2101.12176, 2021.
+
+Xiao Wang, Shiqian Ma, Donald Goldfarb, and Wei Liu. Stochastic quasi-newton methods for
+nonconvex stochastic optimization. SIAM Journal on Optimization, 27(2):927–956, 2017.
+
+
+-----
+
+A PROOFS OF LEMMAS AND THEOREMS
+
+This appendix are organized as follows:
+
+1. Section A.1-A.4 presents the proof of Lemma 1-4.
+
+2. Section A.5 presents the proof of Theorem 1.
+
+A.1 PROOF OF LEMMA 1
+
+_Proof. According to equation 3, s[T]i_ **_y[ˆ]i = s[T]i_** [(][τ] **_[y][i][ +(1]_** _[−]_ _[τ]_ [)][s][i][) = (][µτ][ +1] _[−]_ _[τ]_ [)][s]i[T] **_[s][i][, where][ µ][ =][ s]si[T][T]i_** **_[y][s][i][i][ .]_**
+
+
+For µ ≤ _σL, two cases need to be considered: 1) τ = τ0; 2) τ =_ [1]1[−]−[σ]µ[L] [.]
+
+If τ = τ0, then [1]1[−]−[σ]µ[L] _[≥]_ _[τ][0][, and][ µτ][ + 1][ −]_ _[τ][ ≥]_ _[σ][L][ If][ τ][ =][ 1]1[−]−[σ]µ[L]_ [, then][ µτ][ + 1][ −] _[τ][ =][ σ][L]_
+
+Therefore, when µ _σL, s[T]i_ **_y[ˆ]i_** _σLs[T]i_ **_[s][i]_**
+_≤_ _≥_
+
+
+For σL < µ < σH :
+
+We can write µτ +1 _τ = µτ0+1_ _τ0. It is easy to show that µτ0+1_ _τ0_ _σL_ (1 _σL)(1_ _τ0) > 0_
+and µτ0 + 1 − _τ0 −−σH ≤_ (1 − _σ−H_ )(1 − _τo) < 0._ _−_ _−_ _≥_ _−_ _−_
+
+Therefore, when σL < µ < σH, σLs[T]i **_[s][i][ <][ s]i[T]_** **_y[ˆ]i < σH_** **_s[T]i_** **_[s][i][.]_**
+
+
+For µ ≥ _σH_, similarly two cases might arise: 1) τ = τ0; 2) τ = _[σ]µ[H]−[−]1[1]_ [.]
+
+If τ = τ0, then _[σ]µ[H]_ _[−]1[1]_ _µ_ 1 [, then][ µτ][ + 1][ −] _[τ][ =][ σ][H]_ [.]
+
+_−_ _[≥]_ _[τ][0][, and][ µτ][ + 1][ −]_ _[τ][ ≤]_ _[σ][H]_ [. If][ τ][ =][ σ][H]−[−][1]
+
+Therefore, when µ _σH_, s[T]i **_y[ˆ]i_** _σH_ **_s[T]i_** **_[s][i]_**
+_≥_ _≤_
+
+
+In summary, σL **_si[T]i_** _[·]y[ˆ]i_
+_≤_ **_[s][T]_** _[·][s][i][ ≤]_ _[σ][H]_ [.]
+
+A.2 PROOF OF LEMMA 2
+
+
+_Proof. Lower bound:_ _H[ˆ]_ _[−][1]_ is initialized as _H[ˆ]0[−][1]_ = **_y[s]ˆ0[T]0[T]_** **_yy[ˆ][ˆ]00_**
+
+_H0(θ) ⪯_ _σH_ _I such that ˆy0 = H0 · s0._ _[·][ I][. According to Lemma 1, there exists]_
+
+Therefore, **_y[s]ˆ0[T]0[T]_** **_yy[ˆ][ˆ]00_** _[·][ I][ =]_ **_s[T]0s[H][T]0_** _[H][0][·][H][0][s][0][0][s][0][ ·][ I][ =]_ (s[T]0(s[H][T]0 0[1][H][/]0[2][1])[/]·[2]H)(0H·(0[1]H[/]0[2][1]s[/][2]0s) 0) _[·][ I][ ⪰]_ _σ1H_ _[I][.]_
+
+Then forρk ˆyks[T]k [) +] k ≥[ s]s[T]k1[k][s], assumingy[ˆ]k[T]k [.] _H[ˆ]k[−]−[1]1_ _[⪰]_ _σ1H_ _[I][ hold, based on equation 2,][ ˆ]Hk[−][1]_ = (I _−ρk ˆyks[T]k_ [)][T][ ˆ]Hk[−]−[1]1[(][I] _[−]_
+
+Because (I _ρk ˆyks[T]k_ [)][T][ ˆ]Hk[−][1]1[(][I][ −] _[ρ][k][ ˆ]yks[T]k_ [)][ is positive definite, we can bound][ ˆ]Hk[−][1] as: _H[ˆ]k[−][1]_
+_−_ _−_ _⪰_
+
+**_sks[T]k_** **_sks[T]k_** 1
+
+**_s[T]k_** **_y[ˆ]k_** [=] **_s[T]k_** _[·][H][k][·][s][k][ ⪰]_ _σH_ _[I]_
+
+Therefore, lower bound of _H[ˆ]k[−][1][,][ ξ][ =]_ _σ1H_ [.]
+
+
+**Upper bound: Since H0(θ) ⪰** _σL, we can get_ **_y[s]ˆ0[T]0[T]_** **_yy[ˆ][ˆ]00_** _[·][ I][ =]_ (s[T]0(s[H][T]0 0[1][H][/]0[2][1])[/]·[2]H)(0H·(0[1]H[/]0[2][1]s[/][2]0s) 0) _[·][ I][ ⪯]_ _σ1L_ [.]
+
+Similarly, for k ≥ 1, we assume _H[ˆ]k[−]−[1]1_ _[⪯]_ _[k][ 1]σL_ [hold.]
+
+For the first part in equation 2, let Q = (I _ρk ˆyks[T]k_ [)][. Then for][ ∀] **_[x][ ̸][=][ 0][,][ x][T][ ·][ Q][T][ ˆ]Hk[−][1]1[Q][ ·][ x][ =]_**
+(Qx)[T] _·_ _H[ˆ]k[−]−[1]1_ _[·][ (][Q][x][)][ ≤]_ _σkL_ **_[x][T][ ·][ (][Q][T][ Q][)][ ·][ x] −[.]_** _−_
+
+Let P = **_[s]s[k][T]k[ ˆ]yy[ˆ]k[T]ksy[ˆ][T]kksy[ˆ][T]kk_** **_ykss[T]k[T]k[+]y[ˆ][s]k[k][ ˆ]yk[T]_**, then Q[T] _Q = I + P_ .
+
+_[−]_ [ˆ]
+
+
+-----
+
+Becausek _P is rank-1 matrix with eigenvaluek_ _−1 and eigenvector ˆyk, we have x[T]_ _· Q[T][ ˆ]Hk[−]−[1]1[Q][ ·][ x][ ≤]_
+
+_σL_ **_[x][T][ ·][ (][I][ +][ P]_** [)][ ·][ x][ ≤] _σL_ **_[x][T][ x]_**
+
+
+_k_ **_sks[T]k_**
+For the second part in equation 2, we can directly get **_s[s][T][k][s]y[T]k_** [=] **_s[T]k_**
+
+_[·][H][k][·][s][k][ ⪯]_
+
+Therefore, x[T] _·_ _H[ˆ]k[−][1]_ _· x ≤_ _σkL_ **_[x][T][ x][ +]_** _σ1L_ **_[x][T][ x][ =][ k]σ[+1]L_** **_[x][T][ x]_**
+
+
+1
+
+_σL_ _[I][.]_
+
+
+In SLIM-QN, k is at most M, which is the length of history vector, therefore Ξ = (M + 1) _σ[1]L_ [.]
+
+
+_σ1H_ _[I][ ⪯]_ _H[ˆ]k[−][1]_ _⪯_ (M + 1) _σ[1]L_ _[I]_
+
+
+In summary,
+
+
+A.3 PROOF OF LEMMA 3
+
+_Proof. Given AS 2 hold, we have_
+
+_ℓi(θ1)_ _ℓi(θ2)_ Λ **_θ1_** **_θ2_** .
+_∥∇_ _−∇_ _∥≤_ _∥_ _−_ _∥_
+
+For L, we have
+
+
+(θ1) (θ2) = [1]
+_∇L_ _−∇L_ _N_
+
+(θ1) (θ2) = [1]
+_∥∇L_ _−∇L_ _∥_ _N_
+
+TI
+_≤_ _N[1]_
+
+_≤_ _N[1]_
+
+
+_ℓi(θ1)_ _ℓi(θ2)_
+_∇_ _−∇_
+_i=1_
+
+X
+
+_N_
+
+_ℓi(θ1)_ _ℓi(θ2)_
+_∇_ _−∇_
+_i=1_
+
+X
+
+_N_
+
+_ℓi(θ1)_ _ℓi(θ2)_
+_∥∇_ _−∇_ _∥_
+_i=1_
+
+X
+
+_N_
+
+Λ **_θ1_** **_θ2_**
+_i=1_ _∥_ _−_ _∥_
+
+X
+
+
+Then,
+
+
+= Λ **_θ1_** **_θ2_**
+_∥_ _−_ _∥_
+
+“TI" indicates triangle inequality. Therefore, L is at least Λ-smooth.
+
+A.4 PROOF OF LEMMA 4
+
+
+_Proof. ESt_ [∥∇L(θt; St)∥[2]] = ESt [ 1b _[∇]_ [P]i[b]=1 _[ℓ][i][(][θ][t][)][,][ 1]b_ _[∇]_ [P]i[b]=1 _[ℓ][i][(][θ][t][)]_
+D
+
+Expand summation and regroup,
+
+
+_ESt_ [∥∇L(θt; St)∥[2]] = ESt [ _b[1][2]_ _bi=1_ _[∥∇][ℓ][i][(][θ][t][)][∥][2][ +][ 1]b[2]_
+
+P
+
+Take expectation on each sample,
+
+
+_b_ _b_
+_i=1_ _j=1,≠_ _i_ _[⟨∇][ℓ][i][(][θ][t][)][,][ ∇][ℓ][j][(][θ][t][)][⟩][]]_
+P P
+
+
+_ESt_ [∥∇L(θt; St)∥[2]] = _b1[2]_ _bi=1_ _[E][x]i_ [[][∥∇][ℓ][i][(][θ][t][)][∥][2][]+][ 1]b[2] _bi=1_ _bj=1,≠_ _i_ _[E][x]i[,][x]j_ [[][⟨∇][ℓ][i][(][θ][t][)][,][ ∇][ℓ][j][(][θ][t][)][⟩][]]
+
+P P P
+
+Because xi and xj are independent, the second part can be simplified as,
+
+_ESt_ [∥∇L(θt; St)∥[2]] = _b1[2]_ _bi=1_ _[E][x][i]_ [[][∥∇][ℓ][i][(][θ][t][)][∥][2][] +][ 1]b[2] _bi=1_ _bj=1,≠_ _i_ _[∥∇L][(][θ][t][)][∥][2]_
+
+P P P
+
+With further simplification, we get
+
+
+1 _b_
+
+_b[2]_ _i=1_ _[E][x]i_ [[][∥∇][ℓ][i][(][θ][t][)][∥][2][] +][ b][−]b [1]
+
+_[∥∇L][(][θ][t][)][∥][2]_
+
+P
+
+
+_ESt_ [∥∇L(θt; St)∥[2]] =
+
+
+-----
+
+Given AS 2 and Lemma 3, we have
+
+_ℓi(θt)_ 2Λ _ℓi(θt) and_ (θt) 2Λ (θt)
+_∥∇_ _∥[2]_ _≤_ _·_ _∥∇L_ _∥[2]_ _≤_ _· L_
+
+Therefore,
+
+
+_ESt_ [∥∇L(θt; St)∥[2]] ≤ _b[1][2]_
+
+
+_b_
+
+_Exi_ [2Λℓi(θt)] + _[b][ −]b_ [1]
+_i=1_
+
+X
+
+
+2Λ (θt) (5)
+_L_
+
+
+= [1] 2Λ (θt) (6)
+
+_b_ [2Λ][L][(][θ][t][) +][ b][ −]b [1] _L_
+
+= 2Λ (θt) (7)
+_· L_
+
+
+A.5 PROOF OF THEOREM 1
+
+_Proof. Given AS 2 and Lemma 3, L(θt) can be bounded by L(θt) ≤L(θt−1) + ∇L(θt−1)[T]_ (θt −
+**_θt−1) +_** [Λ]2
+
+_[∥][θ][t][ −]_ **_[θ][t][−][1][∥][2][ for][ ∀][θ][t][−][1][,][ θ][t]_**
+
+In SLIM-QN, θt = θt−1 − _ηt−1H[ˆ]k[−][1][∇L][(][θ][t][−][1][;][ S][t][−][1][)][. Therefore, we can upper bound][ L][(][θ][t][)][ as:]_
+
+_L(θt) ≤L(θt−1)Λ −_ _ηt−1 · ∇L(θt−1)[T][ ˆ]Hk[−][1]2[∇L][(][θ][t][−][1][;][ S][t][−][1][)]_
+
++ n[2]t−1 2 _H[ˆ]k[−][1]_
+
+_[∇L][(][θ][t][−][1][;][ S][t][−][1][)]_
+
+_≤L(θt−1) −_ _ηt−1 · ∇L(θt−1)[T][ ˆ]Hk[−][1][∇L][(][θ][t][−][1][;][ S][t][−][1][)]_
+
+ΛΞ[2]
++ n[2]t−1 2 _∥∇L(θt−1; St−1)∥[2]_
+
+
+Since _H[ˆ]k[−][1]_ is independent with St−1, we take expectation w.r.t St−1 and St,
+
+_ESt_ [L(θt)|St−1] ≤L(θt−1) − _ηt−1 · ∇L(θt−1)[T][ ˆ]Hk[−][1][E][S][t][−][1]_ [[][∇L][(][θ][t][−][1][;][ S][t][−][1][)]]
+
+ΛΞ[2]
++ n[2]t−1 2 _[E][S][t][−][1]_ [[][∥∇L][(][θ][t][−][1][;][ S][t][−][1][)][∥][2][]]
+
+=L(θt−1) − _ηt−1 · ∇L(θt−1)[T][ ˆ]Hk[−][1][∇L][(][θ][t][−][1][)]_
+
+ΛΞ[2]
++ n[2]t−1 2 _[E][S][t][−][1]_ [[][∥∇L][(][θ][t][−][1][;][ S][t][−][1][)][∥][2][]]
+
+
+According AS 1, we have
+
+According to Lemma 4, we have
+
+
+_L(θt−1) ≤_ _λ[1]_ _[∥∇L][(][θ][t][−][1][)][∥][2]_
+
+
+_ESt−1_ [∥∇L(θt−1; St−1)∥[2]] ≤ 2ΛL(θt−1)
+
+Therefore, E _t_ [ (θt) _t_ 1] (θt 1) _ηt_ 1λξ (θt 1) + ηt[2] 1[Λ][2][Ξ][2][L][(][θ][t][−][1][)][.]
+_S_ _L_ _|S_ _−_ _≤L_ _−_ _−_ _−_ _L_ _−_ _−_
+
+After simply regrouping, we can get
+
+_E_ _t_ [ (θt) _t_ 1] (1 _ηt_ 1λξ + ηt[2] 1[Λ][2][Ξ][2][)[][L][(][θ][t][−][1][]]
+_S_ _L_ _|S_ _−_ _≤_ _−_ _−_ _−_
+
+Apply total expectation rule w.r.t _t, we have_
+_S_
+
+_ESt_ [L(θt)] ≤ (1 − _ηt−1λξ + ηt[2]−1[Λ][2][Ξ][2][)][E][S]t−1_ [[][L][(][θ][t][−][1][)]]
+
+
+-----
+
+B SETTINGS FOR MODEL TRAINING ON IMAGENET
+
+B.1 RESNET-50
+
+We train ResNet-50 on ImageNet in a multi-GPU platform, which has 8 Nvidia Quadro RTX 5000
+GPUs. PyTorch (≥1.8) and the Distributed Data Parallel (DDP) communication package is used
+during training. Table 3 lists hyperparameters used in SGD, KFAC, and SLIM-QN. Initial learning
+rate is 0.1, decaying by a factor of 10 at 30, 60, 90th epoch. We use a learning warmup for in the first 2
+epochs. Batch size is 256. In SLIM-QN, we use a smaller weight decay (wd) as SLIM-QN considers
+weight decay when conditioning gradients. Therefore a smaller weight decay can achieve as strong
+regularization as SGD with wd = 0.0005. For the Hessian update frequency (L), in SLIM-QN we
+update the Hessian for every 30 mini-batch iterations; while for KFAC, considering the compute cost,
+we update the Hessian for every 50 iterations. Lower and upper threshold for restraining eigenvalues
+in the Hessian (σL, σH ) is set to be (0.01, 1) in all experiments. Initial damping (1 _τ0) is 0.05,_
+_−_
+then adapted during training according to equation 4. We run 5 random seeds for each optimizer.
+
+Table 3: Hyperparameters for SGD, KFAC, SLIM-QN on ResNet-50/ImageNet
+
+|Optimizer|lr|momentum|wd|damping|β /β 1 2|L|M|
+|---|---|---|---|---|---|---|---|
+
+
+
+_β1/β2: momentum for the Hessian; L: frequency for updating the Hessian; M_ : length of history vector (s, y)
+
+|SGD KFAC SLIM-QN|0.1 0.1 0.1|0.9 0.9 0.9|0.0005 0.0002 0.0002|- 0.001 0.05|- - 0.9/0.9|- 50 30|- - 10|
+|---|---|---|---|---|---|---|---|
+
+
+
+B.2 VIT
+
+We use a small Vision Transformer model with 6 layers, 8 attention heads, a patch size of 16, and
+both hidden and MLP dimension of 512 for a total of about 10M parameters. We train for 90 epochs
+with linear learning rate warmup in the first 5 epochs, and decay the learning rate at 80 epochs for
+SLIM-QN. For SGD, we train for 100 epochs, decaying the learning rate at 30, 60, 90 epochs. A
+batch size of 1024 is used for both algorithms. We perform 3 runs with different random seeds. Table
+4 shows the selected hyperparameters.
+
+Table 4: Hyperparameters for SGD and SLIM-QN on ViT/ImageNet
+
+|Optimizer|lr|momentum|wd|damping|β /β 1 2|L|M|
+|---|---|---|---|---|---|---|---|
+
+
+
+_β1/β2: momentum for the Hessian; L: frequency for updating the Hessian; M_ : length of history vector (s, y)
+
+|SGD SLIM-QN|0.1 0.1|0.9 0.9|0.0001 0.0|- 0.01|- 0.99/0.99|- 100|- 20|
+|---|---|---|---|---|---|---|---|
+
+
+
+C EXPERIMENTS ON CIFAR-10
+
+C.1 RESNET-18
+
+Hyperparameter is shown as in Table 5. Initial learning rate is 0.1, decaying by a factor of 10 at 150th
+epoch. For both SGD and SLIM-QN we used a linear learning rate warmup for 5 epochs. Batch
+size is 256 for both SGD and SLIM-QN. Figure 5 shows convergence on ResNet-18 using SGD and
+SLIM-QN. On small dataset CIFAR-10, SGD and SLIM-QN both deliver fast convergence at early
+stages, while SLIM-QN is slightly better. Moreover, SLIM-QN achieves more faster convergence
+and high validation accuracy at later stages.
+
+C.2 VIT
+
+We use the same ViT model as in the ImageNet experiment, but with a patch size of 16. Table 6
+shows the hyperparameters used in the CIFAR-10 experiments. For both SGD and SLIM-QN we
+used a linear learning rate warmup for 5 epochs. We perform 3 runs with different random seeds.
+
+
+-----
+
+Table 5: Hyperparameters for SGD, SLIM-QN on ResNet-18/CIFAR-10
+
+|Optimizer|lr|momentum|wd|damping|β /β 1 2|L|M|
+|---|---|---|---|---|---|---|---|
+
+
+
+_β1/β2: momentum for the Hessian; L: frequency for updating the Hessian; M_ : length of history vector (s, y)
+
+|SGD SLIM-QN|0.1 0.1|0.9 0.9|0.0005 0.0005|- 0.05|- 0.9/0.9|- 100|- 10|
+|---|---|---|---|---|---|---|---|
+
+
+
+Figure 5: Convergence on ResNet-18/CIFAR-10 using SGD and SLIM-QN.
+
+We use a batch size of 1024 and train for 90 epochs and decay the learning rate by a factor of 10 at
+100 epochs for SLIM-QN. We train for 150 epochs and decay the learning rate at 140 epochs for SGD.
+Experimental results on CIFAR-10 using Vision Transformer are depicted in Fig. 6. We observe that
+SLIM-QN converges to a solution with better generalization than SGD and in overall less iterations.
+On small datasets such as CIFAR-10 we do not observe significant early-stage speedup on ViT, which
+is consistent with ResNet-18/CIFAR-10 experiments. Moreover, ViT is better suited for large-scale
+vision datasets due to the weaker implicit bias resulting from the non-convolutional architecture.
+
+Figure 6: Convergence on ViT/CIFAR-10 using SGD and SLIM-QN.
+
+Table 6: Hyperparameters for SGD, SLIM-QN on ViT/CIFAR-10 with batch size 1024
+
+|Optimizer|lr|momentum|wd|damping|β /β 1 2|L|M|
+|---|---|---|---|---|---|---|---|
+
+
+
+_β1/β2: momentum for the Hessian; L: frequency for updating the Hessian; M_ : length of history vector (s, y)
+
+|SGD SLIM-QN|0.1 0.025|0.9 0.9|0.0001 0.0001|- 0.01|- 0.99/0.99|- 100|- 10|
+|---|---|---|---|---|---|---|---|
+
+
+
+D STOCHASTIC TRAINING USING THE CLASSICAL L-BFGS
+
+In this section, we demonstrate that the classical L-BFGS suffers convergence instability in stochastic
+training, even using large batch sizes. We train ResNet-18 on CIFAR-10, and vary batch size from 64
+to 2048. Learning rate decays from 0.1 to 0.001 in 100 epochs. Weight decay is 0.0005. The Hessian
+approximation is updated using the L-BFGS formula for every 50 iterations, with at most 10 history
+vectors.
+
+Fig. 7 shows training accuracy w.r.t iterations (log scale). We can observe that L-BFGS fails to
+converge under various batch sizes. Training using large batches though is a little more stable than
+small ones at the beginning, still diverges due to stochastic noises or sudden changes in loss landscape.
+Therefore, large batch only is not a sufficient solution to address convergence instability in the
+classical L-BFGS.
+
+
+-----
+
+Figure 7: Convergence on ResNet-19/CIFAR-10 using the classical BFGS.
+
+Backward Backward
+Loss
+
+pass pass
+
+SLIM-QN SLIM-QN
+
+1st layer 2nd/3rd layer
+
+Update Update
+
+model model
+
+
+Figure 8: Block-wise SLIM-QN for distributed systems. Models are divided into blocks, which are
+then optimized by SLIM-QN in multiple nodes.
+
+E SLIM-QN IN DISTRIBUTED SYSTEMS
+
+As mentioned in Sec. 4.2, SLIM-QN requires O(2M ∥θ∥) storage to store required history statistics
+**_sk and yk. When training models using data parallelism, each node further needs to store the whole_**
+copy of these history vectors. Such high memory footprints make it difficult to be used to train very
+large models such as BERT and GPT (Devlin et al., 2018; Radford et al., 2018). To address such a
+limitation, we propose a block-wise SLIM-QN which is much more memory-efficient in distributed
+systems.
+
+As shown in Fig. 8, for a neural network, we divide model parameters into multiple blocks, where
+each block might consist of one or more layers. During training, these blocks are optimized in parallel
+using independent SLIM-QN optimizers. In a distributed system, each compute node can conduct
+optimization on one or more blocks, depending on its capabilities. Furthermore, the model can be
+divided in a way such that each node can store the required statistics sk and yk for at least one block.
+Combining with ZeRO data parallelism design (Rajbhandari et al., 2020), block-wise SLIM-QN are
+capable of training very large models as long as there are enough compute nodes.
+
+
+-----
+
+Figure 9: Convergence on ResNet-18/CIFAR-10 using SGD, SLIM-QN, and block-wise SLIM-QN
+
+E.1 CONVERGENCE GUARANTEES
+
+In this section, we prove that block-wise SLIM-QN also converges in a linear rate given assumption
+in Sec. 4.1. Furthermore, the convergence property is guaranteed in any arbitrary way of dividing
+models.
+
+**Theorem 2. Assume AS 1-3 hold at each iteration t of block-wise SLIM-QN with mini-batch input**
+_St, and the k-th Hessian update for block i(i = 1, · · ·, p),_ _B[ˆ]k[i]_ _[(][ ˆ]B = H[ˆ]_ _[−][1]) during the optimization_
+_is bounded by ξiI_ _Bk[i]_
+_⪯_ [ˆ] _[⪯]_ [Ξ][i][I][, then the expectation of][ L][(][θ][t][)][ satisfies]
+
+_ESt_ [L(θt)] ≤ _αt−1ESt−1_ [L(θt−1)],
+
+_where αt_ 1 = 1 _ηt_ 1λξ + ηt[2] 1[Λ][2][Ξ][2][,][ ξ][ = min][ ξ][i][,][ Ξ = max Ξ][i][.]
+_−_ _−_ _−_ _−_
+
+_Proof. The bound of_ _B[ˆ]k[i]_ [for block][ i][ is guaranteed by SLIM-QN. Then according to the proof in]
+Theorem 1, if we can prove _H[ˆ]k[−][1]_ = diag( B[ˆ]1, _B[ˆ]2,_ _,_ _B[ˆ]p) is also bounded, then we can show_
+_· · ·_
+block-wise SLIM-QN converges in a linear rate.
+
+For any arbitrary vector x = 0, x[T] _H[ˆ]k[−][1]_ **_x can be written as_**
+_̸_ _·_ _·_
+
+(x[1][T] _·_ _B[ˆ]1, · · ·, x[p][T]_ _·_ _B[ˆ]p) · (x[1][T]_ _, · · ·, x[p][T]_ )[T] = _i=1_ **_[x][i][T][ ·][ ˆ]Bi · x[i],_**
+
+where x[i] is a sub-vector corresponding to block i. [P][p]
+
+
+Let ξ = min ξi and Ξ = max Ξi, therefore, ξ **_x[T]_** _H[ˆ]k[−][1]_ **_x_** Ξ.
+_≤_ _·_ _·_ _≤_
+
+Following the same proof as in Theorem 1, block-wise SLIM-QN also converges in a linear rate.
+
+E.2 EMPIRICAL ANALYSES
+
+We evaluate block-wise SLIM-QN on ResNet-18/CIFAR-10 using 5 random seeds. Layers in a
+ResBlock are grouped into one block. Initial learning rate is 0.1, decaying by a factor of 10 at 150th
+epoch. We used a linear learning rate warmup for 5 epochs. Batch size is 256 for all runs. Table 7 list
+detailed hyper parameters settings. As shown in Fig. 9, block-wise SLIM-QN achieves even slightly
+faster convergence performance as SLIM-QN. Both SLIM-QN and the block-wise version achieve
+higher validation accuracy compared to SGD.
+
+Due to the limited time, we have not completed experiments on large models/datasets. We will add
+that in the future.
+
+Table 7: Hyperparameters for SGD, SLIM-QN and block-wise SLIM-QN on ResNet-18/CIFAR-10
+
+|Optimizer|lr|momentum|wd|damping|β /β 1 2|L|M|
+|---|---|---|---|---|---|---|---|
+
+
+
+_β1/β2: momentum for the Hessian; L: frequency for updating the Hessian; M_ : length of history vector (s, y)
+
+|block-wise SLIM-QN|0.1|0.9|0.0003|0.01|0.9/0.9|50|10|
+|---|---|---|---|---|---|---|---|
+
+
+-----
+
+F HYPERPARAMETER TUNING
+
+SLIM-QN involves additional hyperparameters besides common parameters in SGD: learning rate,
+momentum, and weight decay. While tuning the hyperparameters is not a huge burden since some
+parameters are fixed in all the experiments, such as lower and upper threshold for restraining
+eigenvalues in the Hessian: σL, σH, and length of history vectors: M . For the rest of parameters:
+damping (τ0), momentum (β1, β2) and update frequency (L) for the Hessian, it is easy to conduct
+a grid search on a small models and datasets, explore how these parameters affect optimization,
+then apply them to large-scale model training. For example, after training on CIFAR-10, we found
+that small L improves generalization performance, and large damping stabilizes optimization but
+causes optimizer to behave like SGD. With these notions, it is easy to tune these parameters, and then
+achieve optimal convergence performance and accuracy.
+
+
+-----
+

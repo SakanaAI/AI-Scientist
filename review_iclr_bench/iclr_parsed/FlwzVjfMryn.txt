@@ -1,0 +1,2100 @@
+# MULTI-OBJECTIVE OPTIMIZATION BY LEARNING SPACE PARTITIONS
+
+**Yiyang Zhao** **Linnan Wang** **Kevin Yang** **Tianjun Zhang**
+Worcester Polytechnic Institute Brown University UC Berkeley UC Berkeley
+
+**Tian Guo** **Yuandong Tian**
+Worcester Polytechnic Institute Facebook AI Research
+
+ABSTRACT
+
+In contrast to single-objective optimization (SOO), multi-objective optimization
+(MOO) requires an optimizer to find the Pareto frontier, a subset of feasible solutions that are not dominated by other feasible solutions. In this paper, we propose
+LaMOO, a novel multi-objective optimizer that learns a model from observed
+samples to partition the search space and then focus on promising regions that
+are likely to contain a subset of the Pareto frontier. The partitioning is based on
+the dominance number, which measures “how close” a data point is to the Pareto
+frontier among existing samples. To account for possible partition errors due
+to limited samples and model mismatch, we leverage Monte Carlo Tree Search
+(MCTS) to exploit promising regions while exploring suboptimal regions that may
+turn out to contain good solutions later. Theoretically, we prove the efficacy of
+learning space partitioning via LaMOO under certain assumptions. Empirically, on
+the HyperVolume (HV) benchmark, a popular MOO metric, LaMOO substantially
+outperforms strong baselines on multiple real-world MOO tasks, by up to 225% in
+sample efficiency for neural architecture search on Nasbench201, and up to 10%
+for molecular design.
+
+1 INTRODUCTION
+
+Multi-objective optimization (MOO) has been extensively used in many practical scenarios involving
+trade-offs between multiple objectives. For example, in automobile design (Chang, 2015), we
+must maximize the performance of the engine while simultaneously minimizing emissions and fuel
+consumption. In finance (Gunantara, 2018), one prefers a portfolio that maximizes the expected
+return while minimizing risk.
+
+Mathematically, in MOO we optimize M objectives f (x) = [f1(x), f2(x), . . ., fM (x)] ∈ R[M] :
+
+min _f1(x), f2(x), ..., fM_ (x) (1)
+
+s.t. **x ∈** Ω
+
+While we could set arbitrary weights for each objective to turn it into a single-objective optimization
+(SOO) problem, modern MOO methods aim to find the problem’s entire Pareto frontier: the set of
+solutions that are not dominated by any other feasible solutions[1] (see Fig. 1 for illustration). The
+Pareto frontier yields a global picture of optimal solution structures rather than focusing on one
+specific weighted combination of objectives.
+
+As a result, MOO is fundamentally different from SOO. Instead of focusing on a single optimal
+solution, a strong MOO optimizer should cover the search space broadly to explore the Pareto frontier.
+Popular quality indicators in MOO, such as hypervolume (HV), capture this aspect by computing
+the volume of the currently estimated frontier. Specifically, given a reference point R ∈ R[M], as
+shown in Fig. 1(a), the hypervolume of a finite approximate Pareto set P is the M-dimensional
+
+1Here we define dominance y ≺f x as fi(x) ≤ _fi(y) for all functions fi, and exists at least one i s.t._
+_fi(x) < fi(y), 1 ≤_ _i ≤_ _M_ . That is, solution x is always better than solution y, regardless of how the M
+objectives are weighted.
+
+
+-----
+
+|𝑯𝑽|Col2|Col3|Col4|
+|---|---|---|---|
+||o(𝒙)=1 o(𝒙)=|||
+|||2 o(𝒙)=2||
+|||||
+
+|Col1|𝛀𝒈𝒐𝒐𝒅|Col3|
+|---|---|---|
+||𝛀||
+||𝒃𝒂𝒅||
+
+
+𝑦7 𝓟(o(𝒙)=0)
+
+o(𝒙) 𝑦8
+
+𝑯𝑽
+
+𝒇𝟐 o(𝒙)=1o(𝒙)=2 𝑦9 𝑦:
+
+o(𝒙)=2 𝑦;
+
+o(𝒙)
+
+𝓡
+
+𝒇𝟏
+
+Objective Space
+
+
+Search Space
+
+|MOO methods|Sampling Method|Objectives>3|
+|---|---|---|
+|MOEA/D (Zhang & Li, 2007) CMA-ES (Igel et al., 2007a) NSGA-II (Deb et al., 2002a) NAGA-III (Deb & Jain, 2014)|Evolution|×|
+|||×|
+|||×|
+|||√|
+|PAREGO (Knowles, 2006) qEHVI (Daulton et al., 2020)|Bayesian optimization|√|
+|||√|
+|LaMOO (our approach)|Space partition|√|
+
+
+(a) (b)
+
+Figure 1: Left: A basic setting in Multi-objective Optimization (MOO), optimizing M = 2 objectives in
+Eqn. 1. (a) depicts the objective space (f1, f2) and (b) shows the search space x ∈ Ω. In (a), P denotes the
+Pareto frontier, R is the reference point, the hypervolume HV is the space of the shaded area, and o(x) are the
+dominance numbers. In (b), once a few samples are collected within Ω, LaMOO learns to partition the search
+space Ω into sub-regions (i.e. Ωgood and Ωbad) according to the dominance number in objective space, and then
+focuses future sampling on the good regions that are close to the Pareto Frontier. This procedure can be repeated
+to further partition Ωgood and Ωbad. Right: A table shows the properties of MOO methods used in experiments.
+
+Lebesgue measure λM of the space dominated by P and bounded from below by R. That is,
+_HV (P, R) = λM_ (∪i[|P|]=1[[][R, y][i][])][, where][ [][R, y][i][]][ denotes the hyper-rectangle bounded by reference]
+point R and yi. Consequently, the optimizer must consider the diversity of solutions in addition to
+their optimality.
+
+While several previous works have proposed approaches to capture this diversity-optimality trade-off
+(Deb et al., 2002a; Knowles, 2006; Igel et al., 2007; Deb & Jain, 2014; Daulton et al., 2020), in
+this paper, we take a fundamentally different route by learning promising candidate regions from
+past explored samples. Ideally, to find the Pareto frontier in as few function evaluations as possible,
+we want to sample heavily in the Pareto optimal set ΩP, defined as the region of input vectors that
+corresponds to the Pareto frontier.
+
+One way to focus samples on ΩP is to gradually narrow the full search space down to the subregion
+containing ΩP via partitioning. For example, in the case of quadratic objective functions, ΩP can
+be separated from the non-optimal set Ω\ΩP via simple linear classifiers (see Observation 1,2).
+Motivated by these observations, we thus design LaMOO, a novel MOO meta-optimizer that progressively partitions regions into sub-regions and then focuses on sub-regions that are likely to contain
+Pareto-optimal regions, where existing solvers can help. Therefore, LaMOO is a meta-algorithm.
+
+Unlike cutting-plane methods (Loganathan & Sherali, 1987; Hinder, 2018; Vieira & Lisboa, 2019)
+that leverage the (sub)-gradient of convex objectives as the cutting plane, with global optimality
+guarantees, LaMOO is data-driven: it leverages previous samples to build classifiers to learn the
+partition and focuses future samples in these promising regions. No analytical formula of objectives
+or their sub-gradients is needed. LaMOO is a multi-objective extension of recent works (Wang et al.,
+2020; Yang et al., 2021) that also learn space partitions but for a single black-box objective.
+
+Empirically, LaMOO outperforms existing approaches on many benchmarks, including standard
+benchmarks in multi-objective black-box optimization, and real-world multi-objective problems like
+neural architecture search (NAS) (Cai et al., 2019; 2020) and molecule design. For example, as a
+meta-algorithm, LaMOO combined with CMA-ES as an inner routine requires only 62.5%, 8%, and
+29% as many samples to reach the same hypervolume as the original CMA-ES (Igel et al., 2007a) in
+BraninCurrin (Belakaria et al., 2019), VehicleSafety (Liao et al., 2008) and Nasbench201 (Dong &
+Yang, 2020), respectively. On average, compared to qEHVI, LaMOO uses 50% samples to achieve
+the same performance in these problems. In addition, LaMOO with qEHVI (Daulton et al., 2020) and
+CMA-ES require 71% and 31% fewer samples on average, compared to naive qEHVI and CMA-ES,
+to achieve the same performance in molecule discovery.
+
+2 RELATED WORK
+
+**Bayesian Optimization (BO) (Zitzler et al., 2003; Knowles, 2006; Ponweiser et al., 2008; Couckuyt**
+et al., 2014; Paria et al., 2018; Yang et al., 2019; Daulton et al., 2020) is a popular family of methods
+to optimize black-box single and multi-objectives. Using observed samples, BO learns a surrogate
+model _f[ˆ](x), search for new promising candidates based on acquisition function built on_ _f[ˆ](x), and_
+query the quality of these candidates with the ground truth black-box objective(s). In multi-objective
+Bayesian optimization (MOBO), most approaches leverage Expected Hypervolume Improvement
+
+
+-----
+
+(EHVI) as their acquisition function (Zitzler et al., 2003; Couckuyt et al., 2014; Yang et al., 2019),
+since finding the Pareto frontier is equivalent to maximizing the hypervolume given a finite search
+space (Fleischer, 2003). There are methods (Knowles, 2006; Ponweiser et al., 2008; Paria et al., 2018)
+that use different acquisition functions like expected improvement (Jones et al., 1998) and Thompson
+sampling (Thompson, 1933). EVHI is computationally expensive: its cost increases exponentially
+with the number of objectives. To address this problem, qEHVI (Daulton et al., 2020) accelerates
+optimization by computing EHVI in parallel, and has become the state-of-the-art MOBO algorithm.
+In this paper, we leverage qEHVI as a candidate inner solver in our proposed LaMOO algorithm.
+
+**Evolutionary algorithms (EAs) (Deb et al., 2002a; Igel et al., 2007a; Zhang & Li, 2007; Beume**
+et al., 2007; Fang et al., 2018) are also popular methods for MOO tasks. One category of MOOEAs (Srinivas & Deb, 1994; Deb et al., 2002a; Deb & Jain, 2014) leverages Pareto dominance to
+simultaneously optimize all objectives. A second category (e.g., (Zhang & Li, 2007)) decomposes a
+multi-objective optimization problem into a number of single-objective sub-problems, converting
+a difficult MOO into several SOOs. Another category is quality indicator-based methods, such as
+(Beume et al., 2007) and (Igel et al., 2007a). They scalarize the current Pareto frontier using quality
+indicators (e.g., HV) and transfer a MOO to a SOO. New samples are generated by crossover and
+mutation operations from existing ones. However the drawbacks of non-quality indicator-based
+methods (i.e., the first two categories) can be not overlooked. Specifically, for MOO with many
+objectives, NSGA-II (Deb et al., 2002a) easily gets stuck in a dominance resistant solution (Pang et al.,
+2020) which is far from the true Pareto frontier. while MOEA/D perform better in MOO but how to
+specify the weight vector for problems with unknown Pareto front is the main challenge (Deb & Jain,
+2014). In addition, A* search based algorithms are also considered to be extended to MOO (Stewart
+& White, 1991; Tung Tung & Lin Chew, 1992; De la Cruz et al., 2005).
+
+**Quality Indicators. Besides hypervolume, there are several other quality indicators (Van Veldhuizen**
+& Lamont, 1998; Zitzler et al., 2000; Bosman & Thierens, 2003) for evaluating sample quality, which
+can be used to scalarize the MOO to SOO. The performance of a quality indicator can be evaluated
+by three metrics (Deng et al., 2007; Li et al., 2014), including convergence (closeness to the Pareto
+frontier), uniformity (the extent of the samples satisfy the uniform distribution), and spread (the
+extent of the obtained approximate Pareto frontier). Sec. B specifically illustrates the merits of each
+quality indicator. HyperVolume is the only metric we explored that can simultaneously satisfy the
+evaluation of convergence, uniformity, and spread without the knowledge of the true Pareto frontier
+while it may suffer from expensive calculation in many-objective problems. Therefore, throughout
+this work, we use HV to evaluate the optimization performance of different algorithms.
+
+3 LEARNING SPACE PARTITIONS: A THEORETICAL UNDERSTANDING
+
+Searching in high-dimensional space to find the optimal solution to a function is in general a
+challenging problem, especially when the function’s properties are unknown to the search algorithm.
+The difficulty is mainly due to the curse of dimensionality: to adequately cover a d-dimensional
+space, in general, an exponential number of samples are needed.
+
+For this, many works use a “coarse-to-fine” approach: partition the search space and then focusing
+on promising regions. Traditionally, manually defined criteria are used, e.g., axis-aligned partitions (Munos, 2011b), Voronoi diagrams (Kim et al., 2020), etc. Recently, (Wang et al., 2019;
+2020; Yang et al., 2021) learn space partitions based on the data collected thus far, and show strong
+performance in NeurIPS black box optimization challenges (Sazanovich et al.; Kim et al.).
+
+On the other hand, there is little quantitative understanding of space partition. In this paper, we
+first give a formal theoretical analysis on why learning plays an important role in space-partition
+approaches for SOO. Leveraging our understanding of how space partitioning works, we propose
+LaMOO which empirically outperforms existing SoTA methods on multiple MOO benchmarks.
+
+3.1 PROBLEM SETTING
+Intuitively, learning space partitions will yield strong performance if the classifier can determine
+which regions are promising given few data points. We formalize this intuition below and show why
+it is better than fixed and manually defined criteria for space partitioning.
+
+Consider the following sequential decision task. We have N samples in a discrete subset S0 and there
+exists one sample x[∗] that achieves a minimal value of a scalar function f . Note that f can be any
+property we want, e.g., in the Pareto optimal set. The goal is to construct a subset ST ⊆ _S0 after T_
+
+
+-----
+
+steps, so that (1)function r as the probability that we get x[∗] _∈_ _ST and (2) |ST | is as small as possible. More formally, we define the reward x[∗]_ by randomly sampling from the resulting subset ST :
+
+1
+_r :=_ (2)
+
+_ST_
+_|_ _|_ _[P]_ [(][x][∗] _[∈]_ _[S][T][ )]_
+
+It is clear that 0 ≤ _r ≤_ 1. r = 1 means that we already found the optimal sample x[∗].
+
+Here we use discrete case for simplicity and leave continuous case (i.e., partitioning a region Ω0
+instead of a discrete set S0) to future work. Note N could be large, so here we consider it infeasible
+to enumerate S0 to find x[∗]. However, sampling from S0, as well as comparing the quality of sampled
+solutions are allowed. An obvious baseline is to simply set ST := S0, then rb = N _[−][1]. Now the_
+question is: can we do better? Here we seek help from the following oracle:
+**Definition 1 ((α, η)-Oracle). Given a subset S that contains x[∗], after taking k samples from S, the**
+_oracle can find a good subset Sgood with |Sgood| ≤|S|/2 and_
+
+_k_
+_P (x[∗]_ _Sgood_ **x[∗]** _S)_ 1 exp (3)
+_∈_ _|_ _∈_ _≥_ _−_ _−_ _η_ _S_
+ _|_ _|[α]_ 
+
+**Lemma 1. The algorithm to uniformly draw k samples in S, pick the best and return is a (1, 1)-oracle.**
+
+See Appendix for proof. Note that a (1, 1)-oracle is very weak, and is of little use in obtaining
+higher reward r. We typically hope for an oracle with smaller α and η (i.e., both smaller than 1).
+Intuitively, such oracles are more sample-efficient: with few samples, they can narrow down the
+region containing the optimal solution x[∗] with high probability.
+
+Note that α < 1 corresponds to semi-parametric models. In these cases, the oracle has generalization
+_property: with substantially fewer samples than N (i.e., on the order of N_ _[α]), the oracle is able to put_
+the optimal solution x[∗] on the right side. In its extreme case when α = 0 (or parametric models),
+whether we classify the optimal solution x[∗] on the correct side only depends on the absolute number
+of samples collected in S, and is independent of its size. For example, if the function to be optimized
+is linear, then with d + 1 samples, we can completely characterize the property of all |S| samples.
+
+**Relation with cutting plane. Our setting can be regarded as a data-driven extension of cutting plane**
+methods (Loganathan & Sherali, 1987; Vieira & Lisboa, 2019; Hinder, 2018) in optimization, in which
+a cutting plane is found at the current solution to reduce the search space. For example, if f is convex
+and its gradient ∇f (x) is available, then we can set Sgood := {x : ∇f (x0)[⊤](x − **x0) ≤** 0, x ∈ _S0},_
+since for any x _S0_ _Sgood, convexity gives f_ (x) _f_ (x0) + _f_ (x0)[⊤](x **x0) > f** (x0) and
+thus x is not better than current ∈ _\_ **x0. However, the cutting plane method relies on certain function ≥** _∇_ _−_
+properties like convexity. In contrast, learning space partition can leverage knowledge about the
+function forms, combined with observed samples so far, to better partition the space.
+
+3.2 REWARDS UNDER OPTIMAL ACTION SEQUENCE
+We now consider applying the (α, η)-oracle iteratively for T steps, by drawing kt samples from
+_St−1 and setting St := Sgood,t−1. We assume a total sample budget K, so_ _t=1_ _[k][t][ =][ K][. Note that]_
+_T ≤_ log2 N since we halve the set size with each iteration. Now the question is twofold. (1) How
+can we determine the action sequences _kt_ in order to maximize the total reward r? (2) Following
+_{_ _}_ [P][T]
+the optimal action sequences _kt[∗]_ [=][ N][ −][1][? The answer is yes.]
+_{_ _[}][, can][ r][∗]_ [be better than the baseline][ r][b]
+
+**Theorem 1. The algorithm yields a reward r[∗]** _lower bounded by the following:_
+
+_r[∗]_ _rb exp_ log 2 _T_ (4)
+_≥_ _−_ _[ηN][ α][φ]K[(][α, T]_ [)]
+  
+
+_where rb := N_ _[−][1]_ _and φ(α, T_ ) := (1 − 2[−][αT] )/(1 − 2[−][α]).
+
+**Remarks. Following Theorem 1, a key condition to make r[∗]** _> rb is to ensure log 2 >_ _[ηN][ α][φ]K[(][α,T][ )]_ .
+
+This holds if when _[ηN][ α][φ]K[(][α,T][ )]_ 0. Note that since T log2 N, the final reward r[∗] is upper
+
+_→_ _≤_
+bounded by 1 (rather than goes to +∞). We consider some common practical scenarios below.
+
+_Non-parametric models (α = 1). In this case, φ(α, T_ ) ≤ 2 and the condition becomes [1]2 [log 2][ >]
+
+_ηN/K. This happens when the total sample budget K = Θ(N_ ), i.e., on the same order of N, which
+means that the partitioning algorithm obtains little advantage over exhaustive search.
+
+
+-----
+
+_Semi-parametric models (α < 1). In this case, φ(α, T_ ) ≤ 1/(1 − 2[−][α]) and the condition becomes
+(1 − 2[−][α]) log 2 > ηN _[α]/K. This happens when the total sample budget K = Θ(N_ _[α]). In this case,_
+we could use many fewer samples than exhaustive search to achieve better reward, thanks to the
+generalization property of the oracle.
+
+_Parametric models (α = 0). Now φ(α, T_ ) = T and the condition becomes log 2 > _[ηT]K_ [. Since]
+
+_T ≤_ log2 N, the total sample budget can be set to be K = Θ(log N ). Intuitively, the algorithm
+performs iterative halving (or binary search) to narrow down the search toward promising regions.
+
+3.3 EXTENSION TO MULTI-OBJECTIVE OPTIMIZATION
+Given our understanding of space partitioning, we now extend this idea to MOO. Intuitively, we want
+“good” regions to be always picked by the space partition. For SOO, it is possible since the optimal
+solution is a single point. How about MOO?
+
+Unlike SOO, in MOO we aim for a continuous region, the Pareto optimal set ΩP := {x : ∄x[′] ≠ **x :**
+**f** (x[′]) ≺ **f** (x)}. A key variable is the regularity of ΩP : if it is highly non-regular and not captured by
+a simple partition boundary (ideally a parametric boundary), then learning a space partition would be
+difficult. Interestingly, the shape of ΩP can be characterized for quadratic objectives:
+
+**Observation 1. If all fj are isotropic, fj(x) =** **x** **cj** 2[, then][ Ω][P] [= ConvexHull(][c][1][, . . .,][ c][q][)][.]
+_∥_ _−_ _∥[2]_
+
+**Observation 2. If M = 2 and fj(x) = (x −** **cj)[⊤]Hj(x −** **cj) where Hj are positive definite**
+**xsymmetric matrices, then there exists ∈** ΩP, w1[⊤][(][x][ −] **[c][1][)][ ≥]** [0][ and][ w]2[⊤][(][x] w[ −]1[c] :=[2][)][ ≥] H2[0]([.]c2 − **c1) and w2 := H1(c1 −** **c2), so that for any**
+
+In both cases, ΩP can be separated from non-Pareto regions Ω\ΩP via a linear hyperplane. Empirically, ΩP only occupies a small region of the entire search space (Sec. 4), and quickly focusing
+samples on the promising regions is critical for high sample efficiency.
+
+In the general case, characterizing ΩP is analytically hard and requires domain knowledge about
+the objectives (Li et al., 2014). However, for MOO algorithms in practice, knowing that ΩP can be
+separated from Ω\ΩP via simple decision planes is already useful: we could learn such decision
+planes given previous data that are already collected, and sample further in promising regions.
+
+4 LAMOO: LATENT ACTION MULTI-OBJECTIVE OPTIMIZATION
+
+In Sec. 3, for convenience, we only analyze a greedy approach, which makes decisions on space
+partitions and never revises them afterwards. While this greedy approach indeed works (as shown in
+Sec. 5.3), an early incorrect partition could easily rule out regions that turn out to be good but weren’t
+identified with few samples. In practice, we want to keep the decision softer: while exploiting the
+promising region, we also explore regions that are currently believed to be sub-optimal given limited
+samples. It is possible that these regions turn out to contain good solutions when more samples are
+available, and the oracle can then make a different partition.
+
+To balance the trade-off between exploration and exploitation to cope with the generalization error of
+the learned classifier, we leverage Monte Carlo Tree Search (MCTS) (Kocsis & Szepesvári, 2006) and
+propose our algorithm LaMOO. As shown in Alg. 1, LaMOO has four steps: (1) learn to partition the
+search space given previous observed data points Dt, which are collected {xi, f(xi)} from iterations
+0 to t. (2) With this information, we partition the region into promising and non-promising regions,
+and learn a classifier h(·) to separate them. (3) We select the region to sample from, based on the
+UCB value of each node. (4) We sample selected regions to obtain future data points Dt+1.
+
+**Learning Space Partitions. We construct the partition oracle using the dominance number. Let Dt**
+be the collected samples up to iterationΩj we want to partition. For each sample t and x ∈ DDt,jt,j :=, its dominance number Dt ∩ Ωj be the samples within the region ot,j(x) at iteration t is
+defined as the number of samples in Ωj that dominate x (here I[·] is the indicator function):
+
+
+I[x ≺f xi, x ̸= xi] (5)
+**xiX∈Dt,j**
+
+
+_ot,j(x) :=_
+
+
+While naive computation requires O( _Dt,j_ ) operations, we use Maxima Set (Kung et al., 1975)
+_|_ _|[2]_
+which runs in O(|Dt,j| log |Dt,j|). For x ∈ ΩP, o(x) = 0.
+
+
+-----
+
+**Algorithm 1 LaMOO Pseudocode.**
+
+1: Inputs: Initial D0 from uniform sampling, sample budget T .
+2: for t = 0, . . ., T do
+3: Set L ←{Ωroot} (collections of regions to be split).
+
+4: **while L ̸= ∅** **do**
+
+5:6: ΩCompute dominance numberj ← pop_first_element(L o), Dt,j oft,j D ←t,j using Eqn. 5 and train SVM modelDt ∩ Ωj, nt,j ←|Dt,j|. _h(·)._
+
+7: **If (Dt,j, ot,j) is splittable by SVM, then L ←L ∪** Partition(Ωj, h(·)).
+
+8: **end while**
+
+9: **for k = root, k is not leaf node do**
+
+10: _Dt,k_ _Dt_ Ωk, vt,k HyperVolume(Dt,k), nt,k _Dt,k_ .
+
+11: _k ← ←arg_ _c_ _∩children(max_ _k)_ [UCB] ← _[t,c][, where][ UCB][t,c][ :=][ v][t,c][ + 2] ←|[C][p]_ 2 log(| _nt,cnt,k)_
+_∈_
+
+12: **end for** q
+
+14:13: end forDt+1 ← _Dt ∪_ _Dnew, where Dnew is drawn from Ωk based on qEHVI or CMA-ES._
+
+|𝑯𝑽|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||o(𝒙)=1 o(𝒙)||||
+|||=2 o(𝒙)=2|||
+||||||
+||||||
+
+
+𝓟(o(𝒙)=0) **A**
+
+𝛀𝐃 **A** **A**
+
+𝑯𝑽 𝑈𝐶𝐵( =5 **B** **C**
+
+𝒇𝟐 o(𝒙)=1o(𝒙)=2 𝛀𝐄 **B** **C** **B** 𝑈𝐶𝐵C )=3 **D** **E** Only samplesfrom 𝛀𝐄 based on
+
+𝓡 o(𝒙)=2 Search Space 𝛀𝐂 **D** **E** 𝑈𝐶𝐵D *=7 𝑈𝐶𝐵E +=8 𝛀𝐃 sample methods
+
+𝒇𝟏 Learn to partition h(·) Expand the tree **Select w.r.t ucb** 𝛀𝐄
+
+Low o(𝒙) High o(𝒙) 𝛀𝐂
+
+(a) Split (b) Select (c) Sample
+
+
+Figure 2: (a) The leaf nodes D and E that correspond to the non-splittable space ΩD and ΩE. (b). The node
+selection procedure based on the UCB value. (c). The new samples generation from the selected space ΩE for
+bayesian optimization.
+
+For each Dt,j, we then get good (small o(x)) and bad (large o(x)) samples by ranking them according
+to o(x). The smallest 50% are labeled to be positive while others are negative. Based on the labeled
+samples, a classifier (e.g., Support Vector Machine (SVM)) is trained to learn a decision boundary as
+the latent action. We choose SVM since the classifier needs to be decent in regions with few samples,
+and has the flexibility of being parametric or non-parametric.
+
+**Exploration Using Upper Confidence Bounds(UCB). As shown in Fig. 2, LaMOO selects the final**
+leaf node by always choosing the child node with larger UCB value. The UCB value for a node j is
+defined as UCBj := vj + 2Cp 2 log nparent(j)/nj, where nj is the number of samples in node j,
+
+_Cp is a tunable hyperparameter which controls the degree of exploration, and vj is the hypervolume_
+of the samples in node j. The selected leaf corresponds the partitioned regionp Ωk as shown in Alg. 1.
+
+**Sampling in Search Region. We use existing algorithms as a sampling strategy in a leaf node, e.g.,**
+qEHVI (Daulton et al., 2020)) and CMA-ES (Igel et al., 2007a). Therefore, LaMOO can be regarded
+as a meta-algorithm, applicable to any existing SOO/MOO solver to boost its performance.
+
+LaMOO with qEHVI. As a multi-objective solver, qEHVI finds data points to maximize a parallel
+version of Expected Hypervolume Improvement (EHVI) via Bayesian Optimization (BO). To incorporate qEHVI into LaMOO’s sampling step, we confine qEHVI’s search space using the tree-structured
+partition to better search MOO solutions.
+
+LaMOO with CMA-ES. CMA-ES is an evolutionary algorithm (EA) originally designed for singleobjective optimization. As a leaf sampler, CMA-ES is used to pick a sample that maximizes the
+dominance number o(x) within the leaf. Since o(x) changes over iterations, at iteration t, we first
+update ot′ (x) of all previous samples at t[′] _< t to ot(x), then use CMA-ES. Similar to the qEHVI_
+case, we constrain our search to be within the leaf region.
+
+
+-----
+
+Once a set of new samples Dnew is obtained (as well as its multiple function values f (Dnew)), we
+update all partitions along its path and the entire procedure is repeated.
+
+5 EXPERIMENTS
+
+We evaluate the performance of LaMOO in a diverse set of scenarios. This includes synthetic
+functions, and several real-world MOO problems like neural architecture search, automobile safety
+design, and molecule discovery. In such real problems, often a bunch of criteria needs to be optimized
+at the same time. For example, for molecule (drug) discovery, one wants the designed drug to be
+effective towards the target disease, able to be easily synthesized, and be non-toxic to human body.
+
+5.1 SMALL-SCALE PROBLEMS
+**Synthetic Functions.** Branin-Currin (Belakaria et al., 2019) is a function with 2-dimensional input
+and 2 objectives. DTLZ2 (Deb et al., 2002b) is a classical scalable multi-objective problem and is
+popularly used as a benchmark in the MOO community. We evaluate LaMOO as well as baselines in
+DTLZ2 with 18 dimensions and 2 objectives, and 12 dimensions and 10 objectives, respectively.
+
+**Structural Optimization in Automobile Safety Design (vehicle safety)** is a real-world problem
+with 5-dimensional input and 3 objectives, including (1) the mass of the vehicle, (2) the collision
+acceleration in a full-frontal crash, and (3) the toe-board intrusion (Liao et al., 2008).
+
+**Nasbench201** is a public benchmark to evaluate NAS algorithms (Dong & Yang, 2020).
+There are 15625 architectures in Nasbench201, with groundtruth #FLOPs and accuracy in CIFAR10 (Krizhevsky, 2009). Our goal is to minimize #FLOPs and maximize accuracy in this search
+space. We normalized #FLOPs to range [−1, 0] and accuracy to [0, 1].
+
+Figure 3: Left: Branin-Currin with 2 dimensions and 2 objectives. Middle: VehicleSafety with 5 dimensions
+and 3 objectives. Right: Nasbench201 with 6 dimensions and 2 objectives. We ran each algorithm 7 times
+(shaded area is ± std of the mean). Top: Bayesian Optimization w/o LaMOO. Bottom: evolutionary algorithms
+w/o LaMOO. Note the two algorithm families show very different sample efficiency in MOO tasks.
+
+We compare LaMOO with 4 classical evolutionary algorithms (CMA-ES (Igel et al., 2007a),
+MOEA/D (Zhang & Li, 2007), NSGA-II (Deb et al., 2002a), and NSGA-III (Deb & Jain, 2014)) and
+2 state-of-the-art BO methods (qEHVI (Daulton et al., 2020) and qParego (Knowles, 2006)).
+
+**Evaluation Criterion. we first obtain the maximal hypervolume (either by ground truth or from**
+the estimation of massive sampling), then run each algorithm and compute the log hypervolume
+difference (Daulton et al., 2020):
+_HVlog_diff := log(HVmax −_ _HVcur)_ (6)
+where HVcur is the hypervolume of current samples obtained by the algorithm with given budget.
+
+**Result. As shown in Fig. 3, LaMOO with qEHVI outperforms all our BO baselines and LaMOO**
+with CMA-ES outperforms all our EA baselines, in terms of HVlog_diff .
+
+
+-----
+
+0.500.751.00 qEHVI+LaMOOqEHVIqPAREGO 0.410.400.39 CMAES+LaMOOCMAESNSGA-III 0.350.300.25 qEHVI+LaMOOqEHVIqPAREGO 0.400.380.36
+
+1.25 0.38 NSGA-IIMOEAD 0.20 0.34 CMAES+LaMOO
+
+Log Hypervolume Diff 1.50 Log Hypervolume Diff0.370.36 Log Hypervolume Diff0.150.10 Log Hypervolume Diff0.320.30 CMAESNSGA-IIINSGA-IIMOEAD
+
+1.75
+
+50 100 150 200 50 100 150 200 50 100 150 200 50 100 150 200
+
+Samples Samples Samples Samples
+
+
+Figure 4: DTLZ2 with many objectives, We ran each algorithm 7 times (shaded area is ± std of the mean).
+From left to right: BO with 2 objectives; EA with 2 objectives; BO with 10 objectives; EA with 10 objectives.
+
+Evolutionary algorithms rely on mutation and crossover of previous samples to generate new ones,
+and may be trapped into local optima. Thanks to MCTS, LaMOO also considers exploration and
+greatly improves upon vanilla CMA-ES over three different tasks with 1000/200 samples in smallscale /many objective problems. In addition, by plugging in BO, LaMOO+qEHVI achieves 225%
+sample efficiency compared to other BO algorithms on Nasbench201. This result indicates that for
+high-dimensional problems (6 in Nasbench201), space partitioning leads to faster optimization. We
+further analyze very high-dimensional problems on Sec. 5.2 and visualize Pareto frontier in Fig. 12.
+
+**Optimization of Many Objectives. While NSGA-II and NSGA-III perform well in the two-objective**
+problems, all evolutionary-based baselines get stuck in the ten-objective problems. In contrast,
+LaMOO performs reasonably well. From Fig. 4, qEHVI+LaMOO shows strong performance in ten
+objectives. When combined with a CMA-ES, LaMOO helps it escape the initial region to focus on a
+smaller promising region by space partitioning.
+
+
+5.2 MULTI-OBJECTIVE MOLECULE DISCOVERY
+
+0.30 2.2
+
+0.6
+
+0.25
+
+2.0
+
+0.20 0.4
+
+1.8
+
+0.15
+
+Hypervolume0.10 qEHVI+LaMOO qPAREGO Hypervolume1.6 qEHVI+LaMOO qPAREGO Hypervolume0.2 qEHVI+LaMOO qPAREGO
+
+qEHVI NSGA-II qEHVI NSGA-II qEHVI NSGA-II
+
+0.05 CMAES+LaMOO NSGA-III CMAES+LaMOO NSGA-III CMAES+LaMOO NSGA-III
+
+CMAES MOEAD 1.4 CMAES MOEAD CMAES MOEAD
+
+0.0
+
+200 400 600 800 1000 200 400 600 800 1000 200 400 600 800 1000
+
+Samples Samples Samples
+
+
+Figure 5: Molecule Discovery: Left: Molecule discovery with two objectives (GSK3β+JNK3). Middle:
+Molecule discovery with three objectives (QED+SA+SARS). Right: Molecule Discovery with four objectives
+(GSK3β+JNK3+QED+SA). We ran each algorithm 15 times (shaded area is ± std of the mean).
+
+
+Next, we tackle the practical problem of multi-objective molecular generation, which is a highdimensional problem (search space is 32-dimensional). Molecular generation models are a critical
+component of pharmaceutical drug discovery, wherein a cheap-to-run in silico model proposes
+promising molecules which can then be synthesized and tested in a lab (Vamathevan et al., 2019).
+However, one commonly requires the generated molecule to satisfy multiple constraints: for example,
+new drugs should generally be non-toxic and ideally easy-to-synthesize, in addition to their primary
+purpose. Therefore, in this work, we consider several multi-objective molecular generation setups
+from prior work on molecular generation (Yu et al., 2019; Jin et al., 2020b; Yang et al., 2021): (1)
+activity against biological targets GSK3β and JNK3, (2) the same targets together with QED (a
+standard measure of “drug-likeness”) and SA (a standard measure of synthetic accessibility), and
+(3) activity against SARS together with QED and SA. In each task, we propose samples from a pretrained 32-dimensional latent space from (Jin et al., 2020a), which are then decoded into molecular
+strings and fed into the property evaluators from prior work.
+
+Fig. 5 shows that LaMOO+qEHVI outperforms all baselines by up to 10% on various combinations
+of objectives. While EA struggles to optimize these high-dimensional problems due to the limitations
+mentioned in Sec. 2, LaMOO helps them (e.g., CMA-ES) to perform much better.
+
+5.3 ABLATION STUDIES
+**Visualization of LaMOO. To understand how LaMOO works, we visualize its optimization pro-**
+cedure for Branin-Currin. First, the Pareto optimal set ΩP is estimated from 10[6] random samples
+
+
+-----
+
+|B|Col2|
+|---|---|
+||E|
+
+|C|Col2|
+|---|---|
+||G|
+
+
+A
+
+B C
+
+D E F G **node B** **node D**
+
+H I
+
+J K
+
+**node H** **node J**
+
+(a) The structure of Monte- (b) The samples and SVM split (c) The selected region in (d) The samples in the objective
+Carlo Tree at the final search region of leaf node of the tree in selected path of the tree. space at different search iterations.
+iteration. the search space.
+
+
+Figure 6: Visualization of selected region at different search iterations and nodes. (a) The Monte-Carlo tree
+with colored leaves. Selected path is marked in red. (b) Visualization of the regions(ΩJ _, ΩK_ _, ΩI_ _, ΩE, ΩF, ΩG)_
+that are consistent with leaves in (a) in the search space. (c) Visualization of selected path at final iteration. (d)
+Visualization of samples during search; bottom left is the Pareto frontier estimated from one million samples.
+
+(marked as black stars), as shown in both search and objective space (Fig. 6(b) and bottom left of
+Fig. 6(c)). Over several iterations, LaMOO progressively prunes away unpromising regions so that the
+remaining regions approach ΩP (Fig 6(c)). Fig 6(a) shows the final tree structure. The color of each
+leaf node corresponds to a region in the search space (Fig 6(b)). The selected region is recursively
+bounded by SVM classifiers corresponding to nodes on the selected path (red arrow in Fig 6(a)). The
+new samples are only generated from the most promising region ΩJ, improving sample efficiency.
+
+2.0 2.0 cp = 0cp = 10% max_hv 2.0 kernel = polykernel = linear
+
+cp = 50% max_hv kernel = rbf
+
+1.5 1.8 cp = 100% max_hv 1.5
+
+1.0
+
+1.6 1.0
+
+Log Hypervolume Diff0.5 sample = bayesiansample = cma-es Log Hypervolume Diff1.4 Log Hypervolume Diff0.5
+
+sample = random
+
+0.0
+
+20 40 60 80 100 100 200 300 20 40 60 80 100
+
+Samples Samples Samples
+
+
+Figure 7: Ablation studies on hyperparameters and sampling methods in LaMOO. Left: Sampling without
+Bayesian/CMA-ES. Middle: Sampling with different Cp. Right: Partitioning with different svm kernels
+
+**Ablation of Design Choices. We show how different hyperparameters and sampling methods play a**
+role in the performance. We perform the study in VehicleSafety below.
+
+_Sampling methods. LaMOO can be integrated with different sample methods, including Bayesian_
+Optimization (e.g., qEHVI) and evolutionary algorithms (e.g., CMA-ES). Fig. 7(left) shows that
+compared to random sampling, qEHVI improves a lot while CMA-ES only improves slightly. This is
+consistent with our previous finding that for MOO, BO is much more efficient than EA.
+
+_The exploration factor Cp controls the balance of exploration and exploitation. A larger Cp guides_
+LaMOO to visit the sub-optimal regions more often. Based on the results in Fig. 7(middle), greedy
+search (Cp = 0) leads to worse performance compared to a proper Cp value (i.e. 10% of maximum
+hypervolume), which justifies our usage of MCTS. On the other hand, over-exploration can also yield
+even worse results than greedy search. Therefore, a "rule of thumb" is to set the Cp to be roughly
+10% of the maximum hypervolume HVmax. When HVmax is unknown, Cp can be set empirically.
+
+_SVM kernels. As shown in Fig. 7(right), we find that the RBF kernel performs the best, in agreement_
+with (Wang et al., 2020). Thanks to the non-linearity of the polynomial and RBF kernels, their region
+partitions perform better compared to a linear one.
+
+
+6 CONCLUSION
+
+We propose a search space partition optimizer called LaMOO as a meta-algorithm that extends prior
+single-objective works (Wang et al., 2020; Yang et al., 2021) to multi-objective optimization. We
+demonstrated both theoretically and via experiments on multiple MOO tasks that LaMOO significantly
+improves the search performance compared to strong baselines like qEHVI and CMA-ES.
+
+
+-----
+
+7 ACKNOWLEDGEMENT
+
+This work was supported in part by NSF Grants #1815619 and #2105564, a VMWare grant, and
+computational resources supported by the Academic & Research Computing group at Worcester
+Polytechnic Institute.
+
+REFERENCES
+
+Sanghamitra Bandyopadhyay, Sankar K Pal, and B Aruna. Multiobjective gas, quantitative indices, and pattern classification. IEEE Transactions on Systems, Man, and Cybernetics, Part B
+_(Cybernetics), 34(5):2088–2099, 2004._
+
+Syrine Belakaria, Aryan Deshwal, and Janardhan Rao Doppa. Max-value entropy search for multiobjective bayesian optimization. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc,
+E. Fox, and R. Garnett (eds.), Advances in Neural Information Processing Systems, volume 32. Cur[ran Associates, Inc., 2019. URL https://proceedings.neurips.cc/paper/2019/](https://proceedings.neurips.cc/paper/2019/file/82edc5c9e21035674d481640448049f3-Paper.pdf)
+[file/82edc5c9e21035674d481640448049f3-Paper.pdf.](https://proceedings.neurips.cc/paper/2019/file/82edc5c9e21035674d481640448049f3-Paper.pdf)
+
+Nicola Beume and Günter Rudolph. Faster s-metric calculation by considering dominated hypervolume as klee’s measure problem, 2006.
+
+Nicola Beume, Boris Naujoks, and Michael Emmerich. Sms-emoa: Multiobjective selection based
+on dominated hypervolume. European Journal of Operational Research, 181(3):1653–1669,
+[2007. ISSN 0377-2217. doi: https://doi.org/10.1016/j.ejor.2006.08.008. URL https://www.](https://www.sciencedirect.com/science/article/pii/S0377221706005443)
+[sciencedirect.com/science/article/pii/S0377221706005443.](https://www.sciencedirect.com/science/article/pii/S0377221706005443)
+
+Nicola Beume, Carlos M. Fonseca, Manuel Lopez-Ibanez, LuÍs Paquete, and Jan Vahrenhold. On
+the complexity of computing the hypervolume indicator. IEEE Transactions on Evolutionary
+_Computation, 13(5):1075–1082, 2009. doi: 10.1109/TEVC.2009.2015575._
+
+Peter AN Bosman and Dirk Thierens. The balance between proximity and diversity in multiobjective
+evolutionary algorithms. IEEE transactions on evolutionary computation, 7(2):174–188, 2003.
+
+Han Cai, Ligeng Zhu, and Song Han. ProxylessNAS: Direct neural architecture search on target
+task and hardware. In International Conference on Learning Representations, 2019. URL
+[https://arxiv.org/pdf/1812.00332.pdf.](https://arxiv.org/pdf/1812.00332.pdf)
+
+Han Cai, Chuang Gan, Tianzhe Wang, Zhekai Zhang, and Song Han. Once for all: Train one
+network and specialize it for efficient deployment. In International Conference on Learning
+_[Representations, 2020. URL https://arxiv.org/pdf/1908.09791.pdf.](https://arxiv.org/pdf/1908.09791.pdf)_
+
+Kuang-Hua Chang. Chapter 5 - multiobjective optimization and advanced topics. In
+Kuang-Hua Chang (ed.), Design Theory and Methods Using CAD/CAE, pp. 325–406. Academic Press, Boston, 2015. ISBN 978-0-12-398512-5. doi: https://doi.org/10.1016/
+B978-0-12-398512-5.00005-0. [URL https://www.sciencedirect.com/science/](https://www.sciencedirect.com/science/article/pii/B9780123985125000050)
+[article/pii/B9780123985125000050.](https://www.sciencedirect.com/science/article/pii/B9780123985125000050)
+
+Ivo Couckuyt, Dirk Deschrijver, and Tom Dhaene. Fast calculation of multiobjective probability
+of improvement and expected improvement criteria for pareto optimization. Journal of Global
+_Optimization, 60(3):575–594, 2014._
+
+Samuel Daulton, Maximilian Balandat, and Eytan Bakshy. Differentiable expected hypervolume
+improvement for parallel multi-objective bayesian optimization. arXiv preprint arXiv:2006.05078,
+2020.
+
+J. L. P´erez De la Cruz, J. L. P´erez De la Cruz, L. Mandow, and L. Mandow. A new approach to
+multiobjective a* search. In Proceedings of the 19th International Joint Conference on Artificial
+_Intelligence, IJCAI’05, pp. 218–223, 2005._
+
+K. Deb, A. Pratap, S. Agarwal, and T. Meyarivan. A fast and elitist multiobjective genetic algorithm:
+Nsga-ii. IEEE Transactions on Evolutionary Computation, 6(2):182–197, 2002a. doi: 10.1109/
+4235.996017.
+
+
+-----
+
+K. Deb, L. Thiele, M. Laumanns, and E. Zitzler. Scalable multi-objective optimization test problems.
+In Proceedings of the 2002 Congress on Evolutionary Computation. CEC’02 (Cat. No.02TH8600),
+volume 1, pp. 825–830 vol.1, 2002b. doi: 10.1109/CEC.2002.1007032.
+
+Kalyanmoy Deb and Himanshu Jain. An evolutionary many-objective optimization algorithm
+using reference-point-based nondominated sorting approach, part i: Solving problems with box
+constraints. IEEE Transactions on Evolutionary Computation, 18(4):577–601, 2014. doi: 10.1109/
+TEVC.2013.2281535.
+
+Guoqiang Deng, Zhangcan Huang, and Min Tang. Research in the performance assessment of
+multi-objective optimization evolutionary algorithms. In 2007 International Conference on Com_munications, Circuits and Systems, pp. 915–918. IEEE, 2007._
+
+Xuanyi Dong and Yi Yang. Nas-bench-201: Extending the scope of reproducible neural architecture
+[search. In International Conference on Learning Representations (ICLR), 2020. URL https:](https://openreview.net/forum?id=HJxyZkBKDr)
+[//openreview.net/forum?id=HJxyZkBKDr.](https://openreview.net/forum?id=HJxyZkBKDr)
+
+Xi Fang, Wenwen Wang, Lang He, Zhangcan Huang, Yang Liu, and Liang Zhang. Research on
+improved nsga-ii algorithm and its application in emergency management. Research on Improved
+_NSGA-II Algorithm and Its Application in Emergency Management, 2018. doi: 10.1155/2018/_
+1306341.
+
+M. Fleischer. The measure of pareto optima applications to multi-objective metaheuristics. In
+Carlos M. Fonseca, Peter J. Fleming, Eckart Zitzler, Lothar Thiele, and Kalyanmoy Deb (eds.),
+_Evolutionary Multi-Criterion Optimization, pp. 519–533, Berlin, Heidelberg, 2003. Springer Berlin_
+Heidelberg.
+
+Nyoman Gunantara. A review of multi-objective optimization: Methods and its applications. Cogent
+_Engineering, 5(1):1502242, 2018. doi: 10.1080/23311916.2018.1502242._
+
+Tatsunori Hashimoto, Steve Yadlowsky, and John Duchi. Derivative free optimization via repeated
+classification. In International Conference on Artificial Intelligence and Statistics, pp. 2027–2036.
+PMLR, 2018a.
+
+Tatsunori Hashimoto, Steve Yadlowsky, and John Duchi. Derivative free optimization via repeated
+classification. In International Conference on Artificial Intelligence and Statistics, pp. 2027–2036.
+PMLR, 2018b.
+
+Oliver Hinder. Cutting plane methods can be extended into nonconvex optimization. In Conference
+_On Learning Theory, pp. 1451–1454. PMLR, 2018._
+
+Christian Igel, Nikolaus Hansen, and Stefan Roth. Covariance matrix adaptation for multi-objective
+optimization. Evolutionary Computation, 15(1):1–28, 2007. doi: 10.1162/evco.2007.15.1.1.
+
+Christian Igel, Thorsten Suttorp, and Nikolaus Hansen. Steady-state selection and efficient covariance
+matrix update in the multi-objective cma-es. In Shigeru Obayashi, Kalyanmoy Deb, Carlo Poloni,
+Tomoyuki Hiroyasu, and Tadahiko Murata (eds.), Evolutionary Multi-Criterion Optimization, pp.
+171–185, Berlin, Heidelberg, 2007a. Springer Berlin Heidelberg.
+
+Wengong Jin, Regina Barzilay, and Tommi Jaakkola. Hierarchical generation of molecular graphs
+using structural motifs. In International Conference on Machine Learning, pp. 4839–4848. PMLR,
+2020a.
+
+Wengong Jin, Regina Barzilay, and Tommi Jaakkola. Multi-objective molecule generation using
+interpretable substructures. In International Conference on Machine Learning, pp. 4849–4859.
+PMLR, 2020b.
+
+Donald R Jones, Matthias Schonlau, and William J Welch. Efficient global optimization of expensive
+black-box functions. Journal of Global optimization, 13(4):455–492, 1998.
+
+Kenji Kawaguchi, Leslie Pack Kaelbling, and Tomás Lozano-Pérez. Bayesian optimization with
+exponential convergence. 2015.
+
+
+-----
+
+Beomjoon Kim, Kyungjae Lee, Sungbin Lim, Leslie Kaelbling, and Tomás Lozano-Pérez. Monte
+carlo tree search in continuous spaces using voronoi optimistic optimization with regret bounds. In
+_Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, pp. 9916–9924, 2020._
+
+Taehyeon Kim, Jaeyeon Ahn, Nakyil Kim, and Seyoung Yun. Adaptive local bayesian optimiza[tion over multiple discrete variables. URL https://valohaichirpprod.blob.core.](https://valohaichirpprod.blob.core.windows.net/papers/kaist_osi.pdf)
+[windows.net/papers/kaist_osi.pdf.](https://valohaichirpprod.blob.core.windows.net/papers/kaist_osi.pdf)
+
+J. Knowles. Parego: a hybrid algorithm with on-line landscape approximation for expensive multiobjective optimization problems. IEEE Transactions on Evolutionary Computation, 10(1):50–66,
+2006. doi: 10.1109/TEVC.2005.851274.
+
+Levente Kocsis and Csaba Szepesvári. Bandit based monte-carlo planning. In Johannes Fürnkranz,
+Tobias Scheffer, and Myra Spiliopoulou (eds.), Machine Learning: ECML 2006, pp. 282–293,
+Berlin, Heidelberg, 2006. Springer Berlin Heidelberg. ISBN 978-3-540-46056-5.
+
+Alex Krizhevsky. Learning multiple layers of features from tiny images. 2009.
+
+Manoj Kumar, George E. Dahl, Vijay Vasudevan, and Mohammad Norouzi. Parallel architecture and
+hyperparameter search via successive halving and classification. CoRR, abs/1805.10255, 2018.
+[URL http://arxiv.org/abs/1805.10255.](http://arxiv.org/abs/1805.10255)
+
+H. T. Kung, F. Luccio, and F. P. Preparata. On finding the maxima of a set of vectors. J. ACM,
+[22(4):469–476, October 1975. ISSN 0004-5411. doi: 10.1145/321906.321910. URL https:](https://doi.org/10.1145/321906.321910)
+[//doi.org/10.1145/321906.321910.](https://doi.org/10.1145/321906.321910)
+
+Miqing Li, Shengxiang Yang, and Xiaohui Liu. Diversity comparison of pareto front approximations
+in many-objective optimization. IEEE Transactions on Cybernetics, 44(12):2568–2584, 2014.
+
+Xingtao Liao, Qing Li, Xujing Yang, Weigang Zhang, and Wei Li. Multiobjective optimization for
+crash safety design of vehicles using stepwise regression model. Structural and multidisciplinary
+_optimization, 35(6):561–569, 2008._
+
+GV Loganathan and Hanif D Sherali. A convergent interactive cutting-plane algorithm for multiobjective optimization. Operations Research, 35(3):365–377, 1987.
+
+Ilya Loshchilov, Marc Schoenauer, and Michèle Sebag. A mono surrogate for multiobjective
+optimization. In Proceedings of the 12th Annual Conference on Genetic and Evolutionary
+_Computation, GECCO ’10, pp. 471–478, New York, NY, USA, 2010. Association for Com-_
+[puting Machinery. ISBN 9781450300728. doi: 10.1145/1830483.1830571. URL https:](https://doi.org/10.1145/1830483.1830571)
+[//doi.org/10.1145/1830483.1830571.](https://doi.org/10.1145/1830483.1830571)
+
+Rémi Munos. Optimistic optimization of a deterministic function without the knowledge of
+its smoothness. In J. Shawe-Taylor, R. Zemel, P. Bartlett, F. Pereira, and K. Q. Weinberger (eds.), Advances in Neural Information Processing Systems, volume 24. Curran Asso[ciates, Inc., 2011a. URL https://proceedings.neurips.cc/paper/2011/file/](https://proceedings.neurips.cc/paper/2011/file/7e889fb76e0e07c11733550f2a6c7a5a-Paper.pdf)
+[7e889fb76e0e07c11733550f2a6c7a5a-Paper.pdf.](https://proceedings.neurips.cc/paper/2011/file/7e889fb76e0e07c11733550f2a6c7a5a-Paper.pdf)
+
+Rémi Munos. Optimistic optimization of a deterministic function without the knowledge of its
+smoothness. Advances in neural information processing systems, 24:783–791, 2011b.
+
+Linqiang Pan, Cheng He, Ye Tian, Handing Wang, Xingyi Zhang, and Yaochu Jin. A classificationbased surrogate-assisted evolutionary algorithm for expensive many-objective optimization. IEEE
+_Transactions on Evolutionary Computation, 23(1):74–88, 2019._ doi: 10.1109/TEVC.2018.
+2802784.
+
+Lie Meng Pang, Hisao Ishibuchi, and Ke Shang. Nsga-ii with simple modification works well
+on a wide variety of many-objective problems. IEEE Access, 8:190240–190250, 2020. doi:
+10.1109/ACCESS.2020.3032240.
+
+Biswajit Paria, Kirthevasan Kandasamy, and Barnabás Póczos. A flexible multi-objective bayesian
+[optimization approach using random scalarizations. CoRR, abs/1805.12168, 2018. URL http:](http://arxiv.org/abs/1805.12168)
+[//arxiv.org/abs/1805.12168.](http://arxiv.org/abs/1805.12168)
+
+
+-----
+
+Wolfgang Ponweiser, Tobias Wagner, Dirk Biermann, and Markus Vincze. Multiobjective optimization on a limited budget of evaluations using model-assisted-metric selection. In Günter Rudolph,
+Thomas Jansen, Nicola Beume, Simon Lucas, and Carlo Poloni (eds.), Parallel Problem Solving
+_from Nature – PPSN X, pp. 784–794, Berlin, Heidelberg, 2008. Springer Berlin Heidelberg._
+
+Mikita Sazanovich, Anastasiya Nikolskaya, Yury Belousov, and Aleksei Shpilman. Solving
+black-box optimization challenge via learning search space partition for local bayesian opti[mization. URL https://valohaichirpprod.blob.core.windows.net/papers/](https://valohaichirpprod.blob.core.windows.net/papers/jetbrains.pdf)
+[jetbrains.pdf.](https://valohaichirpprod.blob.core.windows.net/papers/jetbrains.pdf)
+
+Chun-Wei Seah, Yew-Soon Ong, Ivor W. Tsang, and Siwei Jiang. Pareto rank learning in multiobjective evolutionary algorithms. In 2012 IEEE Congress on Evolutionary Computation, pp. 1–8,
+2012. doi: 10.1109/CEC.2012.6252865.
+
+Nidamarthi Srinivas and Kalyanmoy Deb. Muiltiobjective optimization using nondominated sorting
+in genetic algorithms. Evolutionary computation, 2(3):221–248, 1994.
+
+Bradley S. Stewart and Chelsea C. White. Multiobjective a*. J. ACM, 38(4):775–814, oct 1991. ISSN
+[0004-5411. doi: 10.1145/115234.115368. URL https://doi.org/10.1145/115234.](https://doi.org/10.1145/115234.115368)
+[115368.](https://doi.org/10.1145/115234.115368)
+
+William R Thompson. On the likelihood that one unknown probability exceeds another in view of
+the evidence of two samples. Biometrika, 25(3/4):285–294, 1933.
+
+Chi Tung Tung and Kim Lin Chew. A multicriteria pareto-optimal path algorithm. European
+_Journal of Operational Research, 62(2):203–209, 1992. ISSN 0377-2217. doi: https://doi.org/_
+[10.1016/0377-2217(92)90248-8. URL https://www.sciencedirect.com/science/](https://www.sciencedirect.com/science/article/pii/0377221792902488)
+[article/pii/0377221792902488.](https://www.sciencedirect.com/science/article/pii/0377221792902488)
+
+Jessica Vamathevan, Dominic Clark, Paul Czodrowski, Ian Dunham, Edgardo Ferran, George Lee,
+Bin Li, Anant Madabhushi, Parantu Shah, Michaela Spitzer, et al. Applications of machine learning
+in drug discovery and development. Nature Reviews Drug Discovery, 18(6):463–477, 2019.
+
+David A Van Veldhuizen and Gary B Lamont. Evolutionary computation and convergence to a pareto
+front. In Late breaking papers at the genetic programming 1998 conference, pp. 221–228. Citeseer,
+1998.
+
+Douglas AG Vieira and Adriano Chaves Lisboa. A cutting-plane method to nonsmooth multiobjective
+optimization problems. European Journal of Operational Research, 275(3):822–829, 2019.
+
+Linnan Wang, Saining Xie, Teng Li, Rodrigo Fonseca, and Yuandong Tian. Sample-efficient
+[neural architecture search by learning action space. CoRR, abs/1906.06832, 2019. URL http:](http://arxiv.org/abs/1906.06832)
+[//arxiv.org/abs/1906.06832.](http://arxiv.org/abs/1906.06832)
+
+Linnan Wang, Rodrigo Fonseca, and Yuandong Tian. Learning search space partition for black-box
+optimization using monte carlo tree search. arXiv preprint arXiv:2007.00708, 2020.
+
+Ziyu Wang, Babak Shakibi, Lin Jin, and Nando Freitas. Bayesian multi-scale optimistic optimization.
+In Artificial Intelligence and Statistics, pp. 1005–1014. PMLR, 2014.
+
+Kaifeng Yang, Michael Emmerich, André Deutz, and Thomas Bäck. Multi-objective bayesian
+global optimization using expected hypervolume improvement gradient. _Swarm and Evolu-_
+_tionary Computation, 44:945–956, 2019._ ISSN 2210-6502. doi: https://doi.org/10.1016/j.
+[swevo.2018.10.007. URL https://www.sciencedirect.com/science/article/](https://www.sciencedirect.com/science/article/pii/S2210650217307861)
+[pii/S2210650217307861.](https://www.sciencedirect.com/science/article/pii/S2210650217307861)
+
+Kevin Yang, Tianjun Zhang, Chris Cummins, Brandon Cui, Benoit Steiner, Linnan Wang, Joseph E.
+Gonzalez, Dan Klein, and Yuandong Tian. Learning space partitions for path planning. CoRR,
+[abs/2106.10544, 2021. URL https://arxiv.org/abs/2106.10544.](https://arxiv.org/abs/2106.10544)
+
+Kaicheng Yu, Christian Sciuto, Martin Jaggi, Claudiu Musat, and Mathieu Salzmann. Evaluating the
+search phase of neural architecture search. arXiv preprint arXiv:1902.08142, 2019.
+
+
+-----
+
+Qingfu Zhang and Hui Li. Moea/d: A multiobjective evolutionary algorithm based on decomposition.
+_IEEE Transactions on Evolutionary Computation, 11(6):712–731, 2007. doi: 10.1109/TEVC.2007._
+892759.
+
+E. Zitzler, L. Thiele, M. Laumanns, C.M. Fonseca, and V.G. da Fonseca. Performance assessment of multiobjective optimizers: an analysis and review. IEEE Transactions on Evolutionary
+_Computation, 7(2):117–132, 2003. doi: 10.1109/TEVC.2003.810758._
+
+Eckart Zitzler, Kalyanmoy Deb, and Lothar Thiele. Comparison of multiobjective evolutionary
+algorithms: Empirical results. Evolutionary computation, 8(2):173–195, 2000.
+
+
+-----
+
+A PROOFS
+
+**Lemma 1. The algorithm to uniformly draw k samples in S, pick the best and return is a (1, 1)-oracle.**
+
+_Proof. Consider the following simple (1, 1)-oracle for single-objective optimization: after sampling_
+_k samples, we rank them according to their function values, and split them into two k/2 smaller_
+subsets _S[˜]good and_ _S[˜]bad. Other points are randomly assigned to either of the two subsets. Then if x[∗]_
+happens to be among the k collected samples (which happens with probability k/|S|), definitely we
+have x[∗] _Sgood. Therefore, we have:_
+_∈_
+
+_P (x[∗]_ _Sgood_ **x[∗]** _S)_ (7)
+_∈_ _|_ _∈_ _≥_ _S[k]_ _−_ _S[k]_
+
+_|_ _| [≥]_ [1][ −] [exp]  _|_ _|_ 
+
+which is an oracle with α = η = 1. The last inequality is due to e[x] _≥_ 1 + x (and thus e[−][x] _≥_
+1 − _x)._
+
+**Lemma 2. Define g(λ) : R[+]** _7→_ R[+] _as:_
+
+
+(8)
+
+
+_g(λ) : λ 7→_
+
+_The following maximization problem_
+
+
+_wt log_ 1 +
+_t=1_ 
+
+X
+
+
+_λwt_
+
+
+_T_
+
+log 1 − _e[−][z][t]_ [] s.t.
+_t=1_
+
+X  
+
+
+_wtzt = K_ (9)
+_t=1_
+
+X
+
+
+max
+_{zt}_
+
+
+_has optimal solutions_
+
+
+1
+_zt[∗]_ [= log] 1 + _,_ 1 _t_ _T_ (10)
+
+_λwt_ _≤_ _≤_
+
+ 
+
+_where λ is determined by g(λ) = K. With optimal {zt[∗][}][, the objective reaches][ −]_ [P]t [log(1 +][ λw][t][)][.]
+
+_Proof. Its Lagrange is:_
+
+_T_ _T_
+
+_J (_ _zt_ ) = log 1 _e[−][z][t]_ [] _λ_ _wtzt_ _K_ (11)
+_{_ _}_ _t=1_ _−_ _−_ _t=1_ _−_ !
+
+X   X
+
+Taking derivative w.r.t. zt and we have:
+
+_∂J_ _e[−][z][t]_
+
+=
+_∂zt_ 1 _e[−][z][t][ −]_ _[λw][t][ = 0][.]_
+
+_−_
+
+1
+
+1 _e[−][z][t][ −]_ [1][ −] _[λw][t][ = 0]_
+_−_
+
+1
+
+1 _e[−][z][t][ = 1 +][ λw][t]_
+_−_ (12)
+
+1
+1 _e[−][z][t]_ =
+_−_ 1 + λwt
+
+
+1 _λwt_
+
+=
+1 + λwt 1 + λwt
+
+
+_e[−][z][t]_ = 1 −
+
+
+_λwt_
+_zt =_ log = log [1 +][ λw][t] = log 1 +
+_−_ 1 + λwt _λwt_
+
+
+
+
+_λwt_
+
+
+**Lemma 3. Both g(λ) and g[−][1](y) are monotonously decreasing.** _Furthermore, let ¯w_ :=
+
+1
+_T_ _−_
+_T_ _t=1_ _[w]t[−][1]_ _be the Harmonic mean of {wt} and wmax := max[T]t=1_ _[w][t][, we have:]_
+P  _w¯[−][1]_ _wmax[−][1]_ (13)
+
+exp( ¯w[−][1]y/T ) 1 exp(wmax[−][1] _[y/T]_ [)][ −] [1][ ≤] _[T]y [.]_
+_−_ _[≤]_ _[g][−][1][(][y][)][ ≤]_
+
+
+-----
+
+Bounds of log g 1(y) (large wi span)
+
+10 20 30 40 50
+
+
+Bounds of log g 1(y) (small wi span)
+
+10 20 30 40 50
+
+
+upper bound
+lower bound
+
+
+upper bound
+lower bound
+
+
+Figure 8: Upper and lower bounds of g[−][1](y) with different {wi}. Left: wi = 2[linspace(][−][0][.][1][,][10)].
+Right: wi = 2[linspace(2][,][5)]. Small {wi} span leads to better bounds.
+
+_Proof. It is easy to see when λ increases, each term in g(λ) decreases and thus g(λ) is a decreasing_
+function of λ. Therefore, its inverse mapping g[−][1](y) is also decreasing.
+
+Let µ(y) := 1/g[−][1](y) > 0. Then we have:
+
+
+_T_
+
+_wt log_ 1 + _[µ][(][y][)]_
+
+_wt_
+
+_t=1_ 
+
+X
+
+
+(14)
+
+
+_y =_
+
+
+It is clear that when y = 0, µ(y) = 0. Taking derivative with respect to y in both side, we have:
+
+
+1 = µ[′](y)
+
+
+1
+
+(15)
+
+1 + _[µ]w[(][y]t[)]_
+
+
+_t=1_
+
+
+where µ[′](y) = [d][µ]d[(]y[y][)] is the derivative of µ(y). Using the property of Harmonic mean, we have:
+
+_T_ _−1_ _T_
+
+_µ[′](y) =_ 1 _t=1_ [1 +][ µ]w[(][y]t[)] = [1] 1 + _[µ][(][y][)]_ (16)
+
+_t=1_ 1 + _[µ]w[(][y]t[)]_ ! _≤_ P _T_ [2] _T_  _w¯_ 
+
+X
+
+
+This gives:
+_µ[′](y)_
+
+1 + µ(y)/w ¯ _T_
+
+_[≤]_ [1]
+
+Integrate on both side starting from y = 0, we have:
+
+
+(17)
+
+(18)
+
+
+_≤_ _T[y]_
+
+
+_w¯ log(1 + µ(y)/w ¯)_
+
+
+Using µ(0) = 0 we thus have:
+_w¯ log(1 + µ(y)/ ¯w)_ (19)
+_≤_ _T[y]_
+
+This leads to µ(y) ≤ _w¯_ exp(y ¯w[−][1]/T ) − 1 . With g[−][1](y) = 1/µ(y), we arrive the final lower
+bound for g[−][1](y).
+ 
+
+
+For an alternative upper bound of g[−][1](y), we just notice that (here wmax := maxt wt):
+
+_T_ _−1_ _−1_
+
+1 _T_
+
+_µ[′](y) =_ = [1] 1 + _[µ][(][y][)]_
+
+_t=1_ 1 + _[µ]w[(][y]t[)]_ ! _≥_ 1 + _w[µ]max[(][y][)]_ ! _T_  _wmax_ 
+
+X
+
+
+(20)
+
+
+Using the same technique as above, we have µ(y) ≥ _wmax_ exp(ywmax[−][1] _[/T]_ [)][ −] [1] and the upper
+bound of g[−][1](y) follows.
+ 
+
+
+Finally, note that e[x] _≥_ 1 + x, we have
+
+_wmax[−][1]_ _wmax[−][1]_
+
+exp(wmax[−][1] _[y/T]_ [)][ −] [1][ ≤] _wmax[−][1]_ _[y/T][ =][ T]y_
+
+
+(21)
+
+
+-----
+
+**Theorem 1. Following optimal sequence, the algorithm yields a reward r[∗]** _lower bounded by the_
+_following:_
+
+_r[∗]_ _rb exp_ log 2 _T_ (22)
+_≥_ _−_ _[ηN][ α][φ]K[(][α, T]_ [)]
+  
+
+_where rb := N_ _[−][1]_ _and φ(α, T_ ) := (1 − 2[−][αT] )/(1 − 2[−][α]).
+
+_Proof. First note that_ _ST_ _S0_ _/2[T]_ and thus _S1T_
+
+which can be written as: | _| ≤|_ _|_ _|_ _|_ _[≥]_ [2][T][ /N] [. So we just need to bound][ P] [(][x][∗] _[∈]_ _[S][T][ )][,]_
+
+
+
+
+
+_kt_
+1 exp
+_−_ − _η|St−1|[α]_
+
+
+_P_ (x[∗] _∈_ _ST ) =_
+
+Therefore we have
+
+
+_P_ (x[∗] _∈_ _St|x[∗]_ _∈_ _St−1) ≥_
+_t=1_ _t=1_
+
+Y Y
+
+
+(23)
+
+
+(24)
+
+
+
+_T_
+
+_kt_
+log 1 exp
+_−_ _−_ _η_ _St_ 1
+_t=1_   _|_ _−_ _|[α]_
+
+X
+
+
+log P (x[∗] _∈_ _ST ) ≥_
+
+
+We want to find the action sequence _kt_ so that log P (x[∗] _ST ) is maximized. Let wt := η_ _St_ 1
+_{_ _}_ _∈_ _|_ _−_ _|[α]_
+and zt := kt/wt, applying Lemma 2, and we know that
+
+
+max log(1 + λwt) (25)
+_kt_ [log][ P] [(][x][∗] _[∈]_ _[S][T][ )][ ≥−]_
+_{_ _}_ _t=1_
+
+X
+
+
+where the Lagrangian multiplier λ satisfies the equation g(λ) = K.
+
+Now we have:
+
+
+_T_
+
+log 1 + _[T]_
+
+_K [w][t]_
+
+_t=1_  
+
+X
+
+_T_
+
+log 1 + _[T]_
+
+_K [η][(][N/][2][t][−][1][)][α]_
+
+_t=1_ 
+
+X
+
+
+(26)
+
+(27)
+
+
+log(1 + λwt)
+_t=1_
+
+X
+
+
+_ηTN_ _[α]_
+
+
+1
+
+(28)
+2[α][(][t][−][1)]
+
+
+_t=1_
+
+
+_φ(α, T_ ) _[ηTN][ α]_
+
+
+(29)
+
+
+Here 1 is due to Lemma 3 which tells that λ = g[−][1](K) _T/K, 2_ is due to wt := η _St_ 1 and
+_⃝_ _≤_ _⃝_ _|_ _−_ _|[α]_
+_|St−1| ≤_ _N/2[t][−][1], and 3⃝_ due to log(1 + x) ≤ _x._
+
+Putting all of them together, we know that
+
+
+1
+
+_φ(α, T_ ) _[ηTN][ α]_
+
+_ST_ _N_ [exp] _−_ _K_
+_|_ _|_ _[P]_ [(][x][∗] _[∈]_ _[S][T][ )][ ≥]_ [2][T] 
+
+
+_r[∗]_ max
+_≥_ _kt_
+_{_ _}_
+
+
+(30)
+
+
+**Optimal action sequence** _kt[∗]_
+sequence that achieves the best reward: { _[}][. From the proof, we could also write down the optimal action] kt[∗]_ [=][ w][t] [log] 1 + _λw1_ _t_, where wt := η|St−1|[α]. Using
+
+Lemma 3, we could compute the upper and lower bound estimation of  _λ = g[−][1](K). Here ¯w :=_
+
+1
+_T_ _−_
+_T_ _t=1_ _[w]t[−][1]_ be the Harmonic mean of {wt} and wmax := max[T]t=1 _[w][t][:]_
+P  _w¯[−][1]_ _wmax[−][1]_ (31)
+
+exp( ¯w[−][1]K/T ) − 1 _[≤]_ _[λ][ ≤]_ exp(wmax[−][1] _[K/T]_ [)][ −] [1]
+
+With λ, we could compute approximate _kt[∗]_ _t_
+terminate the algorithm when _ST_ is still fairly large. This case corresponds to the setting { _[}][. Here we make a rough estimation of][ {][k][∗][}][ if we] T =_
+_|_ _|_
+
+
+-----
+
+Θ(1)β log,2 exp( ¯ N wherew[−][1]K/T β < 1) and all1 _w¯ w[−]t[1] ∼K/TN and[α]. With λw Kt_ = Θ(log2 NN _[α]) as in semi-parametric case,1. Since log(1 + x)_ _x for small ¯w[−][1]K = x,_
+we haveeach stage is approximately optimal. kt[∗] _[≈]_ _[w][t]_ _λw1_ _t_ [= 1] − _[/λ] ≈[, which is independent of] ∼_ _[ t][. Therefore, a constant amount of sampling at] ≫_ _≈_
+
+**Observation 1. If all fj are isotropic, fj(x) =** **x** **cj** 2[, then][ Ω][P] [= ConvexHull(][c][1][, . . .,][ c][M] [)][.]
+_∥_ _−_ _∥[2]_
+
+_Proof. Consider J(x; µ) :=_ _j=1_ _[µ][j][f][j][(][x][)][ where the weights][ µ][j][ ≥]_ [0][ satisfies][ P]j _[µ][j][ = 1][. For]_
+
+brevity, we write the constraint as ∆:= {µ : µj ≥ 0, _j_ _[µ][j][ = 1][}][.]_
+
+[P][M]
+
+Now consider the Pareto Set ΩP := {x : ∃µ ∈ ∆: ∇[P]xJ(x; µ) = 0}. We have the following:
+
+**xJ(x; µ) = 0** (32)
+_∇_
+
+_µj_ **xfj(x) = 0** (33)
+
+_⇐⇒_ _∇_
+
+_j_
+
+X
+
+_µj(x_ **cj) = 0** (34)
+
+_⇐⇒_ _−_
+X
+
+
+_j_ _[µ][j][c][j]_
+
+_j_ _[µ][j]_
+
+
+_µjcj_ (35)
+
+
+**x =**
+
+
+The last step is due to the fact that _j_ _[µ][j][ = 1][. Therefore, for any][ x][ ∈]_ [Ω][P][,][ x][ is a convex]
+
+combination of **c1, . . ., cM** and thus x ConvexHull(c1, . . ., cM ). Conversely, for any x
+_{_ _}_ _∈_ _∈_
+ConvexHull(c1, . . ., cM ), we know [P]xJ(x; µ) = 0 and thus x ΩP .
+_∇_ _∈_
+
+**Observation 2. If M = 2 and fj(x) = (x −** **cj)[⊤]Hj(x −** **cj) where Hj are positive definite**
+**xsymmetric matrices, then there exists ∈** ΩP, w1[⊤][(][x][ −] **[c][1][)][ ≥]** [0][ and][ w]2[⊤][(][x] w[ −]1[c] :=[2][)][ ≥] H2[0]([.]c2 − **c1) and w2 := H1(c1 −** **c2), so that for any**
+
+_Proof. Following Observation 1, similarly we have for all x ∈_ ΩP, _j_ _[µ][j][H][j][(][x][ −]_ **[c][j][) = 0][, which]**
+
+gives:
+
+_−1_ [P]
+
+**x =** _µjHj_ _µjHjcj_ (36)
+
+ 
+
+_j_ _j_
+
+X
+
+[X] 
+
+Note that this is an expression of the Pareto Set ΩP .
+
+Let Aj := ([P]j _[µ][j][H][j][)][−][1][µ][j][H][j][. Then][ P]j_ _[A][j][ =][ I][. Note that while][ P]j_ _[µ][j][H][j][ and][ (][P]j_ _[µ][j][H][j][)][−][1][ are]_
+
+positive definite matrix. Aj may not be.
+
+Let M := _i_ _[µ][i][H][i][. Since][ µ][ ∈]_ [∆][,][ M][ is a PD matrix. Note that we have]
+
+_µjHjcj_ = _µjHjcj_ _µjHjck +_ _µjHjck_ (37)
+
+[P]
+
+_j_ _j_ _−_ _j_ _j_
+
+X X X X
+
+= _µjHj(cj_ **ck) + M** **ck** (38)
+Xj≠ _k_ _−_
+
+Using Eqn. 36, we know that x = M _[−][1][ P]j_ _[µ][j][H][j][c][j][ =][ c][k][ +][ M][ −][1][ P]j≠_ _k_ _[µ][j][H][j][(][c][j][ −]_ **[c][k][)][.]**
+
+For M = 2, we have x = c2 + M _[−][1]µ1H1(c1 −_ **c2). So we have**
+
+(c1 − **c2)[⊤]H1x** = (c1 − **c2)[⊤]H1c2 + (c1 −** **c2)[⊤]H1M** _[−][1]H1(c1 −_ **c2)** (39)
+
+(c1 **c2)[⊤]H1c2** (40)
+_≥_ _−_
+
+This is becauseletit holds for any w2 := H1(c x (1 −c ∈1 −cΩ2P)c and we have .2)H1M _[−][1]H w1(c2[⊤]1[(] −[x][ −]c2[c])[2] ≥[)][ ≥]0 since[0][, which is independent of] H1M_ _[−][1]H1 is a PSD matrix. Therefore,[ µ][ ∈]_ [∆][. This means]
+
+Let w1 = H2(c2 **c1), then similarly we have w1[⊤][(][x][ −]** **[c][1][)][ ≥]** [0][ for all][ x][ ∈] [Ω][P] [.]
+_−_
+
+
+-----
+
+B QUALITY INDICATORS COMPARISON
+
+Table 1: The review of different scalarizing methods.
+
+|Quality Indicator|Convergence|Uniformity|Spread|No reference set required|
+|---|---|---|---|---|
+|HyperVolume|√|√|√|√|
+|GD|√||||
+|IGD|√|√|√||
+|MS|||√||
+|S||√|||
+|ONVGR|√||||
+
+
+
+Generational Distance(GD) (Van Veldhuizen & Lamont, 1998) measures the distance the pareto
+frontier of approximation samples and true pareto frontier, which requires prior knowledge of true
+pareto frontier and only convergence is considered. IGD (Bosman & Thierens, 2003) is improved
+version of GD. IGD calculates the distance the points on true pareto frontier to the closest point on
+pareto frontier of current samples. Inverted Generational Distance(IGD) satisfies all three evaluation
+metrics of QI but requires true pareto frontier which is hardly to get in real-world problem. Maximum
+Spread(MS) (Zitzler et al., 2000) computes the distance between the farthest two points of samples to
+evaluate the spread. Spacing(S) (Bandyopadhyay et al., 2004) measures how close the distribution of
+pareto frontier of samples is to uniform distribution. Overall Non-dominated Vector Generation and
+Ratio(ONVGR) is the ratio of number of samples in true pareto-frontier. The table 1 demonstrates
+the good characteristics of each quality indicators.
+
+C END-TO-END LAMOO PSEUDOCODE
+
+Below we list the pseudocode for the end-to-end workflow of LaMOO in Algorithm 2. Specfically,
+it includes search space partition in Function Split. Node(promising region) selection in Function
+**Select, and new samples generation in Function Sample.**
+
+**Algorithm 2 LaMOO Pseudocode.**
+
+1: Inputs: Initial D0 from uniform sampling, sample budget T .
+2: for t = 0, . . ., T do
+3: Set L ←{Ωroot} (collections of regions to be split).
+
+4: _V, v, n ←_ **Split(L, Dt)**
+
+5: _k ←_ **Select(Cp, Dt)**
+
+6:7: end forDt+1 ← **Sample(k)**
+
+8:
+9: Function Split(L, Dt)
+
+10: **while L ̸= ∅** **do**
+
+12:11: ΩCompute dominance numberj ← pop_first_element(L o), Dt,j oft,j D ←t,j using Eqn. 5 and train SVM modelDt ∩ Ωj, nt,j ←|Dt,j|. _h(·)._
+
+13: **If (Dt,j, ot,j) is splittable by SVM, then L ←L ∪** Partition(Ωj, h(·)).
+
+14: **end while**
+
+15:
+16: Function Select(Cp, Dt)
+17: **for k = root, k is not leaf node do**
+
+18: _Dt,k_ _Dt_ Ωk, vt,k HyperVolume(Dt,k), nt,k _Dt,k_ .
+
+19: _k ← ←arg_ _c_ _∩children(max_ _k)_ [UCB] ← _[t,c][, where][ UCB][t,c][ :=][ v][t,c][ + 2] ←|[C][p]_ 2 log(| _nt,cnt,k_
+_∈_
+
+20: **end for** q
+
+21: **return k**
+
+22:
+23: Function Sample(k)
+24:25: _Dreturnt+1 ← DDt ∪t ∪DDnewnew, where Dnew is drawn from Ωk based on qEHVI or CMA-ES._
+
+
+-----
+
+EXPLORATION FACTOR(Cp) SETUP WITH UNKNOWN MAXIMUM
+HYPERVOLUME
+
+0.0
+
+0.2
+
+0.4
+
+|Col1|cp=10% max_hv cp=10% current_hv|
+|---|---|
+
+
+
+0.6
+
+
+20 40 60 80 100
+
+cp=10% max_hv cp=10% current_hv
+
+Samples
+
+(c) Nasbench201
+
+
+cp=10% max_hv cp=10% current_hv 2.0 cp=10% max_hv cp=10% current_hv
+
+1.5
+
+1.5
+
+1.0
+
+1.0
+
+0.5
+
+0.5
+
+Log Hypervolume Diff Log Hypervolume Diff
+
+0.0
+
+0.0
+
+20 40 60 80 100 20 40 60 80 100
+
+Samples Samples
+
+
+(a) BraninCurrin
+
+
+(b) VehicleSafety
+
+
+Figure 9: Sampling with static Cp(10% of HVmax) and dynamic Cp((10% of HVcurrent))
+
+As we mentioned in the paper, a "rule of thumb" is to set the Cp to be roughly 10% of the maximum
+hypervolume HVmax. If HVmax is unknown, Cp can be dynamically set to 10% of the hypervolume
+of current samples in each search iteration. The figures below demonstrate the difference between
+10% HVmax and 10% current hypervolume in three problems(Branin-Currin, VehicleSafety, and
+Nasbench201 from left to right). The final performances by using 10% HVmax and 10% current
+hypervolume are similar.
+
+
+WALL CLOCK TIME IN DIFFERENT PROBLEMS
+
+
+1.5 qEHVI+LaMOOqEHVIQPAREGO CMAESNSGA-IINSGA-III 2.0 qEHVI+LaMOOqEHVIQPAREGO CMAESNSGA-IINSGA-III 0.0 qEHVI+LaMOOqEHVIQPAREGO CMAESNSGA-IINSGA-III
+
+CMAES+LaMOO NMOEAD 1.5 CMAES+LaMOO NMOEAD CMAES+LaMOO NMOEAD
+
+1.0
+
+0.5
+
+0.5 1.0
+
+0.0 0.5 1.0
+
+Log Hypervolume Diff Log Hypervolume Diff Log Hypervolume Diff
+
+0.5 0.0 1.5
+
+0 100 200 0 500 1000 0 200 400 600
+
+Average Cumulative Wall Clock Time(s) Average Cumulative Wall Clock Time(s) Average Cumulative Wall Clock Time(s)
+
+
+(a) BraninCurrin
+
+
+(b) VehicleSafety
+
+
+(c) Nasbench201
+
+
+Figure 10: Wall clock time in different problems
+
+Fig. 10 shows the wall clock time of different search algorithms in BraninCurrin(Belakaria et al.,
+2019), VehicleSafefy (Liao et al., 2008) and Nasbench201 (Dong & Yang, 2020).
+
+
+F DETAILS OF BENCHMARK PROBLEMS
+
+F.1 PROBLEM DESCRIPTION
+
+
+**BraninCurrin (Belakaria et al., 2019):**
+
+_f_ [(1)](x1, x2) = (15x2 + [75][x][1][ −] [25] 5)[2] + (10
+_−_ [5][.][1][ ∗] [(15]4π[x][2][1][ −] [5)][2] _π_ _−_ _−_ 8[10]π [)][ ∗] [cos(15][x][1][ −] [5)]
+
+_f_ [(2)](x1, x2) = 1 exp 1 2300x31 [+ 1900][x]1[2] [+ 2092][x][1] [+ 60]
+_−_ _−_ (2x2) 100x[3]1 [+ 500][x]1[2] [+ 4][x][1][ + 20]
+  
+
+
+-----
+
+where x1, x2 [0, 1].
+_∈_
+
+**VehicleSafefy (Liao et al., 2008):**
+
+_f1(x) = 1640.2823 + 2.3573285x1 + 2.3220035x2 + 4.5688768x3 + 7.7213633x4 + 4.4559504x5_
+_f2(x) = 6.5856 + 1.15x1 −_ 1.0427x2 + 0.9738x3 + 0.8364x4 − 0.3695x1x4 + 0.0861x1x5
++ 0.3628x2x4 + 0.1106x[2]1 _[−]_ [0][.][3437][x]3[2] [+ 0][.][1764][x]4[2]
+_f3(x) = −0.0551 + 0.0181x1 + 0.1024x2 + 0.0421x3 −_ 0.0073x1x2 + 0.024x2x3 − 0.0118x2x4
+_−_ 0.0204x3x4 − 0.008x3x5 − 0.0241x[2]2 [+ 0][.][0109][x]4[2]
+
+where x ∈ [1, 3][5].
+
+**Nasbench201 (Dong & Yang, 2020):**
+
+**zeroize**
+
+**2** **skip-connect**
+
+**1x1 convolution**
+
+**0** **1**
+
+**3** **3x3 convolution**
+
+**3x3 average pool**
+
+
+Figure 11: A general architecture of Nasbench201
+
+In Nasbench201, the architectures are made by stacking the cells together. The difference among
+architectures in Nasbench201 is the design of the cells, see fig 11. Specifically, each cell contains 4
+nodes, and there is a particular operation connecting to two nodes including zeroize, skip-connect,
+1x1 convolution, 3x3 convolution, and 3x3 average pooling. Therefore, there are C4[2] [= 6 edges in]
+a cell and 5[6] =15625 unique architectures in Nasbench201. According to this background, Each
+architecture can be encoded into a 6-dimensional vector with 5 discrete numbers (i.e., 0, 1, 2, 3, 4 that
+corresponds to zeroize, skip-connect, 1x1 convolution, 3x3 convolution, and 3x3 average pooling).
+
+_f1(x) = Accuracy(x)_
+_f2(x) = #FLOPs(x)_
+
+
+where x ∈{0, 1, 2, 3, 4}[6].
+
+**DTLZ2 (Deb et al., 2002b):**
+
+_π_ _π_ _π_
+_f1(x) = (1 + g(xM_ )) cos cos cos
+
+2 _[x][1]_ _· · ·_ 2 _[x][M]_ _[−][2]_ 2 _[x][M]_ _[−][1]_
+
+_π_ _π_ _π_
+_f2(x) = (1 + g(xM_ )) cos    cos    sin  
+
+2 _[x][1]_ _· · ·_ 2 _[x][M]_ _[−][2]_ 2 _[x][M]_ _[−][1]_
+
+_π_ _π_
+_f3(x) = (1 + g(xM_ )) cos    sin     
+
+2 _[x][1]_ _· · ·_ 2 _[x][M]_ _[−][2]_
+
+.      
+.
+
+
+_π_
+_fM_ (x) = (1 + g(xM )) sin
+
+2 _[x][1]_
+
+  
+
+where g(x) = _xi_ **_xM_** [(][x][i][ −] [0][.][5)][2][,][ x][ ∈] [[0][,][ 1]][d][,][ and][ x][M][ represents the last][ d][ −] _[M][ + 1][ elements of]_
+
+_∈_
+**_x._**
+
+[P]
+
+
+-----
+
+F.2 VISUALIZATION OF PARETO-FRONTIER FOR BENCHMARK PROBLEMS
+
+
+samples
+pareto-frontier
+
+samples
+
+2 pareto-frontier 0.05 1
+
+4 0.10
+
+6 0.15F3(x) 2
+
+F2(x) 8 0.250.20 F2(x) 3
+
+10 7 6 4
+
+1214 175 150 125 100F1(x) 75 50 25 0 169516901685F1(x)1680167516701665 1110 F2(x)9 8 5 8 samplespareto-frontier7 6 5F1(x) 4 3 2
+
+
+(a) BraninCurrin
+
+
+(b) VehicleSafety
+
+
+(c) Nasbench201
+
+
+Figure 12: Visualization of Pareto-frontier in BraninCurrin, VehicleSafety as well as Nasbench201.
+
+F.3 REFERENCE POINTS
+
+
+|†: M rep|presents the number of objectives.|
+|---|---|
+|Problem|Reference Point|
+|BraninCurrin|(18.0, 6.0)|
+|VehicleSafety|(1864.72022, 11.81993945, 0.2903999384)|
+|Nasbench201|(-3.0, -6.0)|
+|DTLZ2|(1.1, .., 1.1) ∈RM†|
+|Molucule Discovery|(0.0, ..., 0.0) ∈RM†|
+
+
+Table 2: The reference points for all problems in this work.
+
+The reference point R ∈ R[M] is defined to measure the hypervolume of a problem. Different reference
+point would result in a different hypervolume. The details can be found at sec 1. Table 2 elaborates
+the reference points in the problems throughout the paper.
+
+
+F.4 MAXIMUM HYPERVOLUME OF EACH PROBLEM
+
+|Problem|Maximum Hypervolume|
+|---|---|
+|BraninCurrin|59.36011874867746|
+|VehicleSafety|246.81607081187002|
+|Nasbench201|8.06987476348877|
+|DTLZ2(2 objectives)|1.4460165933151778|
+|DTLZ2(10 objectives)|2.5912520655298095|
+|Molucule Discovery|N/A|
+
+
+Table 3: The maximum hypervolume for all problems in this work.
+
+Table 3 elaborates the observed maximal hypervolume in the problems throughout the paper. We
+used these value to calculate the log hypervolume difference in fig 3 and fig 4.
+
+
+G EXPERIMENTS SETUP
+
+Experiment details: For small-scale problems(i.e. Branin-Currin, VehicleSafety, and Nasbench201)
+and DTLZ2 with 2 and 10 objectives. We randomly generate 10 samples as the initialization. For
+
+
+-----
+
+multi-objective molecule discovery, the number of initial samples is 150. In each iteration, we update
+5 batched samples(q value) for all search algorithms.
+
+Hyperparameters of LAMOO: For all problems, we leverage polynomials as the kernel type of SVM
+and the degree of the polynomial kernel function is set to 4. The minimum samples in the leaf
+of MCTS is 10. The cp is roughly set to 10% of maximum of hypervolume(i.e. Branin-Currin ->
+5, VehicleSafety -> 20, Nasbench201 -> 6, DTLZ2(2 objectives) -> 0.1, DTLZ2(10 objectives) ->
+0.25, molecule discovery(2 objectives) -> 0.03, molecule discovery(3 objectives) -> 0.2, molecule
+discovery(4 objectives) -> 0.06).
+
+Hyperparameters of qEHVI and qParEGO: The number of q is set to 5. The acquisition function is
+optimized with L-BFGS-B (with a maximum of 200 iterations). In each iteration, 256 raw samples
+used for the initialization heuristic are generated to be selected by the acquisition function. In original
+work Daulton et al. (2020), they used 1024 raw samples but we decrease this number to 256 to sample
+budget of all methods for comparison, which speeds up the search but may lead to lower performance
+such as vehiclesafty problem in fig. 3. As the same claim in Daulton et al. (2020), each generated
+sample is modeled with an independent Gaussian process with a Matern 5/2 ARD kernel.
+
+H VERIFICATION OF LAMOO ON MANY-OBJECTIVE PROBLEMS
+
+Figure 13: Dominance number distribution with 50 random samples on DTLZ2(10 objectives)
+
+0.8
+
+HyperVolume0.60.4
+
+0.2
+
+good whole space bad
+
+selected region
+
+
+Figure 14: The range of hypervolume for 50 samples randomly generated from different regions in DTLZ2(10
+objectives). We generate 25 times of 50 samples in total.
+
+While it is theoretically hard to label the samples into good and bad based on their dominance number
+in many-objective problems due the the lack of dominance pressure(All samples are non-dominated
+with each other). If number of objective is not too large(i.e. M ≤ 10), the samples can be still split
+by dominance number. Given the problem(DTLZ2 with 10 objectives) shown in fig 4, we randomly
+generate 50 samples in the search space and draw the dominance distribution of them(see fig 13). We
+did this experiment 5 times.
+
+We then partition the search space by a SVM classifier based on the labeled samples into “good”
+and “bad”, and randomly generate 50 samples in “good region”, “bad region”, and whole space,
+respectively. We did this process 5 times with different initial samples. Fig. 14 shows the range of
+hypervolume of the samples generated from good regions, the whole space, and bad regions. From
+
+
+-----
+
+the figure, we can see that the hypervolume of samples generated from good regions are significantly
+higher than others.
+
+I COMPUTATIONAL COMPLEXITY ANALYSIS OF LAMOO
+
+
+Here is a detailed breakdown of the computational complexity of our algorithm (Alg. 1)
+
+Line.6: Compute dominance: O(MNnode2) where Nnode is the number of samples in the node and
+_M is the number of dimensions._
+
+
+Line 7: Time complexity of SVM : O(Nnode2) where Nnode is the number of samples in the node.
+
+_M_
+Line 10: Hypervolume: _O(N_ 2 + N log N )(M _>_ 3) (Beume & Rudolph, 2006) or
+
+_O(N log N_ )(M ≤ 3) (Beume et al., 2009), where N is number of searched samples in total and D is
+the number of dimensions.
+
+Total time complexity: _i=1_ _[O][(][N][i]2)(M < 3), where t is the total number of nodes._ _ti=1_ _[O][(][N]_ _M2 +_
+
+_Ni log Ni) (M > 3), where t is the total number of nodes._
+
+When there are more than 3 objectives ([P][t] _M > 3), HV computation is the dominant factor. When[P]_
+_M ≤_ 3, the optimization cost of SVM is the dominant factor.
+
+
+J VARIATION OF LAMOO WITH A CHEAPER OVERHEAD
+
+**Algorithm 3 LaMOO Pseudocode with leaf based selection.**
+
+
+1: Inputs: Initial D0 from uniform sampling, sample budget T .
+2: for t = 0, . . ., T do
+3: Set L ←{Ωroot} (collections of regions to be split).
+
+4: **while L ̸= ∅** **do**
+
+5:6: ΩCompute dominance numberj ← pop_first_element(L o), Dt,j oft,j D ←t,j using Eqn. 5 and train SVM modelDt ∩ Ωj, nt,j ←|Dt,j|. _h(·)._
+
+7: **If (Dt,j, ot,j) is splittable by SVM, then L ←L ∪** Partition(Ωj, h(·)).
+
+8: **end while**
+
+9: **for k = root, k is not leaf node do**
+
+10: _Dt,k_ _Dt_ Ωk, _nt,k_ _Dt,k_ .
+
+11: **end for** _←_ _∩_ _←|_ _|_
+
+12: **for l is leaf node do**
+
+13: _vt,l_ HyperVolume(Dt,l)
+
+14: **end for ←**
+
+15: _k ←_ arg _l ∈_ leaf nodesmax [UCB][t,l][, where][ UCB][t,l][ :=][ v][t,l][ + 2][C][p] 2 log(nt,pnt,l), where p is the parent of l.
+
+17:16: end forDt+1 ← _Dt ∪_ _Dnew, where Dnew is drawn from Ωk based on qEHVI or CMA-ES.q_
+
+
+LaMOO LaMOO with leaf selection 2.0 LaMOO LaMOO with leaf selection LaMOO LaMOO with leaf selection
+
+1.5 0.0
+
+1.5
+
+1.0 0.2
+
+1.0
+
+0.5 0.4
+
+0.5
+
+Log Hypervolume Diff0.0 Log Hypervolume Diff Log Hypervolume Diff 0.6
+
+0.0
+
+20 40 60 80 100 20 40 60 80 100 20 40 60 80 100
+
+Samples Samples Samples
+
+
+(a) BraninCurrin
+
+
+(b) VehicleSafety
+
+Figure 15: Search progress with sample
+
+
+(c) Nasbench201
+
+
+-----
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+0.0
+
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+0.0
+
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+|qE|HVI+LaMOO LaMOO leaf selection|
+|---|---|
+
+|qEH|VI+LaMOO LaMOO leaf selection|
+|---|---|
+
+|Col1|qEHVI+LaMOO LaMOO leaf selection|
+|---|---|
+
+
+0 50 100 150 200 250
+
+qEHVI+LaMOO LaMOO leaf selection
+
+Average Cumulative Wall Clock Time(s)
+
+(a) BraninCurrin
+
+
+0 250 500 750 1000
+
+qEHVI+LaMOO LaMOO leaf selection
+
+Average Cumulative Wall Clock Time(s)
+
+(b) VehicleSafety
+
+
+0 100 200 300 400
+
+qEHVI+LaMOO LaMOO leaf selection
+
+Average Cumulative Wall Clock Time(s)
+
+(c) Nasbench201
+
+
+Figure 16: Search progress with time
+
+Instead of traversing down the search tree to trace the current most promising search path, this
+variation of LaMOO directly select the leaf node with the highest UCB value. Algorithm. 3 illustrates
+the detail of this variation. Therefore, this variation avoids calculating the hypervolume in the
+non-leaf nodes of the tree, where hypervolume calculation is the main computational cost of LaMOO
+especially in many-objective problems. Figure. 15 and figure. 16 validate the variation that is able
+to reach similar performance of searched samples but saves lots of time. We leave the validation of
+others problems in the future works.
+
+
+K ADDITIONAL RELATED WORKS
+
+(Hashimoto et al., 2018a; Kumar et al., 2018; Hashimoto et al., 2018b) indeed leverage classifiers to
+partition search space and draw the new samples from the good region. However, (Hashimoto et al.,
+2018a; Kumar et al., 2018; Hashimoto et al., 2018b) randomly sampled in selected regions without
+integrating existing optimizers (e.g. Bayesian optimization, evolutionary algorithms). In addition,
+they progressively select the good regions without a trade-off of exploration and exploitation as we
+did by leveraging Monte Carlo Tree Search (MCTS). (Munos, 2011a; Wang et al., 2014; Kawaguchi
+et al., 2015) can be seen as the first work to use MCTS to build hierarchical space partitions. But
+their partitions are predefined (e.g., Voronoi graph, axis-aligned partition, etc) without learning
+(or adapting to) observed samples so far, except for (Wang et al., 2019; 2020; Yang et al., 2021),
+which are learning extensions coupled with MCTS. However, they all deal with single-objective
+optimization.
+
+For multi-objective optimization, (Loshchilov et al., 2010; Seah et al., 2012; Pan et al., 2019) learns
+to predict the dominance rank of samples, without computing them algorithmic-ally, a slow process
+with many previous samples, in order to speed up the MOEAs algorithms. Unlike our paper, they
+do not partition the search space into good/bad regions. In contrast, LaMOO computes the rank
+algorithmic-ally. Therefore, our contributions are complementary to theirs. We leave a combination
+of both as one of the future works.
+
+LaMOO V.S. LaMCTS/LaNAS: First, the mechanism of the partitioning of the search space is
+different. LaMOO uses dominance rank to separate good from bad regions, while LaMCTS uses
+a k-mean for region separation. LaNAS is even more simple: it uses the median from the single
+objectives of currently collected samples and a linear classifier to separate regions.
+
+LaMOO V.S. LaP[3]: LAP[3] is a planning algorithm tailored to RL with a single objective function.
+LAP[3] also utilizes the representation learning for the partition space and planning space, while our
+LaMOO doesn’t.
+
+
+-----
+

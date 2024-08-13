@@ -1,0 +1,2158 @@
+## EFFICIENT AND MODULAR IMPLICIT DIFFERENTIATION
+
+**Anonymous authors**
+Paper under double-blind review
+
+ABSTRACT
+
+Automatic differentiation (autodiff) has revolutionized machine learning. It allows
+expressing complex computations by composing elementary ones in creative ways
+and removes the burden of computing their derivatives by hand. More recently,
+differentiation of optimization problem solutions has attracted widespread attention
+with applications such as optimization layers, and in bi-level problems such as
+hyper-parameter optimization and meta-learning. However, so far, implicit differentiation remained difficult to use for practitioners, as it often required case-by-case
+tedious mathematical derivations and implementations. In this paper, we propose
+an efficient and modular approach for implicit differentiation of optimization problems. In our approach, the user defines directly in Python a function F capturing
+the optimality conditions of the problem to be differentiated. Once this is done, we
+leverage autodiff of F and implicit differentiation to automatically differentiate the
+optimization problem. Our approach thus combines the benefits of implicit differentiation and autodiff. It is efficient as it can be added on top of any state-of-the-art
+solver and modular as the optimality condition specification is decoupled from
+the implicit differentiation mechanism. We show that seemingly simple principles
+allow to recover many existing implicit differentiation methods and create new ones
+easily. We demonstrate the ease of formulating and solving bi-level optimization
+problems using our framework. We also showcase an application to the sensitivity
+analysis of molecular dynamics.
+
+1 INTRODUCTION
+
+Automatic differentiation (autodiff) is now an inherent part of machine learning software. It allows
+to express complex computations by composing elementary ones in creative ways and removes the
+tedious burden of computing their derivatives by hand. In parallel, the differentiation of optimization
+problem solutions has found many applications. A classical example is bi-level optimization, which
+typically involves computing the derivatives of a nested optimization problem in order to solve an
+outer one. Examples of applications in machine learning include hyper-parameter optimization
+(Chapelle et al., 2002; Seeger, 2008; Pedregosa, 2016; Franceschi et al., 2017; Bertrand et al., 2020;
+2021), neural networks (Lorraine et al., 2020), and meta-learning (Franceschi et al., 2018; Rajeswaran
+et al., 2019). Another line of active research involving differentiation of optimization problem
+solutions are optimization layers (Kim et al., 2017; Amos & Kolter, 2017; Niculae & Blondel, 2017;
+Djolonga & Krause, 2017; Gould et al., 2019), which can be used to encourage structured outputs,
+and implicit deep networks (Bai et al., 2019; El Ghaoui et al., 2019), which have a smaller memory
+footprint than backprop-trained networks.
+
+Since optimization problem solutions typically do not enjoy an explicit formula in terms of their
+inputs, autodiff cannot be used directly to differentiate these functions. In recent years, two main
+approaches have been developed to circumvent this problem. The first one consists of unrolling the
+iterations of an optimization algorithm and using the final iteration as a proxy for the optimization
+problem solution (Wengert, 1964; Domke, 2012; Deledalle et al., 2014; Franceschi et al., 2018;
+Ablin et al., 2020). This allows to explicitly construct a computational graph relating the algorithm
+output to the inputs, on which autodiff can then be used transparently. However, this requires a
+reimplementation of the algorithm using the autodiff system, and not all algorithms are necessarily
+autodiff friendly. Moreover, forward-mode autodiff has time complexity that scales linearly with
+the number of variables and reverse-mode autodiff has memory complexity that scales linearly
+with the number of algorithm iterations. In contrast, a second approach consists in implicitly
+relating an optimization problem solution to its inputs using optimality conditions. In a machine
+learning context, such implicit differentiation has been used for stationarity conditions (Bengio, 2000;
+
+
+-----
+
+Lorraine et al., 2020), KKT conditions (Chapelle et al., 2002; Gould et al., 2016; Amos & Kolter,
+2017; Niculae et al., 2018; Niculae & Martins, 2020) and the proximal gradient fixed point (Niculae
+& Blondel, 2017; Bertrand et al., 2020; 2021). An advantage of implicit differentiation is that a
+solver reimplementation is not needed, allowing to build upon decades of state-of-the-art software.
+Although implicit differentiation has a long history in numerical analysis (Griewank & Walther,
+2008; Bell & Burke, 2008; Krantz & Parks, 2012; Bonnans & Shapiro, 2013), so far, it remained
+difficult to use for practitioners, as it required a case-by-case tedious mathematical derivation and
+implementation. CasADi (Andersson et al., 2019) allows to differentiate various optimization and
+root finding problem algorithms provided by the library. However, it does not allow to easily add
+implicit differentiation on top of existing solvers from optimality conditions expressed by the user, as
+we do. A recent tutorial explains how to implement implicit differentiation in JAX (Duvenaud et al.,
+2020). However, the tutorial requires the user to take care of low-level technical details and does
+not cover a large catalog of optimality condition mappings as we do. Other work (Agrawal et al.,
+2019a) attempts to address this issue by adding implicit differentiation on top of cvxpy (Diamond
+& Boyd, 2016). This works by reducing all convex optimization problems to a conic program and
+using conic programming’s optimality conditions to derive an implicit differentiation formula. While
+this approach is very generic, solving a convex optimization problem using a conic programming
+solver—an ADMM-based splitting conic solver (O’Donoghue et al., 2016) in the case of cvxpy—is
+rarely the state-of-the-art approach for each particular problem instance.
+
+In this work, we adopt a different strategy that makes it easy to add implicit differentiation on top
+of any existing solver. In our approach, the user defines directly in Python a mapping function
+_F capturing the optimality conditions of the problem solved by the algorithm. Once this is done,_
+we leverage autodiff of F combined with implicit differentiation to automatically differentiate the
+optimization problem solution. In this way, our approach is generic, yet it can exploit the efficiency
+of state-of-the-art solvers. It therefore combines the benefits of implicit differentiation and autodiff.
+To summarize, we make the following contributions.
+
+-  We describe our framework and its JAX implementation (provided in the supplementary material).
+Our framework significantly lowers the barrier to use implicit differentiation thanks to the use
+of autodiff of the optimality conditions and the seamless integration in JAX. Our framework
+significantly extends JAX for numerical optimization, with low-level details all abstracted away.
+
+-  We instantiate our framework on a large catalog of optimality conditions (Table 1), recovering
+existing schemes and obtaining new ones, such as the mirror descent fixed point based one.
+
+-  On the theoretical side, we provide new bounds on the Jacobian error when the optimization
+problem is only solved approximately, and empirically validate them.
+
+-  We implement four illustrative applications, demonstrating our framework’s ease of use.
+
+Beyond our software implementation, we hope this paper provides a self-contained blueprint for
+creating an efficient and modular implementation of implicit differentiation.
+
+**Notation.** We denote the gradient and Hessian of f : R[d] _→_ R evaluated at x ∈ R[d] by ∇f (x) ∈ R[d]
+and ∇[2]f (x) ∈ R[d][×][d]. We denote the Jacobian of F : R[d] _→_ R[p] evaluated at x ∈ R[d] by ∂F (x) ∈
+R[p][×][d]. When f or F have several arguments, we denote the gradient, Hessian and Jacobian in
+the i[th] argument by ∇i, ∇i[2] [and][ ∂][i][, respectively. The standard probability simplex is denoted by]
+_△[d]_ := {x ∈ R[d] : ∥x∥1 = 1, x ≥ 0}. For any set C ⊂ R[d], we denote the indicator function
+_I_ : R[d] R + where I (x) = 0 if x, I (x) = + otherwise. For a vector or matrix A,
+_C_ _→_ _∪{_ _∞}_ _C_ _∈C_ _C_ _∞_
+we note ∥A∥ the Frobenius (or Euclidean) norm, and ∥A∥op the operator norm.
+
+2 COMBINING IMPLICIT DIFFERENTIATION AND AUTODIFF
+
+2.1 GENERAL PRINCIPLES
+
+**Overview.** Contrary to autodiff through unrolled algorithm iterations, implicit differentiation
+typically involves a manual, sometimes complicated, mathematical derivation. For instance, numerous
+works (Chapelle et al., 2002; Gould et al., 2016; Amos & Kolter, 2017; Niculae et al., 2018; Niculae
+& Martins, 2020) use Karush–Kuhn–Tucker (KKT) conditions in order to relate a constrained
+optimization problem’s solution to its inputs, and to manually derive a formula for its derivatives.
+The derivation and implementation in these works are always case-by-case.
+
+
+-----
+
+```
+ X_train, y_train = load_data() # Load features and labels
+ def f(x, theta): # Objective function
+  residual = jnp.dot(X_train, x) - y_train
+  return (jnp.sum(residual ** 2) + theta * jnp.sum(x ** 2)) / 2
+ # Since f is differentiable and unconstrained, the optimality
+ # condition F is simply the gradient of f in the 1st argument
+ F = jax.grad(f, argnums=0)
+ @custom_root(F)
+ def ridge_solver(init_x, theta):
+  del init_x # Initialization not used in this solver
+  XX = jnp.dot(X_train.T, X_train)
+  Xy = jnp.dot(X_train.T, y_train)
+  I = jnp.eye(X_train.shape[1]) # Identity matrix
+  # Finds the ridge reg solution by solving a linear system
+  return jnp.linalg.solve(XX + theta * I, Xy)
+ init_x = None
+ print(jax.jacobian(ridge_solver, argnums=1)(init_x, 10.0))
+
+```
+
+Figure 1: Adding implicit differentiation on top of a ridge regression solver. The function f (x, θ)
+defines the objective function and the mapping F, here simply equation (4), captures the optimality
+conditions. Our decorator @custom_root automatically adds implicit differentiation to the solver
+for the user, overriding JAX’s default behavior. The last line evaluates the Jacobian at θ = 10.
+
+In this work, we propose a generic way to easily add implicit differentiation on top of existing solvers.
+In our approach, the user defines directly in Python a mapping function F capturing the optimality
+conditions of the problem solved by the algorithm. We provide reusable building blocks to easily
+express such F . The provided F is then plugged into our Python decorator @custom_root, which
+we append on top of the solver declaration we wish to differentiate. Under the hood, we combine
+implicit differentiation and autodiff of F to automatically differentiate the optimization problem
+solution. A simple illustrative example is given in Figure 1.
+
+**Differentiating a root.** Let F : R[d]×R[n] _→_ R[d] be a user-provided mapping, capturing the optimality
+conditions of a problem. An optimal solution, denoted x[⋆](θ), should be a root of F :
+_F_ (x[⋆](θ), θ) = 0 . (1)
+We can see x[⋆](θ) as an implicitly defined function of θ ∈ R[n], i.e., x[⋆] : R[n] _→_ R[d]. More precisely,
+from the implicit function theorem (Griewank & Walther, 2008; Krantz & Parks, 2012), we know
+that for (x0, θ0) satisfying F (x0, θ0) = 0 with a continuously differentiable F, if the Jacobian ∂1F
+evaluated at (x0, θ0) is a square invertible matrix, then there exists a function x[⋆]( ) defined on a
+
+_·_
+neighborhood of θ0 such that x[⋆](θ0) = x0. Furthermore, for all θ in this neighborhood, we have that
+_F_ (x[⋆](θ), θ) = 0 and ∂x[⋆](θ) exists. Using the chain rule, the Jacobian ∂x[⋆](θ) satisfies
+_∂1F_ (x[⋆](θ), θ)∂x[⋆](θ) + ∂2F (x[⋆](θ), θ) = 0 .
+Computing ∂x[⋆](θ) therefore boils down to the resolution of the linear system of equations
+_∂1F_ (x[⋆](θ), θ) _∂x[⋆](θ)_ = ∂2F (x[⋆](θ), θ) _._ (2)
+_−_
+_A∈R[d][×][d]_ _J∈R[d][×][n]_ _B∈R[d][×][n]_
+
+When (1) is a one-dimensional root finding problem (d = 1), (2) becomes particularly simple since
+
+| {z } | {z } | {z }
+
+we then have ∇x[⋆](θ) = B[⊤]/A, where A is a scalar value.
+
+We will show that existing and new implicit differentiation methods all reduce to this simple principle.
+We call our approach hybrid, since it combines implicit differentiation (and as such requires solving a
+linear system) with autodiff of the optimality conditions F . Our approach is efficient as it can be
+added on top of any state-of-the-art solver and modular as the optimality condition specification is
+**decoupled from the implicit differentiation mechanism. This contrasts with existing works, where**
+the mathematical derivation and implementation are specific to each optimality condition.
+
+**Differentiating a fixed point.** We will encounter numerous applications where x[⋆](θ) is implicitly
+defined through a fixed point:
+_x[⋆](θ) = T_ (x[⋆](θ), θ),
+
+
+-----
+
+where T : R[d] _× R[n]_ _→_ R[d]. This can be seen as a particular case of (1) by defining the residual
+
+_F_ (x, θ) = T (x, θ) − _x ._ (3)
+
+In this case, using the chain rule, we have
+
+_A =_ _∂1F_ (x[⋆](θ), θ) = I _∂1T_ (x[⋆](θ), θ) and _B = ∂2F_ (x[⋆](θ), θ) = ∂2T (x[⋆](θ), θ).
+_−_ _−_
+
+**Computing JVPs and VJPs.** In most practical scenarios, it is not necessary to explicitly form
+the Jacobian matrix, and instead it is sufficient to left-multiply or right-multiply by ∂1F and ∂2F .
+These are called vector-Jacobian product (VJP) and Jacobian-vector product (JVP), and are useful for
+integrating x[⋆](θ) with reverse-mode and forward-mode autodiff, respectively. Oftentimes, F will be
+explicitly defined. In this case, computing the VJP or JVP can be done via autodiff. In some cases, F
+may itself be implicitly defined, for instance when F involves the solution of a variational problem.
+In this case, computing the VJP or JVP will itself involve implicit differentiation.
+
+The right-multiplication (JVP) between J = ∂x[⋆](θ) and a vector v, Jv, can be computed efficiently
+by solving A(Jv) = Bv. The left-multiplication (VJP) of v[⊤] with J, v[⊤]J, can be computed by first
+solving A[⊤]u = v. Then, we can obtain v[⊤]J by v[⊤]J = u[⊤]AJ = u[⊤]B. Note that when B changes
+but A and v remain the same, we do not need to solve A[⊤]u = v once again. This allows to compute
+the VJP w.r.t. different variables while solving only one linear system.
+
+To solve these linear systems, we can use the conjugate gradient method (Hestenes et al., 1952) when
+_A is symmetric positive semi-definite and GMRES (Saad & Schultz, 1986) or BiCGSTAB (Vorst &_
+van der Vorst, 1992) otherwise. These algorithms are all matrix-free: they only require matrix-vector
+products. Thus, all we need from F is its JVPs or VJPs. An alternative to GMRES/BiCGSTAB is to
+solve the normal equation AA[⊤]u = Av using conjugate gradient. We implement this using JAX’s
+automatic transpose routine jax.linear_transpose (Frostig et al., 2021).
+
+**Pre-processing and post-processing mappings.** Oftentimes, the goal is not to differentiate θ per
+se, but the parameters of a function producing θ. One example of such pre-processing is to convert the
+parameters to be differentiated from one form to another canonical form, such as a quadratic program
+(Amos & Kolter, 2017) or a conic program (Agrawal et al., 2019a). Another example is when x[⋆](θ)
+is used as the output of a neural network layer, in which case θ is produced by the previous layer.
+Likewise, x[⋆](θ) will often not be the final output we want to differentiate. One example of such
+post-processing is when x[⋆](θ) is the solution of a dual program and we apply the dual-primal mapping
+to recover the solution of the primal program. Another example is the application of a loss function,
+in order to reduce x[⋆](θ) to a scalar value. We leave the differentiation of such pre/post-processing
+mappings to the autodiff system, allowing to compose functions in complex ways.
+
+**Implementation details.** When a solver function is decorated with @custom_root, we use
+jax.custom_jvp and jax.custom_vjp to automatically add custom JVP and VJP rules to
+the function, overriding JAX’s default behavior. As mentioned above, we use linear system solvers
+based on matrix-vector products and therefore we only need access to F through the JVP or VJP
+with ∂1F and ∂2F . This is done by using jax.jvp and jax.vjp, respectively. Note that, as
+in Figure 1, the definition of F will often include a gradient mapping 1f (x, θ). Thankfully,
+_∇_
+JAX supports second-order derivatives transparently. For convenience, our library also provides a
+@custom_fixed_point decorator, for adding implicit differentiation on top of a solver, given a
+fixed point iteration T ; see code examples in Appendix A.
+
+2.2 EXAMPLES
+
+We now give various examples of mapping F or fixed point iteration T, recovering existing implicit
+differentiation methods and creating new ones. Each choice of F or T implies different trade-offs in
+terms of computational oracles; see Table 1. Source code examples are given in Appendix A.
+
+**Stationary point condition.** The simplest example is to differentiate through the implicit function
+
+_x[⋆](θ) = argmin_
+_x_ R[d][ f] [(][x, θ][)][,]
+_∈_
+
+where f : R[d] _× R[n]_ _→_ R is twice differentiable. In this case, F is simply the gradient mapping
+
+_F_ (x, θ) = 1f (x, θ). (4)
+_∇_
+
+
+-----
+
+Table 1: Summary of optimality condition mappings. Oracles are accessed through their JVP or VJP.
+
+Name Equation Solution needed Oracles needed
+
+Stationary (4), (5) Primal _∇1f_
+KKT (6) Primal and dual _∇1f_, H, G, ∂1H, ∂1G
+Proximal gradient (7) Primal 1f, proxηg
+_∇_
+Projected gradient (9) Primal 1f, proj
+_∇_ _C_
+Mirror descent (11) Primal 1f, proj[ϕ]
+_∇_ _C_ [,][ ∇][ϕ]
+Newton (14) Primal [∇1[2][f] [(][x, θ][)]][−][1][,][ ∇]1[f] [(][x, θ][)]
+Block proximal gradient (15) Primal [ 1f ]j, [proxηg]j
+_∇_
+Conic programming (18) Residual map root projRp×K∗×R+
+
+We then have ∂1F (x, θ) = ∇1[2][f] [(][x, θ][)][ and][ ∂][2][F] [(][x, θ][) =][ ∂][2][∇][1][f] [(][x, θ][)][, the Hessian of][ f][ in its first]
+argument and the Jacobian in the second argument of 1f (x, θ). In practice, we use autodiff to
+_∇_
+compute Jacobian products automatically. Equivalently, we can use the gradient descent fixed point
+
+_T_ (x, θ) = x _η_ 1f (x, θ), (5)
+_−_ _∇_
+
+for all η > 0. Using (3), it is easy to check that we obtain the same linear system since η cancels out.
+
+**KKT conditions.** We now show that the KKT conditions, manually differentiated in several works
+(Chapelle et al., 2002; Gould et al., 2016; Amos & Kolter, 2017; Niculae et al., 2018; Niculae &
+Martins, 2020), fit our framework. As we will see, the key will be to group the optimal primal and
+dual variables as our x[⋆](θ). Let us consider the general problem
+
+argminz∈R[p] _f_ (z, θ) subject to _G(z, θ) ≤_ 0, H(z, θ) = 0,
+
+where z ∈ R[p] is the primal variable, f : R[p] _× R[n]_ _→_ R, G : R[p] _× R[n]_ _→_ R[r] and H : R[p] _× R[n]_ _→_ R[q].
+The stationarity, primal feasibility and complementary slackness conditions give
+
+1f (z, θ) + [∂1G(z, θ)][⊤]λ + [∂1H(z, θ)][⊤]ν = 0
+_∇_
+_H(z, θ) = 0_
+_λ ◦_ _G(z, θ) = 0,_ (6)
+
+where ν ∈ R[q] and λ ∈ R[r]+ [are the dual variables, also known as KKT multipliers. The primal]
+and dual feasibility conditions can be ignored almost everywhere. The system of (potentially
+nonlinear) equations (6) fits our framework, as we can group the primal and dual solutions as
+_x[⋆](θ) = (z[⋆](θ), ν[⋆](θ), λ[⋆](θ)) to form the root of a function F_ (x[⋆](θ), θ), where F : R[d] _× R[n]_ _→_ R[d]
+and d = p + q + r. The primal and dual solutions can be obtained from a generic solver, such as
+an interior point method. In practice, the above mapping F will be defined directly in Python (see
+Figure 7 in Appendix A) and F will be differentiated automatically via autodiff.
+
+**Proximal gradient fixed point.** Unfortunately, not all algorithms return both primal and dual
+solutions. Moreover, if the objective contains non-smooth terms, proximal gradient descent may be
+more efficient. We now discuss its fixed point (Niculae & Blondel, 2017; Bertrand et al., 2020; 2021).
+Let x[⋆](θ) be implicitly defined as
+
+_x[⋆](θ) := argmin_
+_x_ R[d][ f] [(][x, θ][) +][ g][(][x, θ][)][,]
+_∈_
+
+where f : R[d] _× R[n]_ _→_ R is twice-differentiable convex and g : R[d] _× R[n]_ _→_ R is convex but possibly
+non-smooth. Let us define the proximity operator associated with g by
+
+1
+proxg(y, θ) := argmin 2 [+][ g][(][x, θ][)][.]
+_x∈R[d]_ 2 _[∥][x][ −]_ _[y][∥][2]_
+
+To implicitly differentiate x[⋆](θ), we use the fixed point mapping (Parikh & Boyd, 2014, p.150)
+
+
+_T_ (x, θ) = proxηg(x _η_ 1f (x, θ), θ), (7)
+_−_ _∇_
+
+for any step size η > 0. The proximity operator is 1-Lipschitz continuous (Moreau, 1965). By
+Rademacher’s theorem, it is differentiable almost everywhere. Many proximity operators enjoy a
+closed form and can easily be differentiated, as discussed in Appendix B.
+
+
+-----
+
+**Projected gradient fixed point.** As a special case, when g(x, θ) is the indicator function IC(θ)(x),
+where C(θ) is a convex set depending on θ, we obtain
+
+_x[⋆](θ) = argmin_ _f_ (x, θ). (8)
+_x∈C(θ)_
+
+The proximity operator proxg becomes the Euclidean projection onto C(θ)
+
+proxg(y, θ) = projC(y, θ) := argminx∈C(θ) _∥x −_ _y∥2[2]_
+
+and (7) becomes the projected gradient fixed point
+
+_T_ (x, θ) = projC(x − _η∇1f_ (x, θ), θ). (9)
+
+Compared to the KKT conditions, this fixed point is particularly suitable when the projection enjoys
+a closed form. We discuss how to compute the JVP / VJP for a wealth of convex sets in Appendix B.
+
+**Mirror descent fixed point.** We again consider the case when x[⋆](θ) is implicitly defined as the
+solution of (8). We now generalize the projected gradient fixed point beyond Euclidean geometry.
+Let the Bregman divergence Dϕ : dom(ϕ) × relint(dom(ϕ)) → R+ generated by ϕ be defined by
+
+_Dϕ(x, y) := ϕ(x)_ _ϕ(y)_ _ϕ(y), x_ _y_ _._
+_−_ _−⟨∇_ _−_ _⟩_
+
+We define the Bregman projection of y onto C(θ) ⊆ dom(ϕ) by
+
+proj[ϕ]C [(][y, θ][) := argmin]x∈C(θ) _Dϕ(x, ∇ϕ[∗](y))._ (10)
+
+Definition (10) includes the mirror map ∇ϕ[∗](y) for convenience. It can be seen as a mapping from
+R[d] to dom(ϕ), ensuring that (10) is well-defined. The mirror descent fixed point mapping is then
+
+_xˆ = ∇ϕ(x)_
+_y = ˆx_ _η_ 1f (x, θ)
+_−_ _∇_
+
+_T_ (x, θ) = proj[ϕ] (11)
+_C_ [(][y, θ][)][.]
+
+Because T involves the composition of several functions, manually deriving its JVP/VJP is error
+prone. This shows that our approach leveraging autodiff allows to handle more advanced fixed point
+mappings. A common example of ϕ is ϕ(x) = ⟨x, log x − **1⟩, where dom(ϕ) = R[d]+[. In this case,]**
+_Dϕ is the Kullback-Leibler divergence. An advantage of the Kullback-Leibler projection is that it_
+sometimes easier to compute than the Euclidean projection, as we detail in Appendix B.
+
+**Other fixed points.** More fixed points are described in Appendix C.
+
+3 JACOBIAN PRECISION GUARANTEES
+
+In practice, either by the limitations of finite precision arithmetic or because we perform a finite
+number of iterations, we rarely reach the exact solution x[⋆](θ), but instead only reach an approximate
+solution ˆx and apply the implicit differentiation equation (2) at this approximate solution. This
+motivates the need for precision guarantees of this approach. We introduce the following formalism.
+**Definition 1. Let F : R[d]** _× R[n]_ _→_ R[d] _be an optimality criterion mapping. Let A := −∂1F_
+_and B := ∂2F_ _. We define the Jacobian estimate at (x, θ) as the solution to the linear equation_
+_A(x, θ)J(x, θ) = B(x, θ). It is a function J : R[d]_ _× R[n]_ _→_ R[d][×][n].
+
+It holds by construction that J(x[⋆](θ), θ) = ∂x[⋆](θ). Computing J(ˆx, θ) for an approximate solution
+_xˆ of x[⋆](θ) therefore allows to approximate the true Jacobian ∂x[⋆](θ). In practice, an algorithm used_
+to solve (1) depends on θ. Note however that, what we compute is not the Jacobian of ˆx(θ), unlike
+works differentiating through unrolled algorithm iterations, but an estimate of ∂x[⋆](θ). We therefore
+use the notation ˆx, leaving the dependence on θ implicit.
+
+We develop bounds of the form ∥J(ˆx, θ) − _∂x[⋆](θ)∥_ _< C∥xˆ −_ _x[⋆](θ)∥, hence showing that the error_
+on the estimated Jacobian is at most of the same order as that of ˆx as an approximation of x[⋆](θ).
+These bounds are based on the following main theorem, whose proof is included in Appendix D.
+
+
+-----
+
+**Theorem 1 (Jacobian estimate). Let F : R[d]** _× R[n]_ _→_ R[d]. Assume that there exist α, β, γ, ε, R > 0
+_such that A = −∂1F and B = ∂2F satisfy, for all v ∈_ R[d], θ ∈ R[n] _and x such that ∥x_ _−_ _x[⋆](θ)∥≤_ _ε:_
+
+_A is well-conditioned, Lipschitz: ∥A(x, θ)v∥≥_ _α∥v∥_ _, ∥A(x, θ) −_ _A(x[⋆](θ), θ)∥op ≤_ _γ∥x −_ _x[⋆](θ)∥._
+
+_B is bounded and Lipschitz: ∥B(x[⋆](θ), θ)∥≤_ _R, ∥B(x, θ) −_ _B(x[⋆](θ), θ)∥≤_ _β∥x −_ _x[⋆](θ)∥._
+
+_Under these conditions, when ∥xˆ −_ _x[⋆](θ)∥≤_ _ε, we have_
+
+_∥J(ˆx, θ) −_ _∂x[⋆](θ)∥≤_ _βα[−][1]_ + γRα[−][2][] _∥xˆ −_ _x[⋆](θ)∥_ _._
+ 
+
+This result is inspired by (Higham, 2002, Theorem 7.2), that is concerned with the stability of
+solutions to inverse problems. Here we consider that A(·, θ) is uniformly well-conditioned, rather
+than only at x[⋆](θ). This does not affect the first order in ε of this bound, and makes it valid for all ˆx.
+It is also more tailored to applications to equation-specific cases.
+
+Indeed, Theorem 1 can be applied to specific cases. In particular, for the gradient descent fixed point,
+where T (x, θ) = x _η_ 1f (x, θ) and F (x, θ) = T (x, θ) _x, this yields_
+_−_ _∇_ _−_
+
+_A(x, θ) = η∇1[2][f]_ [(][x, θ][)][ and][ B][(][x, θ][) =][ −][η∂][2][∇][1][f] [(][x, θ][)][ .]
+
+The guarantees on Jacobian precision under regularity conditions rely on f directly; see Corollary 1
+in Appendix D. This reveals in particular that Jacobian estimation by implicit differentiation gains
+**a factor of t compared to automatic differentiation, after t iterations of gradient descent in the**
+strongly-convex setting (Ablin et al., 2020, Proposition 3.2). While our guarantees concern the
+Jacobian of x[⋆](θ), we note that other studies (Grazzi et al., 2020; Ji et al., 2021; Bertrand et al., 2021)
+give guarantees on hypergradients (i.e., the gradient of an outer objective).
+
+
+We illustrate these results on ridge regression, where
+_xhas the merit that the solution[⋆](θ) = argminx ∥Φx −_ _y∥2[2]_ [+] x[ P][⋆](iθ[θ])[i] and its Jacobian[x]i[2][. This problem]
+
+_∂x[⋆](θ) are available in closed form. By running gradient_
+descent for t iterations, we obtain an estimate ˆx of x[⋆](θ)
+and an estimate J(ˆx, θ) of ∂x[⋆](θ); cf. Definition 1. By
+doing so for different numbers of iterations t, we can
+graph the relation between the error ∥x[⋆](θ) − _xˆ∥2 and_
+the error _∂x[⋆](θ)_ _J(ˆx, θ)_ 2, as shown in Figure 2,
+_∥_ _−_ _∥_
+empirically validating Theorem 1. The results in Figure 2
+were obtained using the diabetes dataset from Efron et al.
+(2004), with other datasets yielding a qualitatively similar
+behavior. We derive similar guarantees in Corollary 2 in
+Appendix D for proximal gradient descent.
+
+4 EXPERIMENTS
+
+
+2.5
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+0.0
+
+
+|Col1|Col2|Col3|Col4|Col5|Col6|Col7|Col8|Col9|
+|---|---|---|---|---|---|---|---|---|
+||||||||||
+||||||||||
+||||||||||
+||||||||||
+|||||||Implicit Unrolling|diff||
+||||||||||
+||||||||| x ( )|| Theoreti|2 cal boun|d|
+
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0
+
+||x ( ) x||2
+
+
+Figure 2: Jacobian estimate errors. Empirical error of implicit differentiation follows closely the theoretical upper bound.
+Unrolling achieves a much worse error
+for comparable iterate error.
+
+
+To conclude this work, we demonstrate the ease of solving bi-level optimization problems with our
+framework. We also present an application to the sensitivity analysis of molecular dynamics.
+
+4.1 HYPERPARAMETER OPTIMIZATION OF MULTICLASS SVMS
+
+
+In this example, we consider the hyperparameter optimization of multiclass SVMs (Crammer &
+Singer, 2001) trained in the dual. Here, x[⋆](θ) is the optimal dual solution, a matrix of shape
+_m × k, where m is the number of training examples and k is the number of classes, and θ ∈_ R+
+is the regularization parameter. The challenge in differentiating x[⋆](θ) is that each row of x[⋆](θ) is
+constrained to belong to the probability simplexfeature matrix and Ytr 0, 1 be the training labels (in row-wise one-hot encoding). Let △[k]. More formally, let Xtr ∈ R[m][×][p] be the training
+_W_ (x, θ) := Xtr[⊤][(][Y][tr] _∈{_ _}[m][×][k]_
+bi-level optimization problem[−] _[x][)][/θ][ ∈]_ [R][p][×][k][ be the dual-primal mapping. Then, we consider the following]
+
+
+subject to _x[⋆](θ) = argmin_ _f_ (x, θ) := _[θ]_ _F_ [+][ ⟨][x, Y]tr[⟩]
+_x∈C_ 2 _[∥][W]_ [(][x, θ][)][∥][2]
+
+inner problem
+| {z }
+
+
+1
+min _F_
+_θ=exp(λ)_ 2 _[∥][X][val][W]_ [(][x][⋆][(][θ][)][, θ][)][ −] _[Y][val][∥][2]_
+
+outer problem
+| {z
+
+
+-----
+
+Proximal gradient (PG)
+
+|Unr Impl|olling icit diff (I|D)|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+Implicit diff (ID)
+
+Number of features
+
+
+Block coordinate descent (BCD)
+
+|Unr ID w|olling / MD fixe|d point|Col4|Col5|Col6|
+|---|---|---|---|---|---|
+|ID w|/ PG fixed|point||||
+|||||||
+|||||||
+|||||||
+|||||||
+
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+ID w/ MD fixed point
+ID w/ PG fixed point
+
+Number of features
+
+
+Mirror descent (MD)
+
+
+500
+
+400
+
+300
+
+200
+
+100
+
+
+500
+
+400
+
+300
+
+200
+
+100
+
+
+150
+
+100
+
+50
+
+
+2000 4000 6000 8000 10000
+
+|Unr Impl|olling icit diff (I|D)|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+||||||||
+||||||||
+||||||||
+
+
+Unrolling
+Implicit diff (ID)
+
+Number of features
+
+(a)
+
+
+(b)
+
+
+(c)
+
+
+Figure 3: CPU runtime comparison of implicit differentiation and unrolling for hyperparameter
+optimization of multiclass SVMs for multiple problem sizes. Error bars represent 90% confidence
+intervals. (a) Mirror descent solver, with mirror descent fixed point for implicit differentiation.
+**(b) Proximal gradient solver, with proximal gradient fixed point for implicit differentiation. (c)**
+Block coordinate descent solver; for implicit differentiation we obtain x[⋆](θ) by BCD but perform
+differentiation with the mirror descent and proximal gradient fixed points. This showcases that the
+solver and fixed point can be independently chosen.
+
+where C = △[k] _× · · · × △[k]_ is the Cartesian product of m probability simplices. We apply the change
+of variable θ = exp(λ) in order to guarantee that the hyper-parameter θ is positive. The matrix
+_W_ (x[⋆](θ), θ) ∈ R[p][×][k] contains the optimal primal solution, the feature weights for each class. The
+outer loss is computed against validation data Xval and Yval.
+
+While KKT conditions can be used to differentiate x[⋆](θ), a more direct way is to use the projected
+gradient fixed point (9). The projection onto C can be easily computed by row-wise projections on the
+simplex. The projection’s Jacobian enjoys a closed form (Appendix B). Another way to differentiate
+_x[⋆](θ) is using the mirror descent fixed point (11). Under the KL geometry, proj[ϕ]_
+_C_ [(][y, θ][)][ corresponds]
+to a row-wise softmax. It is therefore easy to compute and differentiate. Figure 3 compares the
+runtime performance of implicit differentiation vs. unrolling for the latter two fixed points.
+
+
+4.2 DATASET DISTILLATION
+
+Dataset distillation (Wang et al., 2018; Lorraine et al., 2020) aims to learn a small synthetic training
+dataset such that a model trained on this learned data set achieves a small loss on the original training
+will contain one prototype example for each class and thereforeset. Formally, let Xtr ∈ R[m][×][p] and ytr ∈ [k][m] denote the original training set. The distilled dataset θ ∈ R[k][×][p]. The dataset distillation
+problem can then naturally be cast as a bi-level problem, where in the inner problem we estimate a
+logistic regression model x[⋆](θ) ∈ R[p][×][k] trained on the distilled images θ ∈ R[k][×][p], while in the outer
+problem we want to minimize the loss achieved by x[⋆](θ) over the training set:
+
+min subject to x[⋆](θ) argmin _,_ (12)
+_θ∈R[k][×][p][ f]_ [(][x][⋆][(][θ][)][, X][tr][;][ y][tr][)] _∈_ _x∈R[p][×][k][ f]_ [(][x, θ][; [][k][]) +][ ε][∥][x][∥][2]
+outer problem inner problem
+
+where f (W, X| ; y) := ℓ({zy, XW ), ℓ denotes the multiclass logistic regression loss, and} | {z _ε} = 10[−][3]_ is a
+regularization parameter that we found had a very positive effect on convergence.
+
+|rgence.|Col2|
+|---|---|
+
+
+In this problem, and unlike in the general hyperparameter optimization setup, both the inner and outer problems are high-dimensional,
+making it an ideal test-bed for gradient-based bi-level optimization
+methods. For this experiment, we use the MNIST dataset. The
+number of parameters in the inner problem is p = 28[2] = 784.
+while the number of parameters of the outer loss is k × p = 7840.
+We solve this problem using gradient descent on both the inner and
+outer problem, with the gradient of the outer loss computed using
+implicit differentiation, as described in §2. This is fundamentally
+different from the approach used in the original paper, where they
+used differentiation of the unrolled iterates instead. For the same
+solver, we found that the implicit differentiation approach was 4
+
+
+Figure 4: Distilled dataset θ ∈
+R[k][×][p] obtained by solving (12)
+
+
+-----
+
+Table 2: Mean AUC (and 95% confidence interval) for the cancer survival prediction problem.
+
+|Method|L logreg L logreg DictL + L logreg Task-drive 1 2 2|
+|---|---|
+
+
+|AUC (%)|71.6 ± 2.0 72.4 ± 2.8 68.3 ± 2.3 73.2 ±|
+|---|---|
+
+
+
+times faster than the original one. The obtained distilled images θ
+are visualized in Figure 4.
+
+4.3 TASK-DRIVEN DICTIONARY LEARNING
+
+Task-driven dictionary learning was proposed to learn sparse codes
+for input data in such a way that the codes solve an outer learning problem (Mairal et al., 2012;
+Sprechmann et al.dictionary of k atoms, 2014 θ ∈; Zarka et al.R[k][×][p], a sparse code is defined as a matrix, 2019). Formally, given a data matrix x[⋆](θ) ∈ R X[m]tr[×][k] ∈that minimizesR[m][×][p] and a
+in x a reconstruction loss f (x, θ) := ℓ(Xtr, xθ) regularized by a sparsity-inducing penalty g(x).
+Instead of optimizing the dictionary θ to minimize the reconstruction loss, Mairal et al. (2012)
+proposed to optimize an outer problem that depends on the code. Given a set of labels Ytr 0, 1,
+we consider a logistic regression problem which results in the bilevel optimization problem: ∈{ _}[m]_
+min subject to x[⋆](θ) argmin _._ (13)
+_θ∈R[k][×][p],w∈R[k],b∈R_ _[σ][(][x][⋆][(][θ][)][w][ +][ b][;][ y][tr][)]_ _∈_ _x∈R[m][×][k][ f]_ [(][x, θ][) +][ g][(][x][)]
+outer problem inner problem
+
+When ℓ is the squared Frobenius distance between matrices, and g the elastic net penalty, Mairal
+
+| {z } | {z }
+
+et al. (2012, Eq. 21) derive manually, using optimality conditions (notably the support of the codes
+selected at the optimum), an explicit re-parameterization of x[⋆](θ) as a linear system involving θ. This
+closed-form allows for a direct computation of the Jacobian of x[⋆] w.r.t. θ. Similarly, (Sprechmann
+et al., 2014) derive first order conditions in the case where ℓ is a β-divergence, while (Zarka et al.,
+2019) propose to use unrolling of ISTA iterations. Our approach bypasses all of these manual
+derivations, giving the user more leisure to focus directly on modeling (loss, regularizer) aspects.
+
+We illustrate this on breast cancer survival prediction from gene expression data. We frame it as a
+binary classification problem to discriminate patients who survive longer than 5 years (m1 = 200) vs
+patients who die within 5 years of diagnosis (m0 = 99), from p = 1, 000 gene expression values. As
+shown in Table 2, solving (13) (Task-driven DictL) reaches a classification performance competitive
+with state-of-the-art L1 or L2 regularized logistic regression with 100 times fewer variables.
+
+4.4 SENSITIVITY ANALYSIS OF MOLECULAR DYNAMICS
+
+Many physical simulations require solving optimization problems,
+such as energy minimization in molecular (Schoenholz & Cubuk,
+2020) and continuum (Beatson et al., 2020) mechanics, structural
+optimization (Hoyer et al., 2019) and data assimilation (Frerix
+et al., 2021). In this experiment, we revisit an example from JAXMD (Schoenholz & Cubuk, 2020), the problem of finding energy
+minimizing configurations to a system of k packed particles in a
+2-dimensional box of size ℓ
+_x[⋆](θ) = argmin_ _U_ (xi,j, θ),
+_x∈R[k][×][2][ f]_ [(][x, θ][) :=] _i,j_
+X
+
+where x[⋆](θ) ∈ R[k][×][2] are the optimal coordinates of the k particles, Figure 5: Particle positions
+_U_ (xi,j, θ) is the pairwise potential energy function, with half the and position sensitivity vectors,
+particles at diameter 1 and half at diameter θ = 0.6, which we with respect to increasing the
+optimize with a domain-specific optimizer (Bitzek et al., 2006). diameter of the blue particles.
+Here we consider sensitivity of particle position with respect to
+diameter ∂x[⋆](θ), rather than sensitivity of the total energy from the original experiment. Figure 5
+shows results calculated via forward-mode implicit differentiation (JVP). Whereas differentiating the
+unrolled optimizer happens to work for total energy, here it typically does not even converge (see
+Appendix Figure 17), due the discontinuous optimization method.
+
+
+-----
+
+REFERENCES
+
+Pierre Ablin, Gabriel Peyré, and Thomas Moreau. Super-efficiency of automatic differentiation for
+functions defined as a minimum. In Proc. of ICML, pp. 32–41, 2020.
+
+Akshay Agrawal, Brandon Amos, Shane Barratt, Stephen Boyd, Steven Diamond, and Zico Kolter.
+Differentiable convex optimization layers. arXiv preprint arXiv:1910.12430, 2019a.
+
+Akshay Agrawal, Shane Barratt, Stephen Boyd, Enzo Busseti, and Walaa M Moursi. Differentiating
+through a cone program. arXiv preprint arXiv:1904.09043, 2019b.
+
+Alnur Ali, Eric Wong, and J Zico Kolter. A semismooth newton method for fast, generic convex
+programming. In International Conference on Machine Learning, pp. 70–79. PMLR, 2017.
+
+Brandon Amos. Differentiable optimization-based modeling for machine learning. PhD thesis, PhD
+thesis. Carnegie Mellon University, 2019.
+
+Brandon Amos and J Zico Kolter. Optnet: Differentiable optimization as a layer in neural networks.
+In Proc. of ICML, pp. 136–145, 2017.
+
+Joel AE Andersson, Joris Gillis, Greg Horn, James B Rawlings, and Moritz Diehl. Casadi: a
+software framework for nonlinear optimization and optimal control. Mathematical Programming
+_Computation, 11(1):1–36, 2019._
+
+Shaojie Bai, J Zico Kolter, and Vladlen Koltun. Deep equilibrium models. _arXiv preprint_
+_arXiv:1909.01377, 2019._
+
+Alex Beatson, Jordan Ash, Geoffrey Roeder, Tianju Xue, and Ryan P Adams. Learning composable
+energy surrogates for pde order reduction. In H. Larochelle, M. Ranzato, R. Hadsell, M. F. Balcan,
+and H. Lin (eds.), Advances in Neural Information Processing Systems, volume 33, pp. 338–
+[348. Curran Associates, Inc., 2020. URL https://proceedings.neurips.cc/paper/](https://proceedings.neurips.cc/paper/2020/file/0332d694daab22e0e0eaf7a5e88433f9-Paper.pdf)
+[2020/file/0332d694daab22e0e0eaf7a5e88433f9-Paper.pdf.](https://proceedings.neurips.cc/paper/2020/file/0332d694daab22e0e0eaf7a5e88433f9-Paper.pdf)
+
+Bradley M Bell and James V Burke. Algorithmic differentiation of implicit functions and optimal
+values. In Advances in Automatic Differentiation, pp. 67–77. Springer, 2008.
+
+Yoshua Bengio. Gradient-based optimization of hyperparameters. Neural computation, 12(8):
+1889–1900, 2000.
+
+Quentin Bertrand, Quentin Klopfenstein, Mathieu Blondel, Samuel Vaiter, Alexandre Gramfort, and
+Joseph Salmon. Implicit differentiation of lasso-type models for hyperparameter optimization. In
+_Proc. of ICML, pp. 810–821, 2020._
+
+Quentin Bertrand, Quentin Klopfenstein, Mathurin Massias, Mathieu Blondel, Samuel Vaiter, Alexandre Gramfort, and Joseph Salmon. Implicit differentiation for fast hyperparameter selection in
+non-smooth convex learning. arXiv preprint arXiv:2105.01637, 2021.
+
+Michael J Best, Nilotpal Chakravarti, and Vasant A Ubhaya. Minimizing separable convex functions
+subject to simple chain constraints. SIAM Journal on Optimization, 10(3):658–672, 2000.
+
+Erik Bitzek, Pekka Koskinen, Franz Gähler, Michael Moseler, and Peter Gumbsch. Structural
+relaxation made simple. Phys. Rev. Lett., 97:170201, Oct 2006. doi: 10.1103/PhysRevLett.97.
+[170201. URL https://link.aps.org/doi/10.1103/PhysRevLett.97.170201.](https://link.aps.org/doi/10.1103/PhysRevLett.97.170201)
+
+Mathieu Blondel. Structured prediction with projection oracles. In Proc. of NeurIPS, 2019.
+
+Mathieu Blondel, Vivien Seguy, and Antoine Rolet. Smooth and sparse optimal transport. In Proc. of
+_AISTATS, pp. 880–889. PMLR, 2018._
+
+Mathieu Blondel, Olivier Teboul, Quentin Berthet, and Josip Djolonga. Fast differentiable sorting
+and ranking. In Proc. of ICML, pp. 950–959, 2020.
+
+J Frédéric Bonnans and Alexander Shapiro. Perturbation analysis of optimization problems. Springer
+Science & Business Media, 2013.
+
+
+-----
+
+James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Chris Leary, Dougal
+Maclaurin, George Necula, Adam Paszke, Jake VanderPlas, Skye Wanderman-Milne, and
+Qiao Zhang. JAX: composable transformations of Python+NumPy programs, 2018. URL
+
+[http://github.com/google/jax.](http://github.com/google/jax)
+
+[Peter Brucker. An O(n) algorithm for quadratic knapsack problems. Operations Research Letters, 3](https://www.sciencedirect.com/science/article/pii/0167637784900105)
+(3):163–166, 1984.
+
+Olivier Chapelle, Vladimir Vapnik, Olivier Bousquet, and Sayan Mukherjee. Choosing multiple
+parameters for support vector machines. Machine learning, 46(1):131–159, 2002.
+
+Hamza Cherkaoui, Jeremias Sulam, and Thomas Moreau. Learning to solve tv regularised problems
+with unrolled algorithms. Advances in Neural Information Processing Systems, 33, 2020.
+
+[Laurent Condat. Fast projection onto the simplex and the ℓ1 ball. Mathematical Programming, 158](https://hal.archives-ouvertes.fr/hal-01056171)
+(1-2):575–585, 2016.
+
+Koby Crammer and Yoram Singer. On the algorithmic implementation of multiclass kernel-based
+vector machines. Journal of machine learning research, 2(Dec):265–292, 2001.
+
+Marco Cuturi. Sinkhorn distances: lightspeed computation of optimal transport. In Advances in
+_Neural Information Processing Systems, volume 2, 2013._
+
+Charles-Alban Deledalle, Samuel Vaiter, Jalal Fadili, and Gabriel Peyré. Stein unbiased gradient
+estimator of the risk (sugar) for multiple parameter selection. SIAM Journal on Imaging Sciences,
+7(4):2448–2487, 2014.
+
+Steven Diamond and Stephen Boyd. Cvxpy: A python-embedded modeling language for convex
+optimization. The Journal of Machine Learning Research, 17(1):2909–2913, 2016.
+
+Josip Djolonga and Andreas Krause. Differentiable learning of submodular models. Proc. of NeurIPS,
+30:1013–1023, 2017.
+
+Justin Domke. Generic methods for optimization-based modeling. In Artificial Intelligence and
+_Statistics, pp. 318–326. PMLR, 2012._
+
+[John C Duchi, Shai Shalev-Shwartz, Yoram Singer, and Tushar Chandra. Efficient projections onto](https://stanford.edu/~jduchi/projects/DuchiShSiCh08.pdf)
+[the ℓ1-ball for learning in high dimensions. In Proc. of ICML, 2008.](https://stanford.edu/~jduchi/projects/DuchiShSiCh08.pdf)
+
+David Duvenaud, J. Zico Kolter, and Matthew Johnson. Deep implicit layers tutorial - neural ODEs,
+deep equilibirum models, and beyond. Neural Information Processing Systems Tutorial, 2020.
+
+Bradley Efron, Trevor Hastie, Iain Johnstone, and Robert Tibshirani. Least angle regression. The
+_Annals of statistics, 32(2):407–499, 2004._
+
+Laurent El Ghaoui, Fangda Gu, Bertrand Travacca, Armin Askari, and Alicia Y Tsai. Implicit deep
+learning. arXiv preprint arXiv:1908.06315, 2, 2019.
+
+Rong-En Fan, Kai-Wei Chang, Cho-Jui Hsieh, Xiang-Rui Wang, and Chih-Jen Lin. Liblinear: A
+library for large linear classification. JMLR, 9:1871–1874, 2008.
+
+Luca Franceschi, Michele Donini, Paolo Frasconi, and Massimiliano Pontil. Forward and reverse
+gradient-based hyperparameter optimization. In International Conference on Machine Learning,
+pp. 1165–1173. PMLR, 2017.
+
+Luca Franceschi, Paolo Frasconi, Saverio Salzo, Riccardo Grazzi, and Massimiliano Pontil. Bilevel
+programming for hyperparameter optimization and meta-learning. In International Conference on
+_Machine Learning, pp. 1568–1577. PMLR, 2018._
+
+Thomas Frerix, Dmitrii Kochkov, Jamie A. Smith, Daniel Cremers, Michael P. Brenner, and Stephan
+Hoyer. Variational data assimilation with a learned inverse observation operator. 2021.
+
+Roy Frostig, Matthew Johnson, Dougal Maclaurin, Adam Paszke, and Alexey Radul. Decomposing
+[reverse-mode automatic differentiation. In LAFI 2021 workshop at POPL, 2021. URL https:](https://arxiv.org/abs/2105.09469)
+[//arxiv.org/abs/2105.09469.](https://arxiv.org/abs/2105.09469)
+
+
+-----
+
+Stephen Gould, Basura Fernando, Anoop Cherian, Peter Anderson, Rodrigo Santa Cruz, and Edison
+Guo. On differentiating parameterized argmin and argmax problems with application to bi-level
+optimization. arXiv preprint arXiv:1607.05447, 2016.
+
+Stephen Gould, Richard Hartley, and Dylan Campbell. Deep declarative networks: A new hope.
+_arXiv preprint arXiv:1909.04866, 2019._
+
+Riccardo Grazzi, Luca Franceschi, Massimiliano Pontil, and Saverio Salzo. On the iteration complexity of hypergradient computation. In International Conference on Machine Learning, pp.
+3748–3758. PMLR, 2020.
+
+Andreas Griewank and Andrea Walther. Evaluating derivatives: principles and techniques of
+_algorithmic differentiation. SIAM, 2008._
+
+SJ Grotzinger and C Witzgall. Projections onto order simplexes. Applied mathematics and Optimiza_tion, 12(1):247–270, 1984._
+
+Isabelle Guyon. Design of experiments of the nips 2003 variable selection benchmark. In NIPS 2003
+_workshop on feature extraction and feature selection, volume 253, 2003._
+
+Magnus Rudolph Hestenes, Eduard Stiefel, et al. Methods of conjugate gradients for solving linear
+_systems, volume 49. NBS Washington, DC, 1952._
+
+Nicholas J. Higham. Accuracy and Stability of Numerical Algorithms. Society for Industrial and
+[Applied Mathematics, second edition, 2002. doi: 10.1137/1.9780898718027. URL https:](https://epubs.siam.org/doi/abs/10.1137/1.9780898718027)
+[//epubs.siam.org/doi/abs/10.1137/1.9780898718027.](https://epubs.siam.org/doi/abs/10.1137/1.9780898718027)
+
+Stephan Hoyer, Jascha Sohl-Dickstein, and Sam Greydanus. Neural reparameterization improves
+structural optimization. 2019.
+
+Kaiyi Ji, Junjie Yang, and Yingbin Liang. Bilevel optimization: Convergence analysis and enhanced
+design. In International Conference on Machine Learning, pp. 4882–4892. PMLR, 2021.
+
+Yoon Kim, Carl Denton, Luong Hoang, and Alexander M Rush. Structured attention networks. arXiv
+_preprint arXiv:1702.00887, 2017._
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+_arXiv:1412.6980, 2014._
+
+Steven G Krantz and Harold R Parks. The implicit function theorem: history, theory, and applications.
+Springer Science & Business Media, 2012.
+
+Cong Han Lim and Stephen J Wright. Efficient bregman projections onto the permutahedron and
+related polytopes. In Proc. of AISTATS, pp. 1205–1213. PMLR, 2016.
+
+Jonathan Lorraine, Paul Vicol, and David Duvenaud. Optimizing millions of hyperparameters by
+implicit differentiation. In International Conference on Artificial Intelligence and Statistics, pp.
+1540–1552. PMLR, 2020.
+
+Julien Mairal, Francis Bach, and Jean Ponce. Task-driven dictionary learning. IEEE Transactions on
+_Pattern Analysis and Machine Intelligence, 34(4):791–804, 2012. doi: 10.1109/TPAMI.2011.156._
+
+[André FT Martins and Ramón Fernandez Astudillo. From softmax to sparsemax: A sparse model of](https://arxiv.org/abs/1602.02068)
+[attention and multi-label classification. In Proc. of ICML, 2016.](https://arxiv.org/abs/1602.02068)
+
+[Christian Michelot. A finite algorithm for finding the projection of a point onto the canonical simplex](https://link.springer.com/article/10.1007/BF00938486)
+[of R[n]. Journal of Optimization Theory and Applications, 50(1):195–200, 1986.](https://link.springer.com/article/10.1007/BF00938486)
+
+J.-J. Moreau. Proximité et dualité dans un espace hilbertien. Bulletin de la S.M.F., 93:273–299, 1965.
+
+Vlad Niculae and Mathieu Blondel. A regularized framework for sparse and structured neural
+attention. In Proc. of NeurIPS, 2017.
+
+Vlad Niculae and Andre Martins. Lp-sparsemap: Differentiable relaxed optimization for sparse
+structured prediction. In International Conference on Machine Learning, pp. 7348–7359, 2020.
+
+
+-----
+
+Vlad Niculae, Andre Martins, Mathieu Blondel, and Claire Cardie. Sparsemap: Differentiable sparse
+structured inference. In International Conference on Machine Learning, pp. 3799–3808. PMLR,
+2018.
+
+Brendan O’Donoghue, Eric Chu, Neal Parikh, and Stephen Boyd. Conic optimization via operator
+splitting and homogeneous self-dual embedding. Journal of Optimization Theory and Applications,
+169(3):1042–1068, 2016.
+
+Neal Parikh and Stephen Boyd. Proximal algorithms. Foundations and Trends in optimization, 1(3):
+127–239, 2014.
+
+F. Pedregosa, G. Varoquaux, A. Gramfort, V. Michel, B. Thirion, O. Grisel, M. Blondel, P. Prettenhofer, R. Weiss, V. Dubourg, J. Vanderplas, A. Passos, D. Cournapeau, M. Brucher, M. Perrot, and
+E. Duchesnay. Scikit-learn: Machine learning in Python. Journal of Machine Learning Research,
+12:2825–2830, 2011.
+
+Fabian Pedregosa. [Hyperparameter optimization with approximate gradient.](https://arxiv.org/pdf/1602.02355.pdf) In International
+_conference on machine learning. PMLR, 2016._
+
+Aravind Rajeswaran, Chelsea Finn, Sham Kakade, and Sergey Levine. Meta-learning with implicit
+gradients. arXiv preprint arXiv:1909.04630, 2019.
+
+Nimrod Rappoport and Ron Shamir. Multi-omic and multi-view clustering algorithms: review and
+cancer benchmark. Nucleic Acids Res., 46:10546–10562, 2018.
+
+Youcef Saad and Martin H Schultz. Gmres: A generalized minimal residual algorithm for solving
+nonsymmetric linear systems. SIAM Journal on scientific and statistical computing, 7(3):856–869,
+1986.
+
+Samuel Schoenholz and Ekin Dogus Cubuk. Jax md: A framework for differentiable physics.
+In H. Larochelle, M. Ranzato, R. Hadsell, M. F. Balcan, and H. Lin (eds.), Advances
+_in Neural Information Processing Systems, volume 33, pp. 11428–11441. Curran Asso-_
+[ciates, Inc., 2020. URL https://proceedings.neurips.cc/paper/2020/file/](https://proceedings.neurips.cc/paper/2020/file/83d3d4b6c9579515e1679aca8cbc8033-Paper.pdf)
+[83d3d4b6c9579515e1679aca8cbc8033-Paper.pdf.](https://proceedings.neurips.cc/paper/2020/file/83d3d4b6c9579515e1679aca8cbc8033-Paper.pdf)
+
+Matthias W Seeger. Cross-validation optimization for large scale structured classification kernel
+methods. Journal of Machine Learning Research, 9(6), 2008.
+
+Pablo Sprechmann, Alex M Bronstein, and Guillermo Sapiro. Supervised non-euclidean sparse nmf
+via bilevel optimization with applications to speech enhancement. In 2014 4th Joint Workshop on
+_Hands-free Speech Communication and Microphone Arrays (HSCMA), pp. 11–15. IEEE, 2014._
+
+Samuel Vaiter, Charles-Alban Deledalle, Gabriel Peyré, Charles Dossal, and Jalal Fadili. Local behavior of sparse analysis regularization: Applications to risk estimation. Applied and Computational
+_Harmonic Analysis, 35(3):433–451, 2013._
+
+H A van der Vorst and H A van der Vorst. Bi-CGSTAB: A fast and smoothly converging variant of
+Bi-CG for the solution of nonsymmetric linear systems. SIAM Journal on Scientific and Statistical
+_[Computing, 13(2):631–644, 1992. URL http://dx.doi.org/10.1137/0913035.](http://dx.doi.org/10.1137/0913035)_
+
+Tongzhou Wang, Jun-Yan Zhu, Antonio Torralba, and Alexei A Efros. Dataset distillation. arXiv
+_preprint arXiv:1811.10959, 2018._
+
+Robert Edwin Wengert. A simple automatic derivative evaluation program. Communications of the
+_ACM, 7(8):463–464, 1964._
+
+Yuhuai Wu, Mengye Ren, Renjie Liao, and Roger B. Grosse. Understanding short-horizon bias
+in stochastic meta-optimization. In 6th International Conference on Learning Representations,
+_ICLR 2018, Vancouver, BC, Canada, April 30 - May 3, 2018, Conference Track Proceedings._
+[OpenReview.net, 2018. URL https://openreview.net/forum?id=H1MczcgR-.](https://openreview.net/forum?id=H1MczcgR-)
+
+John Zarka, Louis Thiry, Tomás Angles, and Stéphane Mallat. Deep network classification by
+scattering and homotopy dictionary learning. arXiv preprint arXiv:1910.03561, 2019.
+
+
+-----
+
+# Appendix
+
+A CODE EXAMPLES
+
+A.1 CODE EXAMPLES FOR OPTIMALITY CONDITIONS
+
+Our library provides several reusable optimality condition mappings F or fixed points T . We
+nevertheless demonstrate the ease of writing some of them from scratch.
+
+**Proximal gradient fixed point.** The proximal gradient fixed point (7) with step size η = 1 is
+_T_ (x, θ) = proxg(x 1f (x, θf ), θg). It can be implemented as follows.
+_−∇_
+```
+ grad = jax.grad(f)
+ def T(x, theta):
+ theta_f, theta_g = theta
+ return prox(x - grad(x, theta_f), theta_g)
+
+```
+
+Figure 6: Proximal gradient fixed point T (x, θ)
+
+We recall that when the proximity operator is a projection, we recover the projected gradient fixed
+point as a special case. Therefore, this fixed point can also be used for constrained optimization. We
+provide numerous proximal and projection operators in the library.
+
+**KKT conditions.** As a more advanced example, we now describe how to implement the KKT
+conditions (6). The stationarity, primal feasibility and complementary slackness conditions read
+
+1f (z, θf ) + [∂1G(z, θG)][⊤]λ + [∂1H(z, θH )][⊤]ν = 0
+_∇_
+_H(z, θH_ ) = 0
+_λ_ _G(z, θG) = 0._
+_◦_
+
+Using jax.vjp to compute vector-Jacobian products, this can be implemented as
+```
+ grad = jax.grad(f)
+ def F(x, theta):
+ z, nu, lambd = x
+ theta_f, theta_H, theta_G = theta
+ _, H_vjp = jax.vjp(H, z, theta_H)
+ stationarity = (grad(z, theta_f) + H_vjp(nu)[0])
+ primal_feasability = H(z, theta_H)
+ _, G_vjp = jax.vjp(G, z, theta_G)
+ stationarity += G_vjp(lambd)[0]
+ comp_slackness = G(z, theta_G) * lambd
+ return stationarity, primal_feasability, comp_slackness
+
+```
+
+Figure 7: KKT conditions F (x, θ)
+
+Similar mappings F can be written if the optimization problem contains only equality constraints or
+only inequality constraints.
+
+
+-----
+
+**Mirror descent fixed point.** Letting η = 1 and denoting θ = (θf _, θproj), the fixed point (11) is_
+
+_xˆ = ∇ϕ(x)_
+_y = ˆx_ 1f (x, θf )
+_−∇_
+
+_T_ (x, θ) = proj[ϕ]
+_C_ [(][y, θ][proj][)][.]
+
+We can then implement it as follows.
+```
+ grad = jax.grad(f)
+ def T(x, theta):
+ theta_f, theta_proj = params
+ x_hat = phi_mapping(x)
+ y = x_hat - grad(x, theta_f)
+ return bregman_projection(y, theta_proj)
+
+```
+
+Figure 8: Mirror descent fixed point T (x, θ)
+
+Although not considered in this example, the mapping ∇ϕ could also depend on θ if necessary.
+
+A.2 CODE EXAMPLES FOR EXPERIMENTS
+
+We now sketch how to implement our experiments using our framework. In the following, jnp is
+short for jax.numpy. In all experiments, we only show how to compute gradients with the outer
+objective. We can then use these gradients with gradient-based solvers to solve the outer objective.
+
+**Multiclass SVM experiment.**
+```
+ X_tr, Y_tr, X_val, Y_val = load_data()
+ def W(x, theta): # dual-primal map
+ return jnp.dot(X_tr.T, Y_tr - x) / theta
+ def f(x, theta): # inner objective
+ return (0.5 * theta * jnp.sum(W(x, theta) ** 2) +
+   jnp.vdot(x, Y_tr))
+ grad = jax.grad(f)
+ proj = jax.vmap(projection_simplex) # row-wise projections
+ def T(x, theta):
+ return proj(x - grad(x, theta))
+ @custom_fixed_point(T)
+ def msvm_dual_solver(init_x, theta):
+ # [...]
+ return x_star # solution of the dual objective
+ def outer_loss(lambd):
+ theta = jnp.exp(lambd)
+ x_star = msvm_dual_solver(init_x, theta) # inner solution
+ Y_pred = jnp.dot(W(x_star, theta), X_val)
+ return 0.5 * jnp.sum((Y_pred - Y_val) ** 2)
+ print(jax.grad(outer_loss)(lambd))
+
+```
+
+Figure 9: Code example for the multiclass SVM experiment.
+
+
+-----
+
+**Task-driven dictionary learning experiment.**
+```
+ X_tr, y_tr = load_data()
+ def f(x, theta): # dictionary loss
+ residual = X_tr - jnp.dot(x, theta)
+ return huber_loss(residual)
+ grad = jax.grad(f)
+ def T(x, theta): # proximal gradient fixed point
+ return prox_lasso(x - grad(x, theta))
+ @custom_fixed_point(T)
+ def sparse_coding(init_x, theta): # inner objective
+ # [...]
+ return x_star # lasso solution
+ def outer_loss(theta, w): # task-driven loss
+ x_star = sparse_coding(init_x, theta) # sparse codes
+ y_pred = jnp.dot(x_star, w)
+ return logloss(y_tr, y_pred)
+ print(jax.grad(outer_loss, argnums=(0,1)))
+
+```
+
+Figure 10: Code example for the task-driven dictionary learning experiment.
+
+**Dataset distillation experiment.**
+```
+ X_tr, y_tr = load_data()
+ logloss = jax.vmap(loss.multiclass_logistic_loss)
+ def f(x, theta, l2reg=1e-3): # inner objective
+ scores = jnp.dot(theta, x)
+ distilled_labels = jnp.arange(10)
+ penalty = l2reg * jnp.sum(x * x)
+ return jnp.mean(logloss(distilled_labels, scores)) + penalty
+ F = jax.grad(f)
+ @custom_root(F)
+ def logreg_solver(init_x, theta):
+ # [...]
+ return x_star
+ def outer_loss(theta):
+ x_star = logreg_solver(init_x, theta) # inner solution
+ scores = jnp.dot(X_tr, x_star)
+ return jnp.mean(logloss(y_tr, scores))
+ print(jax.grad(outer_loss)(theta))
+
+```
+
+Figure 11: Code example for the dataset distillation experiment.
+
+
+-----
+
+**Molecular dynamics experiment.**
+```
+ energy_fn = soft_sphere_energy_fn(diameter)
+ init_fn, apply_fn = jax_md.minimize.fire_descent(
+  energy_fn, shift_fn)
+ x0 = random.uniform(key, (N, 2))
+ R0 = L * x0 # transform to physical coordinates
+ R = lax.fori_loop(
+  0, num_optimization_steps,
+  body_fun=lambda t, state: apply_fn(state, t=t),
+  init_val=init_fn(R0)).position
+ x_star = R / L
+ def F(x, diameter): # normalized forces
+ energy_fn = soft_sphere_energy_fn(diameter)
+ normalized_energy_fn = lambda x: energy_fn(L * x)
+ return -jax.grad(normalized_energy_fn)(x)
+ dx = root_jvp(F, x_star, diameter, 1.0,
+    solve=linear_solve.solve_bicgstab)
+ print(dx)
+
+```
+
+Figure 12: Code for the molecular dynamics experiment.
+
+B JACOBIAN PRODUCTS
+
+Our library provides numerous reusable building blocks. We describe in this section how to compute
+their Jacobian products. As a general guideline, whenever a projection enjoys a closed form, we leave
+the Jacobian product to the autodiff system.
+
+B.1 JACOBIAN PRODUCTS OF PROJECTIONS
+
+We describe in this section how to compute the Jacobian products of the projections (in the Euclidean
+and KL senses) onto various convex sets. When the convex set does not depend on any variable, we
+simply denote it C instead of C(θ).
+
+**Non-negative orthant.** When is the non-negative orthant, = R[d]+[, we obtain][ proj]
+_C_ _C_ _C[(][y][) =]_
+max(y, 0), where the maximum is evaluated element-wise. This is also known as the ReLu function.
+The projection in the KL sense reduces to the exponential function, proj[ϕ]
+_C_ [(][y][) = exp(][y][)][.]
+
+**Box constraints.** When C(θ) is the box constraints C(θ) = [θ1, θ2][d] with θ ∈ R[2], we obtain
+
+projC(y, θ) = clip(y, θ1, θ2) := max(min(y, θ2), θ1).
+
+This is trivially extended to support different boxes for each coordinate, in which case θ ∈ R[d][×][2].
+
+**Probability simplex.** When C is the standard probability simplex, C = △[d], there is no analytical
+solution for proj (y). Nevertheless, the projection can be computed exactly in O(d) expected time
+_C_
+or O(d log d) worst-case time (Brucker, 1984; Michelot, 1986; Duchi et al., 2008; Condat, 2016).
+The Jacobian is given by diag(s) _ss[⊤]/_ _s_ 1, where s 0, 1 is a vector indicating the support
+_−_ _∥_ _∥_ _∈{_ _}[d]_
+of proj (y) (Martins & Astudillo, 2016). The projection in the KL sense, on the other hand, enjoys a
+_C_
+closed form: it reduces to the usual softmax proj[ϕ] _j=1_ [exp(][y][j][)][.]
+_C_ [(][y][) = exp(][y][)][/][ P][d]
+
+
+-----
+
+**Box sections.** Consider now the Euclidean projection z[⋆](θ) = proj (y, θ) onto the set (θ) =
+_C_ _C_
+_{constrained bounded quadratic program. It is easy to check (see, e.g., (z ∈_ R[d] : αi ≤ _zi ≤_ _βi, i ∈_ [d]; w[⊤]z = c}, where θ = (α, β, w, c). This projection is a singly-Niculae & Martins, 2020))
+that an optimal solution satisfies for all i ∈ [d]
+
+_zi[⋆][(][θ][) = [][L][(][x][⋆][(][θ][)][, θ][)]][i]_ [:=][ clip][(][w][i][x][⋆][(][θ][) +][ y][i][, α][i][, β][i][)]
+
+where L : R × R[n] _→_ R[d] is the dual-primal mapping and x[⋆](θ) ∈ R is the optimal dual variable of
+the linear constraint, which should be the root of
+
+_F_ (x[⋆](θ), θ) = L(x[⋆](θ), θ)[⊤]w − _c._
+
+The root can be found, e.g., by bisection. The gradient ∇x[⋆](θ) is given by ∇x[⋆](θ) = B[⊤]/A and the
+Jacobian ∂z[⋆](θ) is obtained by application of the chain rule on L.
+
+**Norm balls.** When (θ) = _x_ R[d] : _x_ _θ_, where is a norm and θ R+, proj (y, θ)
+_C_ _{_ _∈_ _∥_ _∥≤_ _}_ _∥· ∥_ _∈_ _C_
+becomes the projection onto a norm ball. The projection onto the ℓ1-ball reduces to a projection
+onto the simplex, see, e.g., (Duchi et al., 2008). The projections onto the ℓ2 and ℓ balls enjoy
+_∞_
+a closed-form, see, e.g., (Parikh & Boyd, 2014, §6.5). Since they rely on simple composition of
+functions, all three projections can therefore be automatically differentiated.
+
+**Affine sets.** When C(θ) = {x ∈ R[d] : Ax = b}, where A ∈ R[p][×][d], b ∈ R[p] and θ = (A, b), we get
+
+proj (y, θ) = y _A[†](Ay_ _b) = y_ _A[⊤](AA[⊤])[−][1](Ay_ _b)_
+_C_ _−_ _−_ _−_ _−_
+
+where A[†] is the Moore-Penrose pseudoinverse of A. The second equality holds if p < d and A is
+full rank. A practical implementation can pre-compute a factorization of the Gram matrix AA[⊤].
+Alternatively, we can also use the KKT conditions.
+
+**Hyperplanes and half spaces.** When C(θ) = {x ∈ R[d] : a[⊤]x = b}, where a ∈ R[d] and b ∈ R and
+_θ = (a, b), we get_
+
+proj (y, θ) = y _a._
+_C_ _−_ _[a][⊤]a[y][ −]2_ _[b]_
+
+_∥_ _∥[2]_
+
+When C(θ) = {x ∈ R[d] : a[⊤]x ≤ _b}, we simply replace a[⊤]y_ _−_ _b in the numerator by max(a[⊤]y_ _−_ _b, 0)._
+
+**Transportation and Birkhoff polytopes.** When C(θ) = {X ∈ R[p][×][d] : X1d = θ1, X _[⊤]1p =_
+_θ2, X_ 0, the so-called transportation polytope, where θ1 and θ2 are marginals, we
+can compute approximately the projections, both in the Euclidean and KL senses, by switching to ≥ _}_ _∈△[p]_ _∈△[d]_
+the dual or semi-dual (Blondel et al., 2018). Since both are unconstrained optimization problems,
+we can compute their Jacobian product by implicit differentiation using the gradient descent fixed
+point. An advantage of the KL geometry here is that we can use Sinkhorn (Cuturi, 2013), which is a
+GPU-friendly algorithm. The Birkhoff polytope, the set of doubly stochastic matrices, is obtained by
+fixing θ1 = θ2 = 1d/d.
+
+**Order simplex.order simplex (Grotzinger & WitzgallWhen C(θ) = {x ∈, 1984R[d]; Blondel: θ1 ≥**,x 20191 ≥), the projection operations, both in thex2 ≥· · · ≥ _xd ≥_ _θ2}, a so-called_
+Euclidean and KL sense, reduce to isotonic optimization (Lim & Wright, 2016) and can be solved
+exactly in O(d log d) time using the Pool Adjacent Violators algorithm (Best et al., 2000). The
+Jacobian of the projections and efficient product with it are derived in (Djolonga & Krause, 2017;
+Blondel et al., 2020).
+
+**Polyhedra.** More generally, we can consider polyhedra, i.e., sets of the form C(θ) = {x ∈
+R[d] : Ax = b, Cx ≤ _d}, where A ∈_ R[p][×][d], b ∈ R[p], C ∈ R[m][×][d], and d ∈ R[m]. There are several
+ways to differentiate this projection. The first is to use the KKT conditions as detailed in §2.2. A
+second way is consider the dual of the projection instead, which is the maximization of a quadratic
+function subject to non-negative constraints (Parikh & Boyd, 2014, §6.2). That is, we can reduce
+the projection on a polyhedron to a problem of the form (8) with non-negative constraints, which we
+can in turn implicitly differentiate easily using the projected gradient fixed point, combined with the
+projection on the non-negative orthant. Finally, we apply the dual-primal mapping, which enjoys a
+closed form and is therefore amenable to autodiff, to obtain the primal projection.
+
+
+-----
+
+B.2 JACOBIAN PRODUCTS OF PROXIMITY OPERATORS
+
+We provide several proximity operators, including for the lasso (soft thresholding), elastic net and
+group lasso (block soft thresholding). All satisfy closed form expressions and can be differentiated
+automatically via autodiff. For more advanced proximity operators, which do not enjoy a closed form,
+recent works have derived their Jacobians. The Jacobians of fused lasso and OSCAR were derived in
+(Niculae & Blondel, 2017). For general total variation, the Jacobians were derived in (Vaiter et al.,
+2013; Cherkaoui et al., 2020).
+
+C MORE EXAMPLES OF OPTIMALITY CRITERIA AND FIXED POINTS
+
+To demonstrate the generality of our approach, we describe in this section more optimality mapping
+_F or fixed point iteration T_ .
+
+**Newton fixed point.** Let x be a root of G(·, θ), i.e., G(x, θ) = 0. The fixed point iteration of
+Newton’s method for root-finding is
+
+_T_ (x, θ) = x _η[∂1G(x, θ)][−][1]G(x, θ)._
+_−_
+
+By the chain and product rules, we have
+
+_∂1T_ (x, θ) = I _η(...)G(x, θ)_ _η[∂1G(x, θ)][−][1]∂1G(x, θ) = (1_ _η)I._
+_−_ _−_ _−_
+
+Using (3), we get A = _∂1F_ (x, θ) = ηI. Similarly,
+_−_
+
+_B = ∂2T_ (x, θ) = ∂2F (x, θ) = _η[∂1G(x, θ)][−][1]∂2G(x, θ)._
+_−_
+
+Newton’s method for optimization is obtained by choosing G(x, θ) = 1f (x, θ), which gives
+_∇_
+
+
+_T_ (x, θ) = x − _η[∇1[2][f]_ [(][x, θ][)]][−][1][∇][1][f] [(][x, θ][)][.] (14)
+
+It is easy to check that we recover the same linear system as for the gradient descent fixed point
+(5). A practical implementation can pre-compute an LU decomposition of ∂1G(x, θ), or a Cholesky
+decomposition if ∂1G(x, θ) is positive semi-definite.
+
+**Proximal block coordinate descent fixed point.** We now consider the case when x[⋆](θ) is implicitly
+defined as the solution
+
+
+_x[⋆](θ) := argmin_
+_x_ R[d][ f] [(][x, θ][) +]
+_∈_
+
+
+_gi(xi, θ),_
+_i=1_
+
+X
+
+
+where g1, . . ., gm are possibly non-smooth functions operating on subvectors (blocks) x1, . . ., xm of
+_x. In this case, we can use for i ∈_ [m] the fixed point
+
+_xi = [T_ (x, θ)]i = proxηigi (xi _ηi[_ 1f (x, θ)]i, θ), (15)
+_−_ _∇_
+
+where η1, . . ., ηm are block-wise step sizes. Clearly, when the step sizes are shared, i.e., η1 =
+= ηm = η, this fixed point is equivalent to the proximal gradient fixed point (7) with g(x, θ) =
+
+_· · ·n_
+_i=1_ _[g][i][(][x][i][, θ][)][.]_
+P
+
+**Quadratic programming.** We now show how to use the KKT conditions discussed in §2.2 to
+differentiate quadratic programs, recovering Optnet (Amos & Kolter, 2017) as a special case. To give
+some intuition, let us start with a simple equality-constrained quadratic program (QP)
+
+argmin _f_ (z, θ) = [1] subject to _H(z, θ) = Ez_ _d = 0,_
+_z∈R[p]_ 2 _[z][⊤][Qz][ +][ c][⊤][z]_ _−_
+
+
+where Q ∈ R[p][×][p], E ∈ R[q][×][p], d ∈ R[q]. We gather the differentiable parameters as θ = (Q, E, c, d).
+The stationarity and primal feasibility conditions give
+
+1f (z, θ) + [∂1H(z, θ)][⊤]ν = Qz + c + E[⊤]ν = 0
+_∇_
+_H(z, θ) = Ez −_ _d = 0._
+
+
+-----
+
+In matrix notation, this can be rewritten as
+_Q_ _E[⊤]_ _z_ _c_
+
+= _−_ _._ (16)
+
+_E_ 0 _ν_ _d_
+     
+
+We can write the solution of the linear system (16) as the root x = (z, ν) of a function F (x, θ). More
+generally, the QP can also include inequality constraints
+
+argmin _f_ (z, θ) = [1] subject to _H(z, θ) = Ez_ _d = 0, G(z, θ) = Mz_ _h_ 0.
+_z∈R[p]_ 2 _[z][⊤][Qz][ +][ c][⊤][z]_ _−_ _−_ _≤_
+
+where M ∈ R[r][×][p] and h ∈ R[r]. We gather the differentiable parameters as θ = (Q, E, M, c, d, h).
+The stationarity, primal feasibility and complementary slackness conditions give
+
+
+1f (z, θ) + [∂1H(z, θ)][⊤]ν + [∂1G(z, θ)][⊤]λ = Qz + c + E[⊤]ν + M _λ = 0_
+_∇_ _[⊤]_
+_H(z, θ) = Ez −_ _d = 0_
+_λ ◦_ _G(z, θ) = diag(λ)(Mz −_ _h) = 0_
+
+In matrix notation, this can be written as
+
+
+_Q_ _E[⊤]_ _M_ _[⊤]_ _z_ _−c_
+_E_ 0 0 _ν_ = _d_
+
+diag(λ)M 0 0  "λ# "λ ◦ _h#_
+
+ 
+
+While x = (z, ν, λ) is no longer the solution of a linear system, it is the root of a function F (x, θ)
+and therefore fits our framework. With our framework, no derivation is needed. We simply define f,
+_H and G directly in Python._
+
+**Conic programming.** We now show that the differentiation of conic linear programs (Agrawal
+et al., 2019b; Amos, 2019), at the heart of differentiating through cvxpy layers (Agrawal et al., 2019a),
+easily fits our framework. Consider the problem
+
+_z[⋆](λ), s[⋆](λ) =_ _z_ argminR[p],s R[m][ c][⊤][z] subject to _Ez + s = d, s ∈K,_ (17)
+_∈_ _∈_
+
+where λ = (c, E, d), E ∈ R[m][×][p], d ∈ R[m], c ∈ R[p] and K ⊆ R[m] is a cone; z and s are the primal
+and slack variables, respectively. Every convex optimization problem can be reduced to the form (17).
+Let us form the skew-symmetric matrix
+
+0 _E[⊤]_ _c_
+
+_θ(λ) =_  _−E_ 0 _d_ _∈_ R[N] _[×][N]_ _,_
+
+_−c[⊤]_ _−d[⊤]_ 0
+ 
+
+where N = p+m+1. Following (Agrawal et al., 2019b;a; Amos, 2019), we can use the homogeneous
+self-dual embedding to reduce the process of solving (17) to finding a root of the residual map
+
+_F_ (x, θ) = θΠx + Π[∗]x = ((θ − _I)Π + I)x,_ (18)
+
+where Π = projRp×K∗×R+ and K[∗] _⊆_ R[m] is the dual cone. The splitting conic solver (O’Donoghue
+et al., 2016), which is based on ADMM, outputs a solution F (x[⋆](θ), θ) = 0 which is decomposed as
+_x[⋆](θ) = (u[⋆](θ), v[⋆](θ), w[⋆](θ)). We can then recover the optimal solution of (17) using_
+
+_z[⋆](λ) = u[⋆](θ(λ))_ and _s[⋆](λ) = projK∗_ (v[⋆](θ(λ))) − _v[⋆](θ(λ))._
+
+The key oracle whose JVP/VJP we need is therefore Π, which is studied in (Ali et al., 2017). The
+projection onto a few cones is available in our library and can be used to express F .
+
+
+_z_
+_ν_
+"λ
+
+
+_Q_ _E[⊤]_ _M_ _[⊤]_
+_E_ 0 0
+diag(λ)M 0 0
+
+
+**Frank-Wolfe.** We now consider
+
+_x[⋆](θ) = argmin_ (19)
+_x_ (θ) R[d][ f] [(][x, θ][)][,]
+_∈C_ _⊂_
+
+where (θ) is a convex polytope, i.e., it is the convex hull of vertices v1(θ), . . ., vm(θ). The Frank_C_
+Wolfe algorithm requires a linear minimization oracle (LMO)
+
+_s 7→_ argminx∈C(θ) _⟨s, x⟩_
+
+
+-----
+
+and is a popular algorithm when this LMO is easier to compute than the projection onto C(θ).
+However, since this LMO is piecewise constant, its Jacobian is null almost everywhere. Inspired by
+SparseMAP (Niculae et al., 2018), which corresponds to the case when f is a quadratic, we rewrite
+(19) as
+_p[⋆](θ) = argmin_
+_p∈△[m][ g][(][p, θ][) :=][ f]_ [(][V][ (][θ][)][p, θ][)][,]
+
+where V (θ) is a d _m matrix gathering the vertices v1(θ), . . ., vm(θ). We then have x[⋆](θ) =_
+_×_
+_V (θ)p[⋆](θ). Since we have reduced (19) to minimization over the simplex, we can use the projected_
+gradient fixed point to obtain
+
+_T_ (p[⋆](θ), θ) = proj△m(p[⋆](θ) −∇1g(p[∗](θ), θ)).
+
+We can therefore compute the derivatives of p[⋆](θ) by implicit differentiation and the derivatives of
+_x[⋆](θ) by product rule. Frank-Wolfe implementations typically maintain the convex weights of the_
+vertices, which we use to get an approximation of p[⋆](θ). Moreover, it is well-known that after t
+iterations, at most t vertices are visited. We can leverage this sparsity to solve a smaller linear system.
+Moreover, in practice, we only need to compute VJPs of x[⋆](θ).
+
+D JACOBIAN PRECISION PROOFS
+
+_Proof of Theorem 1. To simplify notations, we note A⋆_ := A(x[⋆], θ) and _A[ˆ] := A(ˆx, θ), and similarly_
+for B and J. We have by definition of the Jacobian estimate function A⋆J⋆ = B⋆ and _A[ˆ]J[ˆ] = B[ˆ]._
+Therefore we have
+
+_J(ˆx, θ)_ _∂x[⋆](θ) = A[ˆ][−][1][ ˆ]B_ _A[−]⋆_ [1][B][⋆]
+_−_ _−_
+
+= A[ˆ][−][1][ ˆ]B _A[−][1]B⋆_ + A[ˆ][−][1]B⋆ _A[−]⋆_ [1][B][⋆]
+_−_ [ˆ] _−_
+
+= A[ˆ][−][1]( B[ˆ] − _B⋆) + ( A[ˆ][−][1]_ _−_ _A[−]⋆_ [1][)][B][⋆] _[.]_
+
+For any invertible matrices M1, M2, it holds that M1[−][1] _−_ _M2[−][1]_ = M1[−][1][(][M][2][ −] _[M][1][)][M][ −]2_ [1][, so]
+
+_∥M2[−][1]_ _−_ _M2[−][1][∥][op][ ≤∥][M][ −]1_ [1][∥][op][∥][M][2][ −] _[M][1][∥][op][∥][M][ −]2_ [1][∥][op][ .]
+
+Therefore,
+
+_A[−][1]_ _A[−]⋆_ [1][∥][op] _A_ _A⋆_ op _x_ _x[⋆](θ)_ _._
+_∥_ [ˆ] _−_ _[≤]_ _α[1][2][ ∥]_ [ˆ] − _∥_ _≤_ _α[γ][2][ ∥][ˆ] −_ _∥_
+
+As a consequence, the second term in J(ˆx, θ) − _∂x[⋆](θ) can be upper bounded and we obtain_
+
+_∥J(ˆx, θ) −_ _∂x[⋆](θ)∥≤∥A[ˆ][−][1]( B[ˆ] −_ _B⋆)∥_ + ∥( A[ˆ][−][1] _−_ _A[−]⋆_ [1][)][B][⋆][∥]
+
+_A[−][1]_ op _B_ _B⋆_ + _[γ]_ _x_ _x[⋆](θ)_ _B⋆_ _,_
+_≤∥_ [ˆ] _∥_ _∥_ [ˆ] − _∥_ _α[2][ ∥][ˆ] −_ _∥∥_ _∥_
+
+which yields the desired result.
+
+
+**Corollary 1 (Jacobian precision for gradient descent fixed point). Let f be such that f** (·, θ) is
+_twice differentiable and α-strongly convex and ∇1[2][f]_ [(][·][, θ][)][ is][ γ][-Lipschitz (in the operator norm) and]
+_∂2_ 1f (x, θ) is β-Lipschitz and bounded in norm by R. The estimated Jacobian evaluated at ˆx is
+_∇_
+_then given by_
+_J(ˆx, θ) = −(∇1[2][f]_ [(ˆ]x, θ))[−][1]∂2∇1f (ˆx, θ) .
+_For all θ ∈_ R[n], and any ˆx estimating x[⋆](θ), we have the following bound for the approximation
+_error of the estimated Jacobian_
+
+_β_
+_J(ˆx, θ)_ _∂x[⋆](θ)_ _xˆ_ _x[⋆](θ)_ _._
+_∥_ _−_ _∥≤_ _α_ [+][ γR]α[2] _∥_ _−_ _∥_
+ 
+
+_Proof of Corollary 1. This follows from Theorem 1, applied to this specific A(x, θ) and B(x, θ)._
+
+For proximal gradient descent, where T (x, θ) = proxηg(x _η_ 1f (x, θ), θ), this yields
+_−_ _∇_
+
+_A(x, θ) = I_ _∂1T_ (x, θ) = I _∂1proxηg(x_ _η_ 1f (x, θ), θ)(I _η_ 1[f] [(][x, θ][))]
+_−_ _−_ _−_ _∇_ _−_ _∇[2]_
+
+_B(x, θ) = ∂2proxηg(x_ _η_ 1f (x, θ), θ) _η∂1proxηg(x_ _η_ 1f (x, θ), θ)∂2 1f (x, θ) .
+_−_ _∇_ _−_ _−_ _∇_ _∇_
+
+
+-----
+
+We now focus in the case of proximal gradient descent on an objective f (x, θ) + g(x), where g is
+smooth and does not depend on θ. This is the case in our experiments in §4.3. Recent work also
+exploits local smoothness of solutions to derive similar bounds (Bertrand et al., 2021, Theorem 13)
+**Corollary 2 (Jacobian precision for proximal gradient descent fixed point). Let f be such that**
+_f_ (·, θ) is twice differentiable and α-strongly convex and ∇1[2][f] [(][·][, θ][)][ is][ γ][-Lipschitz (in the operator]
+_norm) and ∂2∇1f_ (x, θ) is β-Lipschitz and bounded in norm by R. Let g : R[d] _→_ R be a twice_differentiable µ-strongly convex (with special case µ = 0 being only convex), for which the function_
+Γη(x, θ) = _g(proxηg(x_ _η_ 1f (x, θ)) is κη-Lipschitz in it first argument. The estimated Jacobian
+_∇[2]_ _−_ _∇_
+_evaluated at ˆx is then given by_
+
+_J(ˆx, θ) = −(∇1[2][f]_ [(ˆ]x, θ) + Γη(ˆx, θ))[−][1]∂2∇1f (ˆx, θ) .
+
+_For all θ ∈_ R[n], and any ˆx estimating x[⋆](θ), we have the following bound for the approximation
+_error of the estimated Jacobian_
+
+_β + κη_ _γR_
+_J(ˆx, θ)_ _∂x[⋆](θ)_ _xˆ_ _x[⋆](θ)_ _._
+_∥_ _−_ _∥≤_ _α + µ_ [+] (α + µ)[2] _∥_ _−_ _∥_
+ 
+
+_Proof of Corollary 2. First, let us note that proxηg(y, θ) does not depend on θ, since g itself does not_
+depend on θ, and is therefore equal to classical proximity operator of ηg which, with a slight overload
+of notations, we denote as proxηg(y) (with a single argument). In other words,
+
+proxηg(y, θ) = proxηg(y),
+_∂1proxηg(y, θ)_ = ∂proxηg(y),
+
+
+∂2proxηg(y, θ) = 0 .
+
+
+
+Regarding the first claim (expression of the estimated Jacobian evaluated at ˆx), we first have that
+proxηg(y) is the solution to (x[′] _y) + η_ _g(x[′]) = 0 in x[′]_ -  by first-order condition for a smooth
+_−_ _∇_
+convex function. We therefore have that
+
+proxηg(y) = (I + η _g)[−][1](y)_
+_∇_
+
+_∂proxηg(y) = (Id + η_ _g(proxηg(y)))[−][1]_ _,_
+_∇[2]_
+
+the first I and inverse being functional identity and inverse, and the second Id and inverse being in
+the matrix sense, by inverse rule for Jacobians ∂h(z) = [∂h[−][1](h(z))][−][1] (applied to the prox).
+
+As a consequence, we have, for Γη(x, θ) = _g(proxηg(x_ _η_ 1f (x, θ)) that
+_∇[2]_ _−_ _∇_
+
+
+_A(x, θ) = Id −_ (Id + ηΓη(x, θ))[−][1](Id − _η∇1[2][f]_ [(][x, θ][))]
+
+= (Id + ηΓη(x, θ))[−][1][Id + ηΓη(x, θ) − (Id − _η∇1[2][f]_ [(][x, θ][))]]
+
+= η(Id + ηΓη(x, θ))[−][1](∇1[2][f] [(][x, θ][) + Γ][η][(][x, θ][))]
+
+_B(x, θ) = −η(Id + ηΓη(x, θ))[−][1]∂2∇1f_ (x, θ) .
+
+As a consequence, for all x ∈ R[d], we have that
+
+_J(x, θ) = −(∇1[2][f]_ [(][x, θ][) + Γ][η][(][x, θ][))][−][1][∂][2][∇][1][f] [(][x, θ][)][ .]
+
+In the following, we modify slightly the notation of both A and B, writing
+
+_A˜(x, θ) = ∇1[2][f]_ [(][x, θ][) + Γ][η][(][x, θ][)]
+_B˜(x, θ) =_ _∂2_ 1f (x, θ) .
+_−_ _∇_
+
+
+With the current hypotheses, following along the proof of Theorem 1, we have that _A[˜] is (α + µ)_
+well-conditioned, and (γ + κη)-Lipschitz in its first argument, and _B[˜] is β-Lipschitz in its first_
+argument and bounded in norm by R. The same reasoning yields
+
+_β + κη_ _γR_
+_J(ˆx, θ)_ _∂x[⋆](θ)_ _xˆ_ _x[⋆](θ)_ _._
+_∥_ _−_ _∥≤_ _α + µ_ [+] (α + µ)[2] _∥_ _−_ _∥_
+ 
+
+
+-----
+
+Block coordinate descent (BCD)
+
+|0 0 0|Col2|Col3|Col4|I|Unrolling D w/ MD f|ixed point|
+|---|---|---|---|---|---|---|
+||||I||D w/ PG f|ixed point|
+||||||||
+||||||||
+
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+ID w/ MD fixed point
+ID w/ PG fixed point
+
+Number of features
+
+
+Proximal gradient (PG)
+
+
+Mirror descent (MD)
+
+
+2.00
+
+1.75
+
+1.50
+
+1.25
+
+1.00
+
+0.75
+
+
+1.6
+
+1.4
+
+1.2
+
+1.0
+
+0.8
+
+0.6
+
+
+80
+
+60
+
+40
+
+|Col1|Col2|Col3|Col4|Col5|Col6|
+|---|---|---|---|---|---|
+|||||||
+|||||||
+|||||||
+|||||||
+|||||Unrol Implic|ling it diff (ID)|
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||||
+||||||
+||||||
+||||Unrolli Implici|ng t diff (ID)|
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+Implicit diff (ID)
+
+Number of features
+
+(a)
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+Implicit diff (ID)
+
+Number of features
+
+(b)
+
+
+(c)
+
+
+Figure 13: GPU runtime comparison of implicit differentiation and unrolling for hyperparameter
+optimization of multiclass SVMs for multiple problem sizes (same setting as Figure 3). Error bars
+represent 90% confidence intervals. Absent data points were due to out-of-memory errors (16 GB
+maximum).
+
+
+Proximal gradient (PG)
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+||||||
+||||||
+||||||
+||||Unrolli Implici|ng t diff (ID)|
+
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+Implicit diff (ID)
+
+Number of features
+
+
+Block coordinate descent (BCD)
+
+|8|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+|8 6 4 2 0 8 6|||||||
+||||||||
+||||||||
+||||||||
+||||||||
+||||||Unrolling||
+|||||I I|D w/ MD f D w/ PG f|ixed point ixed point|
+
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+ID w/ MD fixed point
+ID w/ PG fixed point
+
+Number of features
+
+
+Mirror descent (MD)
+
+
+98
+
+96
+
+94
+
+92
+
+90
+
+88
+
+86
+
+
+98
+
+96
+
+94
+
+92
+
+90
+
+88
+
+86
+
+
+98
+
+96
+
+94
+
+92
+
+90
+
+88
+
+86
+
+|Col1|Col2|Col3|Col4|Col5|Col6|
+|---|---|---|---|---|---|
+|||||||
+|||||||
+|||||||
+|||||||
+|||||Unroll Implic|ing it diff (ID)|
+
+
+2000 4000 6000 8000 10000
+
+Unrolling
+Implicit diff (ID)
+
+Number of features
+
+(a)
+
+
+(b)
+
+
+(c)
+
+
+Figure 14: Value of the outer problem objective function (validation loss) for hyperparameter
+optimization of multiclass SVMs for multiple problem sizes (same setting as Figure 3). As can
+be seen, all methods performed similarly in terms of validation loss. This confirms that the faster
+runtimes for implicit differentiation compared to unrolling shown in Figure 3 (CPU) and Figure 13
+(GPU) are not at the cost of worse validation loss.
+
+
+10[1]
+
+10[0]
+
+
+10[1]
+
+10[0]
+
+
+10
+
+10
+
+
+( )
+
+
+( )
+
+
+( )
+
+
+10 1 10[0] 10
+
+Implicit diff
+Unrolling
+
+1 [0] [1]
+
+||x ( ) x||2
+
+x
+
+( )
+
+
+(a) 250 features
+
+
+10 1 10[0] 10[1]
+
+Implicit diff
+Unrolling
+
+1 [0] [1]
+
+||x ( ) x||2
+
+x
+
+( )
+
+
+(b) 500 features
+
+
+10 1 10[0] 10[1]
+
+Implicit diff
+Unrolling
+
+1 [0] [1]
+
+||x ( ) x||2
+
+x
+
+( )
+
+
+(c) 1000 features
+
+
+Figure 15: Jacobian error ∥∂x[⋆](θ) − _J(ˆx, θ)∥2 (see also Definition 1) evaluated with a regularization_
+parameter of θ = 1, as a function of solution error ∥x[⋆](θ) _−_ _xˆ∥2 when varying the number of features,_
+on the multiclass SVM task (see Appendix E.1 for a detailed description of the experimental setup).
+The ground-truth solution x[⋆](θ) is computed using the liblinear solver (Fan et al., 2008) available in
+scikit-learn (Pedregosa et al., 2011) with a very low tolerance of 10[−][9]. Unlike in Figure 2, which
+was on ridge regression, the ground-truth Jacobian ∂x[⋆](θ) cannot be computed in closed form, in
+the more difficult setting of multiclass SVMs. We therefore use a finite difference to approximately
+compute ∂x[⋆](θ). Our results nevertheless confirm similar trends as in Figure 2.
+
+
+-----
+
+E EXPERIMENTAL SETUP AND ADDITIONAL RESULTS
+
+Our experiments use JAX (Bradbury et al., 2018), which is Apache2-licensed and scikit-learn
+(Pedregosa et al., 2011), which is BSD-licensed.
+
+E.1 HYPERPARAMETER OPTIMIZATION OF MULTICLASS SVMS
+
+**Experimental** **setup.** Synthetic datasets were generated using scikit-learn’s
+sklearn.datasets.make_classification (Pedregosa et al., 2011), following a
+model adapted from (Guyon, 2003). All datasets consist of m = 700 training samples belonging to
+_k = 5 distinct classes. To simulate problems of different sizes, the number of features is varied as_
+_p ∈{100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 7500, 10000}, with 10% of features being_
+informative and the rest random noise. In all cases, an additional mval = 200 validation samples
+were generated from the same model to define the outer problem.
+
+For the inner problem, we employed three different solvers: (i) mirror descent, (ii) (accelerated)
+proximal gradient descent and (iii) block coordinate descent. Hyperparameters for all solvers were
+individually tuned manually to ensure convergence across the range of problem sizes. For mirror
+descent, a stepsize of 1.0 was used for the first 100 steps, following a inverse square root decay
+afterwards up to a total of 2500 steps. For proximal gradient descent, a stepsize of 5 · 10[−][4] was used
+for 2500 steps. The block coordinate descent solver was run for 500 iterations. All solvers used the
+same initialization, namely, xinit = _k[1]_ [1][m][×][k][, which satisfies the dual constraints.]
+
+For the outer problem, gradient descent was used with a stepsize of 5 · 10[−][3] for the first 100 steps,
+following a inverse square root decay afterwards up to a total of 150 steps.
+
+Conjugate gradient was used to solve the linear systems in implicit differentiation for at most 2500
+iterations.
+
+All results reported pertaining CPU runtimes were obtained using an internal compute cluster. GPU
+results were obtained using a single NVIDIA P100 GPU with 16GB of memory per dataset. For each
+dataset size, we report the average runtime of an individual iteration in the outer problem, alongside a
+90% confidence interval estimated from the corresponding 150 runtime values.
+
+**Additional results** Figure 13 compares the runtime of implicit differentiation and unrolling on
+GPU. These results highlight a fundamental limitation of the unrolling approach in memory-limited
+systems such as accelerators, as the inner solver suffered from out-of-memory errors for most problem
+sizes (p ≥ 2000 for mirror descent, p ≥ 750 for proximal gradient and block coordinate descent).
+While it might be possible to ameliorate this limitation by reducing the maximum number of iterations
+in the inner solver, doing so might lead to additional challenges (Wu et al., 2018) and require careful
+tuning.
+
+Figure 14 depicts the validation loss (value of the outer problem objective function) at convergence. It
+shows that all approaches were able to solve the outer problem, with solutions produced by different
+approaches being qualitatively indistinguishable from each other across the range of problem sizes
+considered.
+
+Figure 15 shows the Jacobian error achieved as a function of the solution error, when varying the
+number of features.
+
+E.2 TASK-DRIVEN DICTIONARY LEARNING
+
+We downloaded from [http://acgt.cs.tau.ac.il/multi_omic_benchmark/](http://acgt.cs.tau.ac.il/multi_omic_benchmark/download.html)
+[download.html a set of breast cancer gene expression data together with survival information](http://acgt.cs.tau.ac.il/multi_omic_benchmark/download.html)
+[generated by the TCGA Research Network (https://www.cancer.gov/tcga) and processed](https://www.cancer.gov/tcga)
+as explained by (Rappoport & Shamir, 2018). The gene expression matrix contains the expression
+value for p=20,531 genes in m=1,212 samples, from which we keep only the primary tumors
+(m=1,093). From the survival information, we select the patients who survived at least five years
+after diagnosis (m1 = 200), and the patients who died before five years (m0 = 99), resulting in a
+cohort of m = 299 patients with gene expression and binary label. Note that non-selected patients
+are those who are marked as alive but were not followed for 5 years.
+
+
+-----
+
+To evaluate different binary classification methods on this cohort, we repeated 10 times a random split
+of the full cohort into a training (60%), validation (20%) and test (20%) sets. For each split and each
+method, 1) the method is trained with different parameters on the training set, 2) the parameter that
+maximizes the classification AUC on the validation set is selected, 3) the method is then re-trained on
+the union of the training and validation sets with the selected parameter, and 4) we measure the AUC
+of that model on the test set. We then report, for each method, the mean test AUC over the 10 repeats,
+together with a 95% confidence interval defined a mean ± 1.96 × standard error of the mean.
+
+We used Scikit Learn’s implementation of logistic regression regularized by ℓ1 (lasso)
+and ℓ2 (ridge) penalty from sklearn.linear_model.LogisticRegression, and
+varied the C regularization parameter over a grid of 10 values: _{10[−][5], 10[−][3], . . ., 10[4]}._
+For the unsupervised dictionary learning experiment method, we estimated a dictionary from the gene expression data in the training and validation sets, using sklearn.decomposition.DictionaryLearning(n_components=10,
+alpha=2.0), which produces sparse codes in k = 10 dimensions with roughly 50%
+nonzero coefficients by minimizing the squared Frobenius reconstruction distance with lasso
+regularization on the code. We then use sklearn.linear_model.LogisticRegression
+to train a logistic regression on the codes, varying the ridge regularization parameter C over a grid of
+10 values {10[−][1], 10[0], . . ., 10[8]}.
+
+Finally, we implemented the task-driven dictionary learning model (13) with our toolbox, following
+the pseudo-code in Figure 10. Like for the unsupervised dictionary learning experiment, we set the
+dimension of the codes to k = 10, and a fixed elastic net regularization on the inner optimization
+problem to ensure that the codes have roughly 50% sparsity. For the outer optimization problem, we
+solve an ℓ2 regularized ridge regression problem, varying again the ridge regularization parameter
+C over a grid of 10 values {10[−][1], 10[0], . . ., 10[8]}. Because the outer problem is non-convex, we
+minimize it using the Adam optimizer (Kingma & Ba, 2014) with default parameters.
+
+E.3 DATASET DISTILLATION
+
+**Experimental setup.** For the inner problem, we used gradient descent with backtracking linesearch, while for the outer problem we used gradient descent with momentum and a fixed step-size.
+The momentum parameter was set to 0.9 while the step-size was set to 1.
+
+Figure 4 was produced after 4000 iterations of the outer loop on CPU (Intel(R) Xeon(R) Platinum
+P-8136 CPU @ 2.00GHz), which took 1h55. Unrolled differentiation took instead 8h:05 (4 times
+more) to run the same number of iterations. As can be seen in Figure 16, the output is the same in
+both approaches.
+
+Dataset Distillation (MNIST). Generalization Accuracy: 0.8556
+
+Figure 16: Distilled MNIST dataset θ ∈ R[k][×][p] obtained by solving (12) through unrolled differentiation. Although there is no qualitative difference, the implicit differentiation approach is 4 times
+faster.
+
+E.4 MOLECULAR DYNAMICS
+
+Our experimental setup is adapted from the JAX-MD example notebook available at
+[https://github.com/google/jax-md/blob/master/notebooks/meta_](https://github.com/google/jax-md/blob/master/notebooks/meta_optimization.ipynb)
+[optimization.ipynb.](https://github.com/google/jax-md/blob/master/notebooks/meta_optimization.ipynb)
+
+We emphasize that calculating the gradient of the total energy objective, f (x, θ) = _ij_ _[U]_ [(][x][i,j][, θ][)][,]
+
+with respect to the diameter θ of the smaller particles, 1f (x, θ), does not require implicit differenti_∇_
+ation or unrolling. This is because 1f (x, θ) = 0 at x = x[⋆](θ): [P]
+_∇_
+
+
+_θf_ (x[⋆](θ), θ) = ∂x[⋆](θ)[⊤] 1f (x[⋆](θ), θ) + 2f (x[⋆](θ), θ) = 2f (x[⋆](θ), θ).
+_∇_ _∇_ _∇_ _∇_
+
+
+-----
+
+This is known as Danskin’s theorem or envelope theorem. Thus instead, we consider sensitivities of
+position ∂x[⋆](θ) directly, which does require implicit differentiation or unrolling.
+
+Our results comparing implicit and unrolled differentiation for calculating the sensitivity of position
+are shown in Figure 17. We use BiCGSTAB (Vorst & van der Vorst, 1992) to perform the tangent linear
+solve. Like in the original JAX-MD experiment, we use k = 128 particles in m = 2 dimensions.
+
+
+500 1000 1500 2000
+
+|Unrolled FIRE optimizer|Col2|
+|---|---|
+|||
+|||
+|||
+|||
+|||
+|||
+
+
+Number of optimization steps
+
+
+Implicit differentiation
+
+500 1000 1500 2000
+
+Number of optimization steps
+
+
+10[4]
+
+10[3]
+
+10[2]
+
+10[1]
+
+10[0]
+
+10 1
+
+
+Figure 17: L1 norm of position sensitivities in the molecular dynamics simulations, for 40 different random initial conditions (different colored lines). Gradients through the unrolled FIRE
+optimizer (Bitzek et al., 2006) for many initial conditions do not converge, in contrast to implicit
+differentiation.
+
+
+-----
+

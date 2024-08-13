@@ -1,0 +1,3071 @@
+# HYPERDQN: A RANDOMIZED EXPLORATION METHOD
+### FOR DEEP REINFORCEMENT LEARNING
+
+**Ziniu Li[1], Yingru Li[1][†]** **, Yushun Zhang[1], Tong Zhang[2][†], and Zhi-Quan Luo[1][†]**
+
+1Shenzhen Research Institute of Big Data,
+The Chinese University of Hong Kong, Shenzhen, China
+2Hong Kong University of Science and Technology
+_{ziniuli, yingruli, yushunzhang}@link.cuhk.edu.cn,_
+tongzhang@ust.hk, luozq@cuhk.edu.cn
+
+ABSTRACT
+
+Randomized least-square value iteration (RLSVI) is a provably efficient exploration
+method. However, it is limited to the case where (1) a good feature is known in
+advance and (2) this feature is fixed during the training. If otherwise, RLSVI
+suffers an unbearable computational burden to obtain the posterior samples. In
+this work, we present a practical algorithm named HyperDQN to address the
+above issues under deep RL. In addition to a non-linear neural network (i.e., base
+model) that predicts Q-values, our method employs a probabilistic hypermodel
+(i.e., meta model), which outputs the parameter of the base model. When both
+models are jointly optimized under a specifically designed objective, three purposes
+can be achieved. First, the hypermodel can generate approximate posterior samples
+regarding the parameter of the Q-value function. As a result, diverse Q-value
+functions are sampled to select exploratory action sequences. This retains the
+punchline of RLSVI for efficient exploration. Second, a good feature is learned to
+approximate Q-value functions. This addresses limitation (1). Third, the posterior
+samples of the Q-value function can be obtained in a more efficient way than
+the existing methods, and the changing feature does not affect the efficiency.
+This deals with limitation (2). On the Atari suite, HyperDQN with 20M frames
+outperforms DQN with 200M frames in terms of the maximum human-normalized
+score. For SuperMarioBros, HyperDQN outperforms several exploration bonus
+and randomized exploration methods on 5 out of 9 games.
+
+1 INTRODUCTION
+
+Reinforcement learning (RL) (Sutton & Barto, 2018) involves an agent that interacts with an unknown
+environment to maximize cumulative reward. The trade-off between exploration and exploitation is
+a fundamental problem in RL (Kakade, 2003). On the one hand, the agent needs to explore highly
+uncertain states and actions, which may sacrifice immediate reward. On the other hand, in the long
+term, the agent should take the best-known action; however, this action may be sub-optimal due to
+partial information. To this end, sample-efficient RL agents should qualify the epistemic uncertainty
+(i.e., subjective uncertainty due to limited samples (Osband, 2016a)) to address the trade-off.
+
+Bayesian approaches like Thompson sampling (Russo et al., 2018) provide a nice way of encoding the
+epistemic uncertainty by posterior distribution. For instance, randomized least-square value iteration
+(RLSVI)[1] (Osband et al., 2016b; 2019) is a well-known Bayesian algorithm. Specifically, RLSVI
+takes three steps to address the exploration and exploitation trade-off. First, conditioned on observed
+data, RLSVI solves a Bayesian linear regression problem and updates the posterior distribution over
+(the parameter of) the optimal Q-value functions by the Bayes update rule. Second, RLSVI samples a
+specific Q-value function from the posterior distribution. Third, to collect more data, greedy actions
+are selected based on this Q-value function. In theory, the randomness in posterior sampling could
+yield positive bias, which boosts optimistic behaviors (Osband et al., 2019; Russo, 2019; Zanette
+et al., 2020). However, RLSVI is restricted to the following case.
+
+†: Corresponding authors.
+1For readers who are not familiar with RLSVI, please refer to Appendix A.1 for a brief introduction.
+
+
+-----
+
+-  A good feature is known in advance. Over this feature, the Q-values can be approximated as a
+linear function.
+
+-  This feature is fixed so that the posterior distribution is easy to compute in an incremental update
+way (see Remark 2 in Appendix A.1 or (1.1) for an illustration).
+
+Unfortunately, these two requirements do not hold in the deep RL scenario. The challenges of
+extending RLSVI to deep RL are listed below.
+
+1) If the provided feature is not good and fixed, RLSVI is rarely competent. Under the deep
+RL setting, only a raw feature outputted by a randomly initialized neural network is available.
+Such an unpolished feature has limited representation power, so the Q-value function cannot be
+approximated accurately. Further, the mechanism of RLSVI only involves updating the model
+parameter, while the feature is left to be fixed (as a raw feature in this setting). As a result, the
+empirical performance of RLSVI is often poor; see Appendix E.1 for the evidence.
+
+2) When we update the feature over iterations in deep RL, the computational complexity of
+**RLSVI becomes unbearable. As the data accumulates over iterations, RLSVI needs to repeatedly**
+compute the feature covariance matrix to update the posterior distribution. With the fixed feature
+mapping, this process can be efficiently implemented in an incremental way (see (1.1), where xK
+denotes the state-action pair (sK, aK) at iteration K and ϕ : S × A → R[d] is a feature mapping.).
+However, when the feature mapping ϕK is changing over iterations, we need to repeatedly calculate
+the matrix ΦK using all historical data as in (1.2) (e.g. in Atari, this calculation could involve more
+than 1M samples with dimension 512), and this process results in a huge computation burden.
+
+fixed ϕ: ΦK = ΦK 1 + ϕ(xK)ϕ(xK)[⊤] with Φ0 = 0, (1.1)
+_−_
+
+_K_ _K−1_
+
+changing ϕK: ΦK := _ϕK(xℓ)ϕK(xℓ)[⊤], ΦK_ 1 := _ϕK_ 1(xℓ)ϕK 1(xℓ)[⊤], (1.2)
+
+_−_ _−_ _−_ _· · ·_
+_ℓ=1_ _ℓ=1_
+
+X X
+
+
+To address these two issues in deep RL, Bootstrapped DQN (BootDQN) (Osband et al., 2016a; 2018)
+takes a remarkable first step. To bypass the hurdle of issues 1 and 2, BootDQN simultaneously
+trains tens of ensembles (i.e., randomly initialized neural networks) and views them as approximate
+posterior samples of Q-value functions. However, with limited computation resources, BootDQN
+typically uses ensembles with a strictly limited number of elements. As such, the quality of the
+learned posterior distribution could be poor (Lu & Van Roy, 2017).
+
+In this work, we present a principled approach named HyperDQN that addresses the above issues
+under the context of deep RL. Specifically, HyperDQN is built on two parametric models: in addition
+to a non-linear neural network (i.e., base model) that predicts Q-values, it employs a hypermodel
+(Dwaracherla et al., 2020) (i.e., meta model). This hypermodel maps a vector z (from the Gaussian
+distribution) to a parameter instance of the Q-value function. As shown in Figure 1, this hypermodel
+
+|ector|Hypermodel f ⌫|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+
+
+aims to serve as a proxy for generating the posterior samples of θpredict. To achieve this goal, both
+models are jointly optimized by a specially designed temporal difference (TD) objective (see (
+```
+          random vector
+
+#### z Hypermodel ✓￼ predict := f⌫(z)
+
+```
+_p(z)_ _f⌫_ _p(✓predict)_
+
+**Base model**
+```
+                    value function
+
+```
+`state` **Hidden** **Predict** _Q✓(s, a)_
+
+#### s Layers Layer
+
+_φ￼_ _✓hidden_ _✓￼_ predict
+
+Figure 1: Illustration for HyperDQN .
+
+
+After optimization, our approach has the following essential merits.
+
+-  First, we prove that the optimized hypermodel can approximate the posterior distribution under
+the Bayesian linear regression case (see Theorem 1). Thus, diverse Q-value functions can be
+sampled to select exploratory action sequences. This retains the punchline of RLSVI for efficient
+exploration. We remark that this theoretical guarantee is missing in (Dwaracherla et al., 2020).
+
+
+-----
+
+-  Second, the feature mapping ϕθhidden( ) is updated in an end-to-end way during the training. This
+
+_·_
+deals with the feature learning problem of RLSVI (i.e., issue 1).
+
+-  Third, the posterior samples of θpredict are obtained without involving (1.2). Specifically, the
+hypermodel could directly output an approximate posterior sample by taking z as its input. This
+addresses the computational problem of RLSVI when the feature is changing (i.e., issue 2).
+
+-  Finally, compared with the finite ensembles in BootDQN, our approach learns the posterior
+distribution in a meta way and the hypermodel has certain generalization ability. Thus, our
+approach could have a better posterior approximation with the same computation resources. As
+such, our method is more computationally efficient to achieve a near-optimal performance.
+To evaluate the efficiency of algorithms, we first consider the Atari suite (Bellemare et al., 2013) and
+assess the efficiency in terms of the human-normalized score over 49 tasks. The empirical result
+suggests HyperDQN with 20M frames outperforms DQN (Mnih et al., 2015) with 200M frames in
+terms of the maximum human-normalized score. With the same training frames, HyperDQN also
+outperforms the exploration bonus methods OPIQ (Rashid et al., 2020) and OB2I (Bai et al., 2021),
+and randomized exploration methods BootDQN (Osband et al., 2018) and NoisyNet (Fortunato et al.,
+2018). For another challenging benchmark SuperMarioBros (Kauten, 2018), HyperDQN beats these
+baselines on 5 out of 9 games in terms of the raw scores.
+
+2 BACKGROUND
+
+**Markov Decision Process. In the standard reinforcement learning (RL) framework (Sutton &**
+Barto, 2018), a learning agent interacts with an Markov Decision Process (MDP) to improve its
+performance via maximizing cumulative reward. The sequential decision process is characterized
+as follows: at each timestep t, the agent receives a state st from the environment and selects an
+action at from its policy π(a|s) = Pr{a = at|s = st}; this decision is sent back to the environment,
+and the environment gives a reward signal r(st, at) and transits to the next state st+1 based on the
+state transition probability p[a]s,s[′][ = Pr][{][s][′][ =][ s][t][+1][|][s][ =][ s][t][, a][ =][ a][t][}][. The main target of RL is to]
+maximize the (expected) discounted return E _∞t=0_ _[γ][t][r][(][s][t][, a][t][)]_ _s0 ∼_ _ρ(·)], where ρ(·) is initial state_
+distribution and γ ∈ (0, 1) is a discount factor. P
+
+**Deep Q-Networks (DQN). In Deep Q-Networks (DQN) (Mnih et al., 2015), it employs a neural net-**
+work to approximate the Q-value function, which is defined as Q[π](s, a) = E[[P][∞]t=0 _[γ][t][r][(][s][t][, a][t][)][|][s][0][ =]_
+_s, a0 = a]. In particular, a temporal difference (TD) based objective is applied:_
+
+2
+
+min _r(s, a) + γ max_ _,_ (2.1)
+_θ_ _a[′][ Q][θ][(][s][′][, a][′][)][ −]_ _[Q][θ][(][s, a][)]_
+
+(s,a,r,sX[′])∼D  
+
+where D is the experience replay buffer, Qθ is a prediction network parameterized by θ, and Qθ is
+the so-called target network, which is a delayed copy of Qθ for stable training.
+
+3 RELATED WORK
+
+**Epistemic uncertainty qualification. It is justified that dithering strategies like ϵ-greedy (Mnih**
+et al., 2015) are inefficient (Osband et al., 2019). This is intuitive since they do not have any
+epistemic uncertainty measure and hence cannot “write-off” sub-optimal actions after experimentation.
+Importantly, epistemic uncertainty reflects the confidence about the unknown environment in online
+decision-making (Osband, 2016a). For tabular MDPs with the one-hot feature, “count” provides an
+epistemic uncertainty measure (Brafman & Tennenholtz, 2002; Jaksch et al., 2010; Azar et al., 2017;
+Jin et al., 2018) and “covariance” serves as the counterpart for linear MDPs (Jin et al., 2020; Cai
+et al., 2020). Currently, we do not have a perfect epistemic uncertainty qualification tool for deep RL,
+where a good feature is unknown in advance. As argued in (Osband et al., 2018), approaches like
+dropout (Srivastava et al., 2014) and distributional operator (Bellemare et al., 2017) are not suitable
+since they are designed for risk estimation. In this paper, we focus on the extension of hypermodel
+(Dwaracherla et al., 2020), which could capture the epistemic uncertainty for bandit tasks.
+
+**OFU-based exploration. Based on the mentioned uncertainty qualification, optimism in the face of**
+uncertainty (OFU) based methods (Jaksch et al., 2010; Azar et al., 2017; Jin et al., 2018) construct
+upper confidence bound (UCB) to direct exploration. These theoretical works have inspired many
+empirical studies that encourage exploration by adding “reward/exploration bonus” to mimic UCB
+(Stadie et al., 2015; Pathak et al., 2017; Tang et al., 2017; Burda et al., 2019a;b). The challenges in this
+
+
+-----
+
+direction include: how to obtain task-relevant reward bonus (O’Donoghue et al., 2018)? how to get
+an optimistic initialization with neural network (Rashid et al., 2020)? how to properly back-propagate
+the uncertainty over periods to induce temporally extended behaviors (Bai et al., 2021)? Though some
+of SOTA exploration bonus methods have achieved superior performance on some hard exploration
+tasks, (Ta¨ıga et al., 2020) report that these algorithms do not provide meaningful gains over the
+_ϵ-greedy scheme on the whole Atari suite._
+
+**TS-based exploration. On the other hand, Thompson sampling (TS) based methods design the**
+exploration strategy in a Bayesian way (Osband et al., 2013; Osband & Van Roy, 2017). Randomized
+least-square value iteration (RLSVI) provides a promising direction (Osband et al., 2016b; 2019). As
+we have mentioned in Section 1, this method, however, can only be applied when a good feature is
+known and fixed during the training. Following RLSVI, Osband et al. (2016a) develop a practical
+algorithm called Bootstrapped DQN, which uses finite ensembles to generate the randomized value
+functions. As discussed earlier, the main bottleneck of Bootstrapped DQN is its computation
+complexity: it requires lots of ensembles to obtain an accurate approximation of the posterior samples
+(Lu & Van Roy, 2017). Our method is closely related to NoisyNet (Fortunato et al., 2018) as both
+methods inject noise to the parameter. However, we cannot view NoisyNet as an extension of RLSVI.
+The main reason is that NoisyNet is not ensured to approximate the posterior distribution as stated
+in (Fortunato et al., 2018). Besides, Ishfaq et al. (2021) attempt to extend the idea of RLSVI to the
+general case. In particular, their algorithm solves M randomized least-square problems and chooses
+the most optimistic value function in each iteration. Since M is selected to be proportional to the
+inherent dimension in theory, their algorithm is also not computationally efficient.
+
+4 METHODOLOGY
+
+4.1 ARCHITECTURE DESIGN
+
+In this part, we explain the architecture design of HyperDQN shown in Figure 1. First, the hypermodel
+_fν(_ ) maps a Nz-dimension random vector z _p(z) (e.g., a Gaussian distribution) to a specific_
+
+_·_ _∼_
+_d-dimension parameter θ := fν(z). For example, if z follows an isotropic Gaussian distribution_
+_N_ (0, I) and the hypermodel fν(z) = νw[⊤][z][ +][ ν][b] [is a linear model, then][ θ][ :=][ f][ν][(][z][)][ ∼N] [(][ν][b][, ν]w[⊤][ν][w][)][,]
+whereIn general, the hypermodel could be a non-linear mapping so that νw ∈ R[N][z][×][d] and νb ∈ R[d] are the weight and bias of the linear hypermodel with fν(z) could follow an arbitrary ν = (νw, νb).
+distribution. Unless stated otherwise, we only consider the linear hypermodel rather than non-linear
+ones. This is because linear hypermodel has sufficient representation power to approximate the
+posterior distribution (like RLSVI does) (Dwaracherla et al. (2020)).
+
+Now, we explain the basemodel in Figure 1. The base model (i.e., a deep neural network) operates in
+a standard way: it takes a state s as its input and outputs Qθ(s, a) ∈ R for some action a. Concretely,
+the base model employs a feature extractor ϕθhidden : S → R[d] (i.e., the hidden layers in Figure 1)
+to learn a good representation. Then, the base model outputs Q(s, a) by Q(s, ) = θpredict[⊤] _[ϕ][θ]hidden_ [(][s][)][,]
+_·_
+wheremodel in Figure θpredict ∈ 1R). By our formulation,[d][×][N][a] is the parameter of the prediction layer (i.e., the last layer of the base θpredict is also the output of the hypermodel. That is,
+_θpredict = fν(z) + fνprior_ (z), where fνprior (z) is a fixed prior hypermodel; see the discussion below.
+Numerically, we fix vprior = v0, where v0 is a random initialization. In the sequel, we will introduce
+the difference between the hypermodel in Figure 1 and that in Dwaracherla et al. (2020).
+
+4.2 DIFFERENCES WITH DWARACHERLA ET AL. (2020): HOW THE DIRECT EXTENSION FAILS
+
+Readers may notice that our architecture design is different from the original one in (Dwaracherla et al.,
+2020). Concretely, we apply the hypermodel for the last layer of the base model, but in (Dwaracherla
+et al., 2020) the hypermodel is applied for all layers of the base model. This modification is aimed
+to overcome the training difficulty: the training will fail if otherwise (see Appendix E.2 for the
+numerical evidence). Why does the training fail under the original design? We find out it is due
+to the severe gradient explosion at the initialization, which does not happen if no hypermodel is
+attached. For standard deep neural network models, such gradient explosion is mainly avoided by
+carefully designed initialization strategies (Sun, 2019). For instance, the famous LeCun initialization
+rule (LeCun et al., 1998) suggests that we should initialize the parameter of i-th layer by sampling
+from the Gaussian distribution (0, σ[2]) with σ = 1/ _di_ 1, where di 1 is the width of (i 1)-th
+_N_ _−_ _−_ _−_
+
+layer. As a result, the input signal and the output signal have the same order ℓ2-norm after processing.
+
+p
+
+
+-----
+
+However, things have changed if we directly use the architecture in (Dwaracherla et al., 2020) with
+this initialization technique: the output of the hypermodel is expected to lie between −1 and 1 (up
+to constants); this further implies that the parameter is in [−1, 1] for each layer of the base model,
+which disobeys the principle 1/ _di−1. Consequently, the input signal amplifies over layers and the_
+
+gradient explodes. To bypass the training issue, Dwaracherla et al. (2020) use a shadow base model
+
+p
+
+(e.g., 2 layers with the width of 10) and further implement the blocked hypermodel; see (Dwaracherla
+et al., 2020, Section 4) for details. But for deep RL, this training issue is severe and we overcome
+this challenge by the proposed architecture shown in Figure 1, in which the hidden layers of the base
+model are initialized with common techniques and the last layer could be properly initialized by
+normalizing the output of the hypermodel. This deals with the mentioned parameter initialization
+issue. Fortunately, this simple architecture still retains the main ingredient of RLSVI (i.e., capturing
+the posterior distribution over a linear prediction function).
+
+4.3 TRAINING OBJECTIVE
+In this part, we introduce the objective function. For the sake of better presentation, let us first
+consider a regression task. Let x ∈ R[d] be the feature and y ∈ R be the label, the objective function
+developed in (Dwaracherla et al., 2020) for training the hypermodel is
+
+_L(ν; D) =_ _z_ _p(z)_ _y + σωz[⊤]ξ_ _−_ (gfνprior (z)(x) + gfν (z)(x)) 2 + σσω[2]p[2] _∥fν(z)∥[2]_ (dz),
+Z  (x,y,ξX)∈D   (a) (b)  
+
+(c)
+
+| {z }
+
+| {z } (4.1)
+
+| {z }
+
+where ξ is a random vector independently sampled from the unit hypersphere, paired with each
+(x, y) in the dataset D = {(xi, yi, ξi) : i = 1, . . ., |D|}; σω > 0 is the noise scale and σp > 0 is
+the regularization scale. Next, we briefly explain three key parts in (4.1). First, (a) is an artificial
+noise term exerted on the label y, which is introduced for pure technical purpose. We defer more
+discussion of (a) to Remark 1. Second, (b) contains two base models denoted by g. Concretely,
+_gfνprior_ (z)( ) is a prior model parameterized by the output of a fixed hypermodel fνprior. This term
+
+_·_
+stores the prior information. At the same time, gfν (z)( ) is a differential model linked by the output
+
+_·_
+of a trainable hypermodel fν. We remark that term (b) is called “additive prior models” in (Osband
+et al., 2018; Dwaracherla et al., 2020); see (Dwaracherla et al., 2020, Section 2.5) for a detailed
+discussion. Finally, (c) is a regularization term, which is an essential design in Bayesian learning.
+
+To address the limitations of RLSVI for deep RL tasks, we first employ a feature mapping (parameterized by θhidden) and approximate the Q-value function by a linear function (parameterized by
+_θpredict) over the learned feature. Furthermore, the parameter of this linear function is modeled by_
+the hypermodel (i.e., θpredict = fνprior (z) + fν(z)) as discussed in Section 4.1. To this end, we extend
+(4.1) and implement the following optimization problem:
+
+min _p(z)_ _Qtarget(s[′], z) + σωz[⊤]ξ_ _Qprediction(s, a, z)_ 2 + σω[2] _fν(z)_ (dz),
+_ν,θhidden_ _z_ _−_ _σp[2]_ _∥_ _∥[2]_
+
+Z  (s,a,r,ξ,s[′]) 
+
+X _∈D_   
+
+(4.2)
+where
+_Qprediction(s, a, z) = Qθprior,fνprior_ (z)(s, a) + Qθhidden,fν (z)(s, a),
+
+(4.3)
+
+_Qtarget(s[′], z) = r + γ maxa[′]_ _Qθprior,fνprior_ (z)(s[′], a[′]) + Qθ¯hidden,fν¯[(][z][)][(][s][′][, a][′][)] _._
+
+Similar to the formulation in the regression problem, theh _Q-value function is the sum of the priori_
+_Qθprior,fνprior_ (z) and the differential Qθhidden,fν (z). Following the target network in DQN, (θhidden, ν) is
+the delayed copy of (θhidden, ν). Compared with the TD loss in (2.1), there is an additional noise
+term σωz[⊤]ξ for Bayesian learning and the prediction layer of the Q-value function is modeled as a
+probabilistic layer by the hypermodel. In experiments, we use the average of finite samples of z to
+approximate (4.2); see the empirical loss function in (A.6) in Appendix. We choose Adam (Kingma
+& Ba, 2015) to optimize the empirical loss function.
+
+4.4 THEORETICAL GUARANTEE
+
+To understand our method, we explain why (4.1) is a good objective to generate approximate posterior
+samples. We provide the analysis under the linear case.
+
+
+-----
+
+**Assumption 1. Suppose the data generation follows y = x[⊤]θ[⋆]** + ω[⋆], ω[⋆] _∼N_ (0, σω[2] [)][ and the prior]
+_distribution over θ[⋆]_ _is N_ (θp, σp[2][I][)][. Furthermore, assume the base model is linear, i.e.,][ g]fν (z)[(][x][) =]
+_x[⊤]fν(z) and gfνprior_ (z)(x) = x[⊤]fνprior (z). Moreover, assume the hypermodel is also linear, i.e.,
+
+_fν(z) = νw[⊤][z][ +][ ν][b]_ _[and][ f][ν]prior_ [(][z][) =][ ν]w[prior][⊤]z + νb[prior]; ν = (νw, νb) and νprior = (νw[prior], νb[prior]).
+
+Based on Assumption 1, the posterior distribution over θ[⋆] is N (E[θ[⋆] _| D], Cov[θ[⋆]_ _| D]) with_
+
+1 _−1_ 1
+E[θ[⋆] ] = _X_ _[⊤]X + [1]_ _I_ _X_ _[⊤]Y + [1]_ _θp_ _,_
+_| D_ _σω[2]_ _σp[2]_ _σω[2]_ _σp[2]_
+   
+
+1 _−1_
+Cov[θ[⋆] ] = _X_ _[⊤]X + [1]_ _I_ _,_
+_| D_ _σω[2]_ _σp[2]_
+ 
+
+where X ∈ R[|D|×][d] and Y ∈ R[|D|] are concatenation of xi and yi, respectively. Also, we have that
+_gfνprior_ (z)(x) + gfν (z)(x) = gfνprior (z)+fν (z)(x) = gθ(x) = x[⊤]θ, where θ := fνprior (z) + fν(z).
+
+**Theorem 1 (Informal). Under Assumption 1, set νw[prior]** = σpI and νb[prior] = θp. Let ν[⋆] = (νw[⋆] _[, ν]b[⋆][)][ be]_
+_the optimal solution of (4.1) conditioned on specific realizations of ξ, then θ := fνprior_ (z) + fν⋆ (z)
+_∼_
+_N_ (νb[prior] + νb[⋆][,][ (][ν]w[prior] + νw[⋆] [)][⊤][(][ν]w[prior] + νw[⋆] [))][ satisfies]
+
+_νb[prior]_ + νb[⋆] [=][ E][[][θ][⋆] _[| D][]][,]_ (νw[prior] + νw[⋆] [)][⊤][(][ν]w[prior] + νw[⋆] [) = Cov[][θ][⋆] _[| D][] +][ err][(][ξ][)][.]_
+_Furthermore, the error term satisfies Eξ[err(ξ)] = 0._
+
+Theorem 1 states that the optimized hypermodel can approximate the true posterior distribution. The formal statement
+and proof are given in Appendix B.3. We emphasize that the
+message in Theorem 1 is not discussed in (Dwaracherla et al.,
+2020hypermodel has sufficient representation power to approximate, Theorem 1). Dwaracherla et al. (2020) prove that a linear _✓b[?]_
+any distribution (over functions) so it is unnecessary to use a
+non-linear one. However, this guarantee is unrelated to the objective (4.1): Dwaracherla et al. (2020) only show there exists
+a linear hypermodel can approximate the posterior distribution _✓￼_ _w[?]_
+but Dwaracherla et al. (2020) do not tell us whether (4.1) can Figure 2: Visualization of true poslead to such a hypermodel. Instead, this question is affirma- terior samples and learned posterior
+tively answered by Theorem 1. In addition, Theorem 1 also samples.
+
+,
+
+_✓b[?]_
+
+_exists_
+
+_✓￼_ _w[?]_
+
+) can Figure 2: Visualization of true pos
+terior samples and learned posterior
+
+also samples.
+
+conveys an important message about the noise used in (4.1), which we explain in Remark 1.
+
+**Remark 1. Readers may ask whether an independent Gaussian noise ω (rather than the z-dependent**
+_noise z[⊤]ξ) is applicable in (4.1). Intuitively, ω can also form a randomized-least square problem to_
+_optimize the hypermodel. However, by inspecting the proof of Theorem 1, we claim that this scheme_
+_does not work. Technically speaking, ω will introduce exogenous random sources into the objective_
+_function, which jeopardizes the learning goal of mapping an index z to a posterior sample θ; see_
+_Appendix B.4 for a formal argument._
+
+_To better understand the fundamental issue involved here, we run simulation on a toy 2-dimensional_
+_Bayesian linear regression problem (Assumption 1) with θ[⋆]_ = (θw[⋆] _[, θ]b[⋆][)][; see Appendix][ C.3][ for]_
+_experiment details. After optimizing (4.1), we visualize the posterior samples generated by the linear_
+_hypermodel in Figure 2. In particular, hypermodel(z[⊤]ξ) (in green) and hypermodel(ω) (in_
+_red) correspond to learned samples via solving (4.1) with a z-dependent noise z[⊤]ξ and an independent_
+_Gaussian noise ω, respectively. The variant posterior sample (in purple) is obtain by the_
+_true posterior distribution N_ (E[θ[⋆] _| D], Cov[θ[⋆]_ _| D]). We observe that the z-dependent noise is_
+_indispensable for the hypermodel to approximate the posterior distribution._
+
+4.5 THE ALGORITHM
+
+We outline the proposed method in Algorithm 2 in Appendix. At the beginning of each episode, a
+random vector z is sampled to obtain the Q-value function, which is further used for interactions with
+environments. Subsequently, the randomized temporal difference objective in (4.2) is optimized to
+train the hypermodel and the hidden layers based on the collected data.
+
+
+-----
+
+Next, we interpret HyperDQN from an algorithmic level introduced in (Osband et al., 2018). In
+particular, HyperDQN achieves the desiderata:
+
+-  Task-relevant feature. A task-specific feature can be obtained by the end-to-end training in (4.2).
+Such a feature is good in the sense that it is optimized to approximate multiple value functions as
+different invocations of z yield several individual TD loss functions. As discussed previously, this
+feature learning procedure is beyond the scope of RLSVI.
+
+-  Commitment.[2] The agent executes action sequences that span multiple periods by obeying its
+intent. In each episode, HyperDQN samples a specific value function and takes greedy actions
+according to this value function until the episode terminates. Unlike BootDQN (Osband et al.,
+2016a) [3] and OFU-based algorithms (Ta¨ıga et al., 2020; Rashid et al., 2020; Bai et al., 2021),
+HyperDQN does not combine ϵ-greedy as the perturbation in ϵ-greedy ruins “far-sighted” behaviors
+generated by the original algorithm.
+
+-  Cheap computation. As discussed earlier, RLSVI needs to re-compute the feature covariance
+matrix when the feature mapping changes, which results in a huge computation burden. To address
+this issue, BootDQN simultaneously trains tens of ensembles. When the computation resources are
+limited, the quality of generated posterior samples by BootDQN is poor (Lu & Van Roy, 2017).
+However, our approach learns the approximate posterior samples in a meta way and the hypermodel
+has certain generalization ability. As such, and our method tends to be more computation efficient.
+
+As a side note, if the random index z is repeatedly sampled from a finite set, the hypermodel
+degenerates to finite ensembles. As such, BootDQN can be viewed as a special case of HyperDQN.
+Following (Osband et al., 2018), we summarize BootDQN and HyperDQN in Table 1.
+
+Table 1: Important issues in posterior approximations for deep RL. A green tick indicates a satisfying
+result, a red cross implies an undesirable result and a yellow circle means something in between.
+
+Task-relevant feature Commitment Cheap computation
+
+BootDQN (Osband et al., 2018) ✓ - ✗
+
+**HyperDQN** ✓ ✓ 
+RLSVI (Osband et al., 2016b) ✗ ✓ ✗✗
+
+
+5 EXPERIMENTS
+
+In this section, we present numerical experiments to validate the efficiency of the proposed method.
+Experiment details can be found in Appendix C.
+
+5.1 ATARI
+
+Our first experiment is on the Arcade Learning Environment (Bellemare et al., 2013), which provides
+a platform to assess the general competence. The training and evaluation procedures (e.g., observation
+preprocessing and reward clipping) follows (Mnih et al., 2015) and (van Hasselt et al., 2016). We
+measure the sample efficiency in terms of the human-normalized score during the interaction. In
+particular, the raw score of each game is normalized so that 0% corresponds to a random agent and
+100% to a human expert.
+
+We consider five baselines: DQN (Mnih et al., 2015), OPIQ[4] (Rashid et al., 2020), OB2I[5] (Bai
+et al., 2021), BootDQN[6] (Osband et al., 2018) and NoisyNet[7] (Fortunato et al., 2018). In particular,
+OPIQ and OB2I are two advanced OFU (i.e, exploration bonus based) methods while BootDQN and
+NoisyNet are randomized exploration methods.
+
+The learning curve over 49 games (by median) with the 20M frames training budget is displayed
+in Figure 3. We see that HyperDQN quickly explores and achieves the best performance among
+baselines. The performance of OFU-based methods is bad: OPIQ cannot achieve a satisfying
+
+2This concept is originally defined in the context of concurrent RL (Dimakopoulou & Roy, 2018). We borrow
+this concept to help discuss the combination with ϵ-greedy under the standard RL framework.
+3BootDQN uses ϵ-greedy for complicated tasks like Atari; see (Osband et al., 2016a, Appendix D.1).
+[4https://github.com/oxwhirl/opiq](https://github.com/oxwhirl/opiq)
+[5https://github.com/Baichenjia/OB2I](https://github.com/Baichenjia/OB2I)
+[6Modified from https://github.com/johannah/bootstrap_dqn for a fair comparison.](https://github.com/johannah/bootstrap_dqn)
+[7Modified from https://github.com/ku2482/fqf-iqn-qrdqn.pytorch/blob/master/](https://github.com/ku2482/fqf-iqn-qrdqn.pytorch/blob/master/fqf_iqn_qrdqn/network.py)
+[fqf_iqn_qrdqn/network.py for a fair comparison.](https://github.com/ku2482/fqf-iqn-qrdqn.pytorch/blob/master/fqf_iqn_qrdqn/network.py)
+
+
+-----
+
+Table 2: Comparison of algorithms on Atari in terms of the median over 49 games’ maximum
+human-normalized scores. Note that the performance of DQN is based on 200M training frames
+while other methods are based on 20M training frames.
+
+
+DQN (200M) OPIQ OB2I BootDQN NoisyNet HyperDQN
+
+93% 37% 50% 82% 91% **110%**
+
+
+performance over all games and OB2I degenerates after 10M frames. This is partially because the
+exploration bonus may guide a direction that is unrelated to the environment reward. However,
+randomized exploration methods do not have such an issue. Our experiment results regarding OFUbased methods are consistent with (Ta¨ıga et al., 2020): though they may perform well on some hard
+exploration tasks, current OFU-based methods cannot provide meaningful gains over the vanilla
+DQN method on the whole Atari suite.
+
+We notice that researchers also consider the metric of the maximum human-normalized score, which
+measures the performance of the best policy during training; refer to (Mnih et al., 2015; van Hasselt
+et al., 2016; Hessel et al., 2018; Fortunato et al., 2018). Specifically, we compute the maximum
+evaluation scores after training for each game and average them by the median. We report such results
+in Table 2. In particular, we see that HyperDQN outperforms the performance obtained by DQN with
+200 training frames. We do not consider the statistics of mean because it is significantly affected by
+some special games (e.g., Atlantis); see Table 5 in Appendix.
+
+We note that the 20M frames training budget (rather than 200M frames) is commonly used in (Lee
+et al., 2019; Bai et al., 2021). The main reason is that algorithms can achieve satisfactory performance
+on many tasks with 20M frames while the 200M frames training budget requires about 30/10 days
+with a CPU/GPU machine for a game, which is expansive in time and money.
+
+HyperDQN Q*bert
+
+BootDQN HyperDQN(with epsilon-greedy)
+
+20%
+
+
+0%
+
+
+Frame (millions)
+
+|HyperDQN NoisyNet BootDQN OB2I OPIQ DQN|Col2|
+|---|---|
+||5 10 15|
+
+
+Q*bert
+
+HyperDQN
+HyperDQN(with epsilon-greedy)
+
+80% NoisyNet
+
+BootDQN
+OB2I
+OPIQ
+DQN
+
+40%
+
+Median human-normalized score
+
+0%
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+Figure 3: Comparison of algorithms in terms of the
+human-normalized score over 49 games in Atari.
+
+
+Figure 4: Comparison of algorithms on Q*bert.
+_ϵ-greedy makes HyperDQN worse._
+
+
+To better understand the performance of HyperDQN, we visualize the relative improvements over
+baselines on “easy exploration” and “hard exploration” environments in Figure 12, 13, 14, and 15 in
+Appendix D. We see that HyperDQN could perform well on many easy and hard exploration tasks.
+However, HyperDQN does not work for Montezuma’s Revenge, in which the reward is very sparse so
+there is limited feedback for feature selection. For the same reason, randomized exploration methods
+in (Osband et al., 2018; Fortunato et al., 2018) do not perform well on this task.
+
+Finally, we provide evidence that commitment is crucial for our method. Specifically, ϵ-greedy would
+lead to worse performance for HyperDQN; see the empirical result on the game Q*bert in Figure 4.
+The same observation holds for other environments (refer to Appendix D).
+
+5.2 SUPERMARIOBROS
+
+
+In this part, we evaluate algorithms on the SuperMarioBros suite (Kauten, 2018). Environment
+preprocessing and algorithm parameters basically follow the one used in Atari and we do not tune
+parameters for any algorithm.
+
+We note that SuperMarioBros-1-3 and SuperMarioBros-2-2 are two hard exploration tasks due to
+the long planning horizon and sparse reward. Experiments are run with 3 random seeds. Similar to
+Table 5, we report the maximum scores in the following Table 3; see Figure 17 in Appendix for the
+learning curves on each game. We see that HyperDQN beats baselines on 5 out of 9 games.
+
+
+-----
+
+Table 3: Comparison of algorithms on SuperMarioBros in terms of the raw scores by the best policies
+with 20M training frames.
+
+
+|SuperMarioBros-1-1 Published as a conference paper at ICLR 2020|DQN OPIQ OB2I BootDQN NoisyNet HyperDQN|
+|---|---|
+||1, 070 7, 650 4, 457 7, 009 12, 439 7, 924|
+||2, 883 5, 515 4, 695 5, 665 6, 347 8, 267|
+|SuperMarioBros-1-2 SuperMarioBros-1-3 SuperMarioBros-2-1 SuperMarioBros-2-2 SuperMarioBros-2-3 SuperMarioBros-3-1 SuperMarioBros-3-2 SuperMarioBros-3-3||
+||667 2, 053 1, 583 1, 609 1, 587 6, 047|
+||10, 800 21, 654 14, 226 26, 415 14, 017 23, 047|
+||813 1, 630 1, 588 1, 092 1, 808 1, 984|
+||3, 373 4, 718 4, 402 5, 108 6, 490 5, 980|
+||2, 560 3, 700 3, 251 3, 862 11, 310 48, 385|
+||11, 633 20, 872 26, 508 20, 955 33, 489 41, 140|
+||1, 007 2, 440 3, 009 2, 650 5, 886 5, 568|
+
+
+SuperMarioBros-2-2 813 1, 630 1, 588
+
+SuperMarioBros-2-3 3, 373 4, 718 4, 402
+
+SuperMarioBros-3-1 2, 560 3, 700 3, 251
+
+SuperMarioBros-3-2 11, 633 20, 872 26, 508
+
+SuperMarioBros-3-3 1, 007 2, 440 3, 009
+
+(a) Summary score (b) Examining learning scaling.
+
+
+Figure 2: Selected output from5.3 DEEP SEA bsuite evaluation on ‘memory length’.
+
+In this part, we consider the standard testbed for hard exploration: deep sea (Osband et al., 2018;
+
+consequences of its actions towards cumulative rewards, an agent seeking to ‘explore’ must2020). In particular, there are two actions in this environment: move left and move right; see Figure 5.
+consider how its actions can position it to learn more effectively in future timesteps. The
+literature on efficient exploration broadly states that only agents that perform deep explo-The reward is sparse and is only released when the agent always takes the “right” action to obtain the
+ration can expect polynomial sample complexity in learning (Kearns & Singh, 2002). Thistreasure at the corner. The maximum episode return is 0.99.
+literature has focused, for the most part, on uncovering possible strategies for deep exploration through studying the tabular setting analytically (Jaksch et al., 2010; Azar et al.,2017). Our approach inFollowing ( bsuite is to complement this understanding through a series ofDwaracherla et al., 2020), we measure the computation complexity by
+behavioural experiments that highlight the need for efficient exploration.
+
+computation complexity = nsgd _nz_ _K,_ (5.1)
+
+The deep sea problem is implemented as anThe agent begins each episode in the top left corner of the grid and descends one rowwhere nsgd is the number of SGD steps per iteration, N × N grid with a one-hot encoding for state. nz is the number of ensemble (index) samples, × _×_
+per timestep. Each episode terminates afterand K is the minimum number of episode with return N steps, when the agent reaches the bottom 0.99. This criterion is reasonable since without
+the transitions ‘left’ and ‘right’. At each timestep there is a small costmoving right, androw. In each state there is a random but fixed mapping between actions r = 0 for moving left. However, should the agent transition right at everythe restriction of the computation complexity, methods may perfectly approximate RLSVI and enjoythe same sample complexity. _r A = = − {00.01, 1/N} and of_
+timestep of the episode it will be rewarded with an additional reward of +1. This presents a
+particularly challenging exploration problem for two reasons. First, following the ‘gradient’The averaged empirical result with 10 random seeds is shown in Figure 6. In particular, the x-axis
+of small intermediate rewards leads the agent away from the optimal policy. Second, a
+policy that explores with actions uniformly at random has probability 2corresponds to the size of the deep sea, i.e., the number of rows in Figure[−][N] of reaching 5, and the y-axis corresponds
+the rewarding state in any episode. For theto the computation complexity as in ( bsuite experiment we run the agent on sizes5.1). We see that HyperDQN is more computationally efficient
+_N = 10, 12, .., 50 and look at the average regret compared to optimal after 10k episodes.than BootDQN. Other methods fail to solve the deep sea when the size is larger than 20, which is_
+The summary ‘score’ computes the percentage of runs for which the average regret drops
+below 0.9 faster than the 2also observed in ([N] episodes expected by dithering.Osband et al., 2018).
+
+
+
+1600
+
+1400
+
+1200
+
+1000
+
+800
+
+600
+
+400
+
+200
+
+|Algorithm HyperDQN|Col2|Col3|Col4|Col5|Col6|Col7|Col8|Col9|Col10|Col11|Col12|Col13|Col14|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||BootDQN|||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+|||||||||||||||
+
+
+10 15 20 25 30
+
+Deep Sea
+
+Figure 3: Deep-sea exploration: a simple example where deep exploration is critical.Figure 5: Illustration for deep sea. Figure 6: Comparison of HyperDQN and BootDQN in
+
+terms of computation complexity on the deep sea.
+
+_Deep Sea is a good bsuite experiment because it is targeted, simple, challenging, scalable_
+and fast. By construction, an agent that performs well on this task has mastered some
+key properties of deep exploration. Our summary score provides a ‘quick and dirty’ way to
+compare agent performance at a high level. Our sweep over different sizes6 CONCLUSION AND FUTURE W N can help to pro-ORK
+vide empirical evidence of the scaling properties of an algorithm beyond a simple pass/fail.
+Figure 3 presents example output comparing A2C, DQN and Bootstrapped DQN on thisIn this work, we present a practical exploration method to address the limitations of RLSVI and
+
+BootDQN. To reinforce the central idea, we leverage the hypermodel (Dwaracherla et al., 2020) and
+extend it from the bandit tasks to RL problems. Several algorithmic designs are developed to release6
+the power of randomized exploration.
+
+
+Future directions include extending the idea for continuous control (Lillicrap et al., 2016; Haarnoja
+et al., 2018) (i.e., building a randomized actor-critic with a similar architecture with HyperDQN; see
+Appendix E.5), utilizing the developed epistemic uncertainty qualification tool for offline RL (Fujimoto et al., 2019; Levine et al., 2020), and acquiring an informative prior from human demonstrations
+to accelerate exploration (Hester et al., 2018; Sun et al., 2018) (see Appendix E.6).
+
+
+-----
+
+ACKNOWLEDGMENTS AND DISCLOSURE OF FUNDING
+
+We thank Chenjia Bai for sharing some training results of OB2I, Hao Liang for the insightful
+discussion, and Tian Xu for reading the manuscript and providing valuable comments. The work of
+Z.-Q. Luo is supported by the National Natural Science Foundation of China (No. 61731018) and the
+Guangdong Provincial Key Laboratory of Big Data Computation Theories and Methods.
+
+ETHICS STATEMENT
+
+This work focuses on designing an efficient exploration method to improve the sample efficiency
+of reinforcement learning. This work may help reinforcement learning to be better used in the real
+world. There could be some unexpected consequences if the reinforcement learning is abused. For
+example, a robot is trained maliciously to hurt people.
+
+REPRODUCIBILITY STATEMENT
+
+First, a formal statement and proof of Theorem 1 are given in Appendix B.3. Second, the implementation details of the proposed algorithm HyperDQN can be found in Appendix A.2. Third, the
+experiment details of numerical results in Section 5 are provided in Appendix C.
+
+REFERENCES
+
+Mohammad Gheshlaghi Azar, Ian Osband, and Remi Munos. Minimax regret bounds for reinforce-´
+ment learning. In Proceedings of the 34th International Conference on Machine Learning, pp.
+263–272, 2017.
+
+Chenjia Bai, Lingxiao Wang, Lei Han, Jianye Hao, Animesh Garg, Peng Liu, and Zhaoran Wang.
+Principled exploration via optimistic bootstrapping and backward induction. In Proceedings of the
+_38th International Conference on Machine Learning, pp. 577–587, 2021._
+
+Marc G. Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning environment: An evaluation platform for general agents. Journal of Artificial Intelligence Research, 47:
+253–279, 2013.
+
+Marc G. Bellemare, Sriram Srinivasan, Georg Ostrovski, Tom Schaul, David Saxton, and Remi Munos.´
+Unifying count-based exploration and intrinsic motivation. In Advances in Neural Information
+_Processing Systems 29, pp. 1471–1479, 2016._
+
+Marc G. Bellemare, Will Dabney, and Remi Munos. A distributional perspective on reinforcement´
+learning. In Proceedings of the 34th International Conference on Machine Learning, pp. 449–458,
+2017.
+
+Ronen I. Brafman and Moshe Tennenholtz. R-MAX - A general polynomial time algorithm for
+near-optimal reinforcement learning. Journal of Maching Learning Research, 3:213–231, 2002.
+
+Yuri Burda, Harrison Edwards, Deepak Pathak, Amos J. Storkey, Trevor Darrell, and Alexei A. Efros.
+Large-scale study of curiosity-driven learning. In Proceedings of the 7th International Conference
+_on Learning Representations, 2019a._
+
+Yuri Burda, Harrison Edwards, Amos J. Storkey, and Oleg Klimov. Exploration by random network
+distillation. In Proceedings of the 7th International Conference on Learning Representations,
+2019b.
+
+Qi Cai, Zhuoran Yang, Chi Jin, and Zhaoran Wang. Provably efficient exploration in policy optimization. In Proceedings of the 37th International Conference on Machine Learning, pp. 1283–1294,
+2020.
+
+Maria Dimakopoulou and Benjamin Van Roy. Coordinated exploration in concurrent reinforcement
+learning. In Proceedings of the 35th International Conference on Machine Learning, pp. 1270–
+1278, 2018.
+
+
+-----
+
+Vikranth Dwaracherla, Xiuyuan Lu, Morteza Ibrahimi, Ian Osband, Zheng Wen, and Benjamin
+Van Roy. Hypermodels for exploration. In Proceedings of the 8th International Conference on
+_Learning Representations, 2020._
+
+Meire Fortunato, Mohammad Gheshlaghi Azar, Bilal Piot, Jacob Menick, Matteo Hessel, Ian Osband,
+Alex Graves, Volodymyr Mnih, Remi Munos, Demis Hassabis, Olivier Pietquin, Charles Blundell,´
+and Shane Legg. Noisy networks for exploration. In Proceedings of the 6th International
+_Conference on Learning Representations, 2018._
+
+Scott Fujimoto, David Meger, and Doina Precup. Off-policy deep reinforcement learning without
+exploration. In Proceedings of the 36th International Conference on Machine Learning, pp.
+2052–2062, 2019.
+
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. Soft actor-critic: Off-policy
+maximum entropy deep reinforcement learning with a stochastic actor. In Proceedings of the 35th
+_International Conference on Machine Learning, pp. 1856–1865, 2018._
+
+Matteo Hessel, Joseph Modayil, Hado van Hasselt, Tom Schaul, Georg Ostrovski, Will Dabney,
+Dan Horgan, Bilal Piot, Mohammad Gheshlaghi Azar, and David Silver. Rainbow: Combining
+improvements in deep reinforcement learning. In Proceedings of the 32nd AAAI Conference on
+_Artificial Intelligence, pp. 3215–3222, 2018._
+
+Todd Hester, Matej Vecer´ık, Olivier Pietquin, Marc Lanctot, Tom Schaul, Bilal Piot, Dan Horgan,
+John Quan, Andrew Sendonaris, Ian Osband, Gabriel Dulac-Arnold, John P. Agapiou, Joel Z.
+Leibo, and Audrunas Gruslys. Deep q-learning from demonstrations. In Proceedings of the 32nd
+_AAAI Conference on Artificial Intelligence, pp. 3223–3230, 2018._
+
+Haque Ishfaq, Qiwen Cui, Viet Nguyen, Alex Ayoub, Zhuoran Yang, Zhaoran Wang, Doina Precup,
+and Lin F. Yang. Randomized exploration in reinforcement learning with general value function
+approximation. In Proceedings of the 38th International Conference on Machine Learning, pp.
+4607–4616, 2021.
+
+Thomas Jaksch, Ronald Ortner, and Peter Auer. Near-optimal regret bounds for reinforcement
+learning. Journal of Maching Learning Research, 11:1563–1600, 2010.
+
+Chi Jin, Zeyuan Allen-Zhu, Sebastien Bubeck, and Michael I. Jordan. Is q-learning provably efficient?´
+In Advances in Neural Information Processing Systems 30, pp. 4868–4878, 2018.
+
+Chi Jin, Zhuoran Yang, Zhaoran Wang, and Michael I. Jordan. Provably efficient reinforcement
+learning with linear function approximation. In Proceedings of the 33rd Annual Conference on
+_Learning Theory, pp. 2137–2143, 2020._
+
+Sham Machandranath Kakade. On the sample complexity of reinforcement learning. PhD thesis,
+University of London London, England, 2003.
+
+[Christian Kauten. Super Mario Bros for OpenAI Gym. GitHub, 2018. URL https://github.](https://github.com/Kautenja/gym-super-mario-bros)
+[com/Kautenja/gym-super-mario-bros.](https://github.com/Kautenja/gym-super-mario-bros)
+
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In Proceedings of
+_the 3rd International Conference on Learning Representations, 2015._
+
+Yann A LeCun, Leon Bottou, Genevieve B Orr, and Klaus-Robert M´ uller. Efficient backprop. In¨
+_Neural networks: Tricks of the trade, pp. 9–48. Springer, 1998._
+
+Su Young Lee, Choi Sungik, and Sae-Young Chung. Sample-efficient deep reinforcement learning
+via episodic backward update. In Advances in Neural Information Processing Systems 32, pp.
+2110–2119, 2019.
+
+Sergey Levine, Aviral Kumar, George Tucker, and Justin Fu. Offline reinforcement learning: Tutorial,
+review, and perspectives on open problems. arXiv, 2005.01643, 2020.
+
+Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa,
+David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. In
+_Proceedings of the 4th International Conference on Learning Representations, 2016._
+
+
+-----
+
+Xiuyuan Lu and Benjamin Van Roy. Ensemble sampling. In Advances in Neural Information
+_Processing Systems 30, pp. 3260–3268, 2017._
+
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare,
+Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control
+through deep reinforcement learning. Nature, 518(7540):529–533, 2015.
+
+Brendan O’Donoghue, Ian Osband, Remi Munos, and Volodymyr Mnih. The uncertainty bellman´
+equation and exploration. In Proceedings of the 35th International Conference on Machine
+_Learning, pp. 3836–3845, 2018._
+
+Ian Osband. Risk versus uncertainty in deep learning: Bayes, bootstrap and the dangers of dropout.
+In NIPS workshop on bayesian deep learning, 2016a.
+
+Ian Osband. Deep Exploration via Randomized Value Functions. PhD thesis, Stanford University,
+USA, 2016b.
+
+Ian Osband and Benjamin Van Roy. Why is posterior sampling better than optimism for reinforcement
+learning? In Proceedings of the 34th International Conference on Machine Learning, pp. 2701–
+2710, 2017.
+
+Ian Osband, Daniel Russo, and Benjamin Van Roy. (more) efficient reinforcement learning via
+posterior sampling. In Advances in Neural Information Processing Systems 26, pp. 3003–3011,
+2013.
+
+Ian Osband, Charles Blundell, Alexander Pritzel, and Benjamin Van Roy. Deep exploration via
+bootstrapped DQN. In Advances in Neural Information Processing Systems 29, pp. 4026–4034,
+2016a.
+
+Ian Osband, Benjamin Van Roy, and Zheng Wen. Generalization and exploration via randomized
+value functions. In Proceedings of the 33rd International Conference on Machine Learning, pp.
+2377–2386, 2016b.
+
+Ian Osband, John Aslanides, and Albin Cassirer. Randomized prior functions for deep reinforcement
+learning. In Advances in Neural Information Processing Systems 31, pp. 8626–8638, 2018.
+
+Ian Osband, Benjamin Van Roy, Daniel J. Russo, and Zheng Wen. Deep exploration via randomized
+value functions. Journal of Machine Learning Research, 20(124):1–62, 2019.
+
+Ian Osband, Yotam Doron, Matteo Hessel, John Aslanides, Eren Sezener, Andre Saraiva, Katrina
+McKinney, Tor Lattimore, Csaba Szepesvari, Satinder Singh, Benjamin Van Roy, Richard S. Sutton,´
+David Silver, and Hado van Hasselt. Behaviour suite for reinforcement learning. In Proceedings of
+_the 8th International Conference on Learning Representations, 2020._
+
+Deepak Pathak, Pulkit Agrawal, Alexei A. Efros, and Trevor Darrell. Curiosity-driven exploration
+by self-supervised prediction. In Proceedings of the 34th International Conference on Machine
+_Learning, pp. 2778–2787, 2017._
+
+John Quan and Georg Ostrovski. DQN Zoo: Reference implementations of DQN-based agents.
+[GitHub, 2020. URL http://github.com/deepmind/dqn_zoo.](http://github.com/deepmind/dqn_zoo)
+
+Tabish Rashid, Bei Peng, Wendelin Boehmer, and Shimon Whiteson. Optimistic exploration even
+with a pessimistic initialisation. In Proceedings of the 8th International Conference on Learning
+_Representations, 2020._
+
+Daniel Russo. Worst-case regret bounds for exploration via randomized value functions. In Advances
+_in Neural Information Processing Systems 32, pp. 14410–14420, 2019._
+
+Daniel Russo, Benjamin Van Roy, Abbas Kazerouni, Ian Osband, and Zheng Wen. A tutorial on
+thompson sampling. Foundations and Trends in Machine Learning, 11(1):1–96, 2018.
+
+Nitish Srivastava, Geoffrey E. Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov.
+Dropout: a simple way to prevent neural networks from overfitting. Journal of Machine Learning
+_Research, 15(1):1929–1958, 2014._
+
+
+-----
+
+Bradly C. Stadie, Sergey Levine, and Pieter Abbeel. Incentivizing exploration in reinforcement
+learning with deep predictive models. arXiv, 1507.00814, 2015.
+
+Ruoyu Sun. Optimization for deep learning: theory and algorithms. arXiv, 1912.08957, 2019.
+
+Wen Sun, J. Andrew Bagnell, and Byron Boots. Truncated horizon policy search: Combining
+reinforcement learning & imitation learning. In Proceedings of the 6th International Conference
+_on Learning Representations, 2018._
+
+Richard S Sutton and Andrew G Barto. Reinforcement Learning: An Introduction. MIT press, 2018.
+
+Adrien Ali Ta¨ıga, William Fedus, Marlos C. Machado, Aaron C. Courville, and Marc G. Bellemare.
+On bonus based exploration methods in the arcade learning environment. In Proceedings of the
+_8th International Conference on Learning Representations, 2020._
+
+Haoran Tang, Rein Houthooft, Davis Foote, Adam Stooke, Xi Chen, Yan Duan, John Schulman,
+Filip De Turck, and Pieter Abbeel. #exploration: A study of count-based exploration for deep
+reinforcement learning. In Advances in Neural Information Processing Systems 30, pp. 2753–2762,
+2017.
+
+Saran Tunyasuvunakool, Alistair Muldal, Yotam Doron, Siqi Liu, Steven Bohez, Josh Merel, Tom
+Erez, Timothy Lillicrap, Nicolas Heess, and Yuval Tassa. dm control: Software and tasks for
+continuous control. Software Impacts, 6:100022, 2020.
+
+Hado van Hasselt, Arthur Guez, and David Silver. Deep reinforcement learning with double qlearning. In Proceedings of the 30th AAAI Conference on Artificial Intelligence, pp. 2094–2100,
+2016.
+
+Ziyu Wang, Tom Schaul, Matteo Hessel, Hado van Hasselt, Marc Lanctot, and Nando de Freitas.
+Dueling network architectures for deep reinforcement learning. In Proceedings of the 33rd
+_International Conference on Machine Learning, pp. 1995–2003, 2016._
+
+Andrea Zanette, David Brandfonbrener, Emma Brunskill, Matteo Pirotta, and Alessandro Lazaric.
+Frequentist regret bounds for randomized least-squares value iteration. In Proceedings of the 23rd
+_International Conference on Artificial Intelligence and Statistics, pp. 1954–1964, 2020._
+
+
+-----
+
+### APPENDIX: HYPERDQN: A RANDOMIZED EXPLORATION METHOD FOR DEEP REINFORCEMENT LEARNING
+
+CONTENTS
+
+**1** **Introduction** **1**
+
+**2** **Background** **3**
+
+**3** **Related Work** **3**
+
+**4** **Methodology** **4**
+
+4.1 Architecture Design . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+
+4.2 Differences with Dwaracherla et al. (2020): How the Direct Extension Fails . . . . . . . . . . 4
+
+4.3 Training Objective . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+
+4.4 Theoretical Guarantee . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+
+4.5 The Algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 6
+
+**5** **Experiments** **7**
+
+5.1 Atari . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+
+5.2 SuperMarioBros . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+
+5.3 Deep Sea . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+
+**6** **Conclusion and Future Work** **9**
+
+**A Algorithm Details** **16**
+
+A.1 Randomized Least-square Value Iteration (RLSVI) . . . . . . . . . . . . . . . . . . . . . . . 16
+
+A.2 Implementation of HyperDQN . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+
+A.3 Sampling From Unit Hypersphere . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+
+**B** **Connection Between Bayesian Linear Regression and Hypermodel** **19**
+
+B.1 Bayesian Linear Regression . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+
+B.2 Hypermodel . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+
+B.3 Proof of Theorem 1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+
+B.4 Why Independent Gaussian Noise Cannot Work For Hypermodel? . . . . . . . . . . . . . . . 22
+
+**C Experiment Details** **23**
+
+C.1 Algorithm Implementation And Parameters . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+
+C.2 Environment Preprocessing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+
+C.3 Bayesian Linear Regression . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+
+C.4 Parameter Choice . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+
+**D Additional Results** **26**
+
+D.1 Atari . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+
+D.2 SuperMarioBros . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+
+
+-----
+
+**Discussion** **32**
+
+E.1 Direct Extension of RLSVI Could Fail . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+
+E.2 Trainability Issues of HyperDQN . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+
+E.3 _ϵ-greedy in Many Efficient Algorithms . . . . . . . . . . . . . . . . . . . . . . . . . . . . ._ 32
+
+E.4 Discussion of NoisyNet . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+
+E.5 Extension to Continuous Control . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+
+E.6 When an Informative Prior is Available . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+
+
+-----
+
+A ALGORITHM DETAILS
+
+A.1 RANDOMIZED LEAST-SQUARE VALUE ITERATION (RLSVI)
+
+In this part, we offer a brief introduction to randomized least-square value iteration (RLSVI) (Osband
+et al., 2016b; 2019). We hope this helps readers understand how RLSVI works and the underlying
+limitations of RLSVI.
+
+In its original form, RLSVI is designed for the episodic Markov Decision Process for easy analysis.
+Here the word of “episodic” means the planning horizon (i.e., the episode length) is a finite number
+_T > 0. Given a feature map ϕ : S × A →_ R[d] in advance, RLSVI assumes the optimal Q-value
+function is a linear model with respect to this feature map. That is, for any stage t = 0, 1, · · ·, T − 1,
+RLSVI assumes
+_Q[⋆]t_ [(][s, a][) =][ ϕ][t][(][s, a][)][⊤][θ]t[⋆][,] (A.1)
+
+whereNote that θt[⋆] ϕ[∈]t differs from stage to stage, but they are all fixed along the training.[R][d][ is the unknown optimal parameter and][ Q]t[⋆] [is the optimal value function at stage][ t][.]
+
+With the above assumption, RLSVI takes three steps to balance the trade-off between exploration and
+exploitation.
+
+-  (Updating) Conditioned on the collected data, RLSVI estimates the optimal parameter θt[⋆] [in a]
+Bayesian way. In particular, RLSVI obtains the posterior distribution over θt[⋆] [via solving a Bayesian]
+linear regression problem[8]. More specifically, the Bayesian linear regression problem consists of
+the fixed feature ϕt and the label yt generated by dynamic programming; see (A.3). Furthermore,
+the posterior distribution can be obtained by the closed-form solution in (A.4).
+
+-  (Sampling) With the posterior distribution over θt[⋆][, RLSVI samples a specific parameter][ e]θt, which
+forms the Q-value function _Qt(s, a) = ϕt(s, a)[⊤]θ[e]t._
+
+-  (Interaction) RLSVI takes the greedy action argmaxa _Q(st, a) at stage t to collect new data._
+
+[e]
+
+Let k indicates the episode count and t indicates the stage/period count. Let [T ] indicates the set
+0, 1, 2, _, T_ 1 . For instance, θk,t[†] [e]
+With these notations, the procedure of RLSVI is outlined in Algorithm{ _· · ·_ _−_ _}_ _[∈]_ [R][d][ means the posterior mean at episode] 1. _[ k][ and stage][ t][.]_
+
+**Algorithm 1 RLSVI (Osband et al., 2016b; 2019)**
+
+
+1: posterior mean θ0[†],t 0,t _p[I][,][ ∀][t][ ∈]_ [[][T] []][.]
+
+_[←]_ [prior mean][ θ][t][, posterior covariance][ Σ][†] _[←]_ [prior covariance][ σ][2]
+
+2:3: sample for episodeθt ∼N k = 0(θ0[†],,t 1[,],[ Σ] 2,[0] · · ·[,t][)][ for] do[ t][ ∈] [[][T] []][.]
+
+4: **for stage t = 0, 1, 2,** _, T_ 1 do _▷_ Interaction
+
+[e] _· · ·_ _−_
+
+5: observe state st.
+
+6: take the greedy action at = argmaxa ϕ(st, a)[⊤]θ[e]t.
+
+7: receive reward r(st, at).
+
+8: **end for**
+
+9: **for stage t = T −** 1, T − 2, · · ·, 0 do _▷_ Update
+
+10: _θk[†]+1,t[,][ Σ][†]k+1,t_
+
+_[←]_ [update the posterior distribution (see (][A.4][)).]
+
+11: sample _θt ∼N_ (θk,t[†] _[,][ Σ][†]k,t[)][.]_ _▷_ Sampling
+
+12: **end for**
+
+13: end for [e]
+
+For Line 10 in Algorithm 1, RLSVI leverages the tool of Bayesian linear regression. Abstractly,
+given the feature matrix X ∈ R[N] _[×][d]_ (N is the number of samples) and the label vector Y ∈ R[N], the
+posterior distribution over θ[⋆] can be computed in a closed-form way. More concretely, RLSVI forms
+
+8Bayesian linear regression is reviewed in Appendix B.1.
+
+
+-----
+
+_Xt and Yt with the state-action pairs collected at stage t up to episode k:_
+
+
+_ϕt(s0,t, a0,t)_
+_ϕt(s1,t, a1,t)_ R[(][k][+1)][×][d], _Yt =_
+
+_∈_
+
+_· · ·_
+_ϕt(sk,t, ak,t)_
+
+
+
+
+
+_y0,t_
+_y1,t_
+
+_· · ·_
+_yk,t_
+
+
+_∈_ R[k][+1], (A.2)
+
+
+
+
+_Xt =_
+
+
+where
+
+
+_yk,t =_ _rk,t + maxa(ϕ[⊤]t+1θ[e]t+1)(sk,t+1, a)_ if t < T − 1 (A.3)
+_rk,t_ if t = T 1
+ _−_
+
+With such definedD]) over θt[⋆][:] _Xt and Yt, RLSVI can compute the posterior distribution N_ (E[θt[⋆] _[| D][]][,][ Cov[][θ]t[⋆]_ _[|]_
+
+1 _−1_ 1
+E[θt[⋆] _k+1,t_ [=] _Xt[⊤][X][t]_ [+ 1] _I_ _Xt[⊤][Y][t]_ [+ 1] _θt_ _,_
+
+_[| D][] :=][ θ][†]_ _σω[2]_ _σp[2]_ _σω[2]_ _σp[2]_
+ 1 −1   (A.4)
+
+Cov[θt[⋆] _k+1,t_ [=] _Xt[⊤][X][t]_ [+ 1] _I_ _._
+
+_[| D][] := Σ][†]_ _σω[2]_ _σp[2]_
+ 
+
+**Remark 2. As the feature is fixed in RLSVI, there exists an efficient implementation of RLSVI**
+based on the incremental update. Specifically, let Φ be the feature covariance matrix, i.e.,
+
+Φk+1,t = [1] _Xt[⊤][X][t]_ [+ 1] _I._
+
+_σω[2]_ _σp[2]_
+
+
+For easy presentation, let ϕk,t denote ϕ(sk,t, ak,t). Then, we have the incremental update formula:
+
+Φk+1,t = Φk,t + [1] _ϕk,tϕ[⊤]k,t[,]_ with Φ0,t = [1] _I._
+
+_σω[2]_ _σp[2]_
+
+
+Furthermore, we have a more efficient update rule for the posterior covariance in (A.4) by the
+Sherman–Morrison formula (see Lemma 1). More concretely, we have that
+
+(1/σω[2] [)][ ·][ Σ][†]k,t[ϕ][k,t][ϕ]k,t[⊤] [Σ][†]k,t
+Σ[†]k+1,t [:= Σ]k,t[†] _,_ with Σ[†]0,t [=][ σ]p[2][I.]
+
+_[−]_ 1 + (1/σω[2] [)][ ·][ ϕ][⊤]k,t[Σ][†]k,t[ϕ][k,t]
+
+As a side note, the term Xt[⊤][Y][t] [in (][A.4][) can also be implemented in an incremental update way. In]
+short, the posterior distribution is easy to compute when the feature is fixed.
+
+**Lemma 1 (Sherman–Morrison formula). Suppose A ∈** R[n][×][n] is an invertible square matrix and
+_u, v ∈_ R[n] are column vectors. Then A + uv[⊤] is invertible if and only if 1 + v[⊤]A[−][1]u ̸= 0. In this
+case,
+_A + uv[⊤][][−][1]_ = A[−][1]
+  _−_ _[A]1 +[−][1] v[uv][⊤][⊤]A[A][−][−][1]u [1]_ _[.]_
+
+Here, uv[⊤] is the outer product of two vectors u and v.
+
+A.2 IMPLEMENTATION OF HYPERDQN
+
+In this part, we provide more implementation details of HyperDQN.
+
+
+Recall that we work with two value functions: the prior one and the differential one. The prior value
+function and the differential value function are independently constructed, meaning there are no
+shared parameters. The actual Q-value is the weighted sum of two terms:
+_Q(s, a, z) = βprior_ _Qθprior,fνprior_ (z)(s, a) + βdifferential _Qθhidden,fν_ (z)(s, a), (A.5)
+_·_ _·_
+
+where βprior > 0 and βdifferential > 0 are two positive scalars. When βprior = βdifferential = 1, we recover
+the formulation in (4.2).
+
+The feature extractor (i.e., the hidden layers) are task-specific, which will be discussed in Appendix C.
+For the hypermodel, the differential part is initialized based on the default initializer of PyTorch
+while the initialization of the prior hypermodel is a little tricky. Following (Dwaracherla et al., 2020),
+each row of νw is sampled from the unit hypersphere and νb is based on the mean of the desired
+prior distribution. The purpose of this initialization is to guarantee the θprior = fνprior (z) follows a
+desired Gaussian distribution. For example, if we want to obtain a prior distribution N (1, I) for
+
+
+-----
+
+**Algorithm 2 HyperDQN**
+
+1: agent step n ← 0, train step ℓ _←_ 0.
+2: for episode k = 0, 1, 2, · · · do
+3: generate a random vector z ∼N (0, I). _▷_ Sampling
+
+4: instantiate the Q-value function Qθ(s, a, z).
+
+5: **for stage t = 0, 1, 2, · · ·, T −** 1 do _▷_ Interaction
+
+6: observe state st.
+
+7: take the greedy action a ← argmaxa Qθ(st, a, z).
+
+8: receive the next state st+1 and reward r(st, at).
+
+9: sample ξ uniformly from unit hypersphere.
+
+10: store (st, at, r, ξ, st+1) into the replay buffer .
+_D_
+
+11: agent step n ← _n + 1._
+
+12: **if mod (agent step n, train frequency M** ) == 0 then _▷_ Update
+
+13: sample a mini-batch _D of (s, a, r, ξ, s[′]) from the replay buffer D._
+
+14: sample N random vectors zi[′][:][ e]Z = {zi[′][}][N]i=1[.]
+
+15: optimize ν and θhidden[e] using the empirical loss function (A.6) with _D and_ _Z._
+
+16: train step ℓ _←_ _ℓ_ + 1.
+
+17: **end if**
+
+[e] [e]
+
+18: **if mod (train step ℓ, target update frequency G) == 0 then**
+
+19: update the target network.
+
+20: **end if**
+
+21: **end for**
+
+22: end for
+
+
+_θprior := fνprior(z), it suffices to set νb = 1 and to uniformly sample νw from the unit hypersphere,_
+where 1 is a vector with elements of 1.
+
+According to the population objective function in (4.2), the empirical objective function
+_L(ν, θhidden;_ _Z,_ _D) given the set_ _Z and mini-batch_ _D is_
+
+2
+
+1 [e]|D|[e] _Q[e]target(s[′], z) + σωz[e][⊤]ξ_ _Qprediction(s, a, z)_ + _[σ]ω[2]_ _fν(z)_ _,_
+
+ _−_ _σp[2]_ _∥_ _∥[2]_
+
+_|Z|_ _z∈Z[e]_ _|D|_ (s,a,r,ξ,sX[′])∈D[e]  
+
+[X] (A.6)
+
+[e] [e]
+
+where
+_Qprediction(s, a, z) = βprior_ _Qθprior,fνprior_ (z)(s, a) + βdifferential _Qθhidden,fν_ (z)(s, a),
+_·_ _·_
+
+_Qtarget(s[′], z) = r + γ maxa[′]_ _βprior · Qθprior,fνprior_ (z)(s[′], a[′]) + βdifferential · Qθ¯hidden,fν¯[(][z][)][(][s][′][, a][′][)] _._
+
+In practice, (A.6) can be efficiently solved by Adam (h Kingma & Ba, 2015). In particular, we samplei
+multiple z and the mini-batch from the experience replay buffer to construct the empirical objective
+function. As such, Adam can be applied to optimize the hidden layers and the hypermodel as
+illustrated in Figure 1.
+**Remark 3 (Feature Representation for Prior Value Functions). Different from supervised learning,**
+the prior value function is crucial for online decision making (Osband et al., 2018). For the prior value
+functions, we not only need to consider the prior hypermodel but also the prior feature representation.
+Importantly, the feature extractor for the prior value function should be fixed rather than being shared
+with the differential part. In other words, we use two independent feature networks (i.e., the hidden
+layers) for the prior value function and the differential value function, respectively. Instead, the output
+of the prior value function would change if the prior value function and the differential value function
+share the same hidden layers, which violates the intuition that the prior value function should not be
+affected by the learning process.
+
+A.3 SAMPLING FROM UNIT HYPERSPHERE
+
+For completeness, we describe the method for uniform sampling over unit hypersphere. There are
+two steps:
+
+
+-----
+
+(1) Generate x = (x1, x2, . . ., xd), using a zero mean and unit variance Gaussian distribution.
+Thus, the probability density of x
+
+
+1 1 [+][ x]2[2] [+][ · · ·][ +][ x]d[2]
+
+_d_
+(2π) 2 [exp] _−_ _[x][2]_ 2
+
+
+
+_p(x) =_
+
+is spherically symmetric.
+
+
+(2) Normalize the vector x = (x1, x2, . . ., xd) to a unit vector, namely x/ **x**, which gives a
+_∥_ _∥_
+sample uniformly over the unit hypersphere. Note that once the vector is normalized, its
+coordinates are no longer statistically independent.
+
+B CONNECTION BETWEEN BAYESIAN LINEAR REGRESSION AND
+HYPERMODEL
+
+B.1 BAYESIAN LINEAR REGRESSION
+
+In this part, we review the Bayesian linear regression. Let x ∈ R[d] be the feature and y = ⟨θ[⋆], x⟩ + _ω[⋆]_
+be the label, where ω[⋆] _∈N_ (0, σω[2] [)][ is the observation noise. Here, we treat][ θ][⋆] [as a random variable]
+and pose a prior distribution p0 : N (θp, σp[2][I][)][ on][ θ][⋆][. Given the dataset][ D][ =][ {][(][x][i][, y][i][)][}][N]i=1[, we can]
+update the posterior probability density over θ[⋆] by the Bayes rule:
+
+_p(θ[⋆]_ ) _p_ (xi, yi) _i=1_ _p0(θ[⋆])._
+_| D_ _∝_ _{_ _}[N]_ _[|][ θ][⋆][]_ _·_
+Thanks to the conjugate prior, the posterior distribution over θ[⋆] is also a Gaussian distribution
+ 
+_N_ (E[θ[⋆] _| D], Cov[θ[⋆]_ _| D]) with_
+
+1 _−1_ 1
+E[θ[⋆] ] = _X_ _[⊤]X + [1]_ _I_ _X_ _[⊤]Y + [1]_ _θp_ _,_ (B.1)
+_| D_ _σω[2]_ _σp[2]_ _σω[2]_ _σp[2]_
+   
+
+1 _−1_
+Cov[θ[⋆] ] = _X_ _[⊤]X + [1]_ _I_ _,_ (B.2)
+_| D_ _σω[2]_ _σp[2]_
+ 
+
+where
+
+_x[⊤]1_ _y1_
+
+_X =_ x[⊤]2  R[N] _[×][d],_ _Y =_  _y2_  R[N] _._
+
+_∈_ _∈_
+
+_· · ·_ _· · ·_
+
+x[⊤]N  yN 
+   
+
+In summary, given the collected dataset (i.e., the features and labels), we can obtain posterior samples
+through sampling from N (E[θ[⋆] _| D], Cov[θ[⋆]_ _| D])._
+
+Recently, Osband et al. (2019) provide another way of obtaining posterior samples through optimizing
+a randomized least square problem.
+**Lemma 2 ((Osband et al., 2019)). Let x be the feature vector and the target y be generated by**
+_y = ⟨θ[⋆], x⟩_ + ω[⋆], where ω[⋆] _∼N_ (0, σω[2] [)][ is the noise and the prior on][ θ][⋆] _[is][ N]_ [(][θ][p][, σ]p[2][I][)][. Let]
+_ω be the algorithmic noise that follows the same distribution with ω[⋆]_ _(i.e., ω ∼N_ (0, σω[2] [)][) and]
+_θ ∼N_ (θp, σp[2][I][)][ be a prior sample. Then,]
+
+2
+
+b argmin (y + ω _θ[⊤]x)[2]_ + _[σ]ω[2]_ _θ_ _θ_ (B.3)
+
+_θ_ _−_ _σp[2]_ _−_ [b] 2 _[,]_
+
+(x,y,Xω)∈D
+
+_or_
+
+_θ + argmin_ (y + ω (θ + _θ)[⊤]x)[2]_ + _[σ]ω[2]_ _θ_ 2 _[,]_ (B.4)
+
+_θ_ _−_ _σp[2]_ _∥_ _∥[2]_
+
+(x,y,Xω)∈D
+
+_could yield a sample from the posterior distributionb_ _N_ (E[θ[b][⋆] _| D], Cov[θ[⋆]_ _| D]) defined by (B.1) and_
+_(B.2)._
+
+First, it is obvious that (B.3) and (B.4) are equivalent by the variable change trick. Let us focus on
+(B.4) to explain the main idea of Lemma 2. Notice that the posterior sample includes two parts: the
+prior _θ and the differential θ (θ is a specific optimal solution to (B.4)). In particular, θ is a random_
+variable, which depends on the randomness in ω. Based on this observation, we can leverage the
+
+[b]
+
+
+-----
+
+optimality condition to obtain the optimal solution of (B.4). Subsequently, we can verify that the
+mean of _θ + θ and its covariance are identical with the posterior mean E[θ[⋆]_ _| D] and posterior_
+covariance Cov[θ[⋆] _| D], respectively._
+**Remark 4.[b]** _Importantly, Lemma 2 recasts a sampling problem to an optimization problem, which_
+_provides a purely computational cue to obtain a posterior sample. Consequently, it provides another_
+_way of implementing RLSVI by solving the least square problem in each iteration. However, there is_
+_no clear advantage for this implementation under the case where RLSVI can work (e.g., tabular or_
+_linear MDPs)._
+
+B.2 HYPERMODEL
+
+In this part, we provide more explanation about the hypermodel. To proceed, note that the main
+issue of the procedure in Lemma 2 is its computational efficiency. The reason is that we have to
+solve multiple randomized least square problems if we want to obtain many posterior samples. One
+of the motivations of the hypermodel is to address this computational issue. Indeed, the original
+optimization problem in (Dwaracherla et al., 2020) is
+
+minν _z_ _p(z)_ _y + σωz[⊤]ξ −_ _gfν_ (z)(x) 2 + σσω[2]p[2] _fν(z) −_ _fνprior_ (z)(x) (dz), (B.5)
+
+Z  (x,y,ξ) 
+
+X∈D   
+
+where νprior = ν0 is the fixed prior hypermodel parameter. Consider the linear case where[2] _gfν_ (z)(x) =
+_fν(z)[⊤]x, then (B.5) becomes_
+
+minν _z_ _p(z)_  _y + σωz[⊤]ξ −_ _fν(z)[⊤]x_ 2 + σσω[2]p[2] _∥fν(z) −_ _fν0_ (z)∥[2] (dz),
+
+Z (x,y,ξ)
+
+X∈D   
+
+which is very similar to ( B.3) and the difference is discussed in Remark 1. Intuitively, the hypermodel
+wants to solve “infinite” randomized least-square problems simultaneously. Through this, the
+hypermodel can obtain multiple posterior samples by sampling z.
+
+Note that (B.5) has a different form with the loss function in (4.1). However, as discussed in
+(Dwaracherla et al., 2020, Section 2.5), these two loss functions are equivalent. To derive (4.1)
+from (B.5), we take three steps: 1) replace fν(z) in (B.5) with fνprior (z) + fν′ (z); 2) let gfν (z)(x) =
+_gfνprior_ (z)+fν′ (z)(x) = gfνprior (z)(x) + gfν′ (z)(x); 3) change the optimization variable from ν to ν[′].
+
+B.3 PROOF OF THEOREM 1
+
+Here, we consider the linear hypermodel, i.e., fν(z) = νw[⊤][z][ +][ ν][b][, where][ ν][w]
+By the property of Gaussian distribution, we know that fν(z) ∼N (νb, νw[⊤][∈][ν][R][w][N][)][ as][z][×][d][ z][ and][ ∼N][ ν][b] [(0][∈] _[, I][R][d][)][.][.]_
+Therefore, νb and νw[⊤][ν][w] [qualify the mean and covariance, respectively.]
+
+By the formulation, there are two models in a complete hypermodel: the prior one and the differential
+one. Specifically,
+
+-  The prior hypermodel is
+
+_fν[(][z][) =][ b]νw[⊤][z][ +][ b]νb,_
+
+where _ν = (νw,_ _νb) is fixed and a non-trainable variable. Here, we set theb_ _νw[⊤]_ [=][ σ][p][I][ and]
+_νb = θp as the correct prior parameters, then fν[(][z][)][ is a sample from the prior distribution]_
+(θp, σ bp[2][I][)][.]b b b
+_N_ b
+
+-  The differential hypermodel isb
+
+
+_fν(z) = νw[⊤][z][ +][ ν][b][,]_
+where ν = (νw, νb) is a trainable variable.
+
+Let the sample (xi, yi) generated under Assumption 1. We augment each data sample (xi, yi)
+_∈D_
+with ξi independently sampled from unit hypersphere (refer to Appendix A.3). Then, the dataset
+becomes
+= (xi, yi, ξi) : i = 1, 2, . . ., _,_
+_D_ _{_ _|D|}_
+
+
+-----
+
+with the augmented noise realizations
+Ξ = {ξi : i = 1, . . ., |D|}.
+
+**Theorem 1 (Formal statement). Under Assumption 1, set νw[prior]** = σpI and νb[prior] = θp. Let
+_ν[⋆]_ = (νw[⋆] _[, ν]b[⋆][)][ be the optimal solution of (][4.1][) conditioned on specific realizations of][ ξ][, then]_
+_θ := fνprior_ (z) + fν[⋆] (z) ∼N (νb[prior] + νb[⋆][,][ (][ν]w[prior] + νw[⋆] [)][⊤][(][ν]w[prior] + νw[⋆] [))][ with]
+
+_νb[prior]_ + νb[⋆] [=][ E][[][θ][⋆] _[| D][]][,]_ (νw[prior] + νw[⋆] [)][⊤][(][ν]w[prior] + νw[⋆] [) = Cov[][θ][⋆] _[| D][] +][ err][(Ξ)][,]_
+_where_
+
+
+_err(Ξ) := Cov[θ[⋆]_ ] _xξ[⊤]ξ[′]x[′⊤]_ +
+_| D_  _σω[2]_
+
+(x,ξ)=(̸ Xx[′],ξ[′])∈D
+
+_Furthermore, the error term satisfies_ [1] EΞ[err(Ξ)] = 0.
+
+
+(xξ[⊤] + ξx[⊤]) Cov[θ[⋆] ]
+
+ _| D_
+
+(x,ξX)∈D
+
+
+
+
+_σωσp_
+
+
+_Proof of Theorem 1. For simplicity, we omit the subscript_ _[⋆]_ for the optimal solution to (4.1) in the
+proof. That is, we use the shorthand notation ν = (νω, νb) for the optimal solution to (4.1).
+
+
+The objective function (4.1) for learning hypermodel given the data D becomes:
+
+(ν; ) = _p(z)_ _y + σωz[⊤]ξ_ _x[⊤]((νw +_ _νw)[⊤]z + (νb +_ _νb))_ 2 + σω[2]
+_L_ _D_ _z_ _−_ _σp[2]_
+Z  (x,y,ξ)
+
+X∈D   
+
+According to the first-order optimality condition: b b
+
+
+_νw[⊤][z][ +][ ν][b]_ (dz)
+
+[2][ ]
+
+
+( _x)_ _y + σωξ[⊤]z_ _x[⊤]((νw +_ _νw)[⊤]z + (νb +_ _νb))_ + _[σ]ω[2]_ (νw⊤z + νb)
+_−_ _−_ _σp[2]_ _| D_
+(x,y,ξX)∈D   
+b b (B.6)
+
+
+_∂_
+_L_ = Ez
+
+_∂νb_
+
+
+= _x(x[⊤]νb + x[⊤]νb_ _y) +_ _[σ]ω[2]_ _νb = 0._
+
+_−_ _σp[2]_
+(x,y,ξX)∈D
+
+It is straightforward to obtain thatb
+
+_x(x[⊤]νb + x[⊤]νb_ _y) +_ _[σ]ω[2]_ (νb + _νb) =_ _[σ]ω[2]_ _νb._
+_−_ _σp[2]_ _σp[2]_
+(x,y,ξX)∈D
+
+Then, we can infer that b b b
+
+_−1_
+
+1
+
+_νb +_ _νb =_ _xx[⊤]_ + [1] _I_ _xy + [1]_ _νb_
+
+_σω[2]_ _x_ _σp[2]_ ! [] _σω[2]_ (x,y) _σp[2]_ 
+
+X∈D X∈D
+
+b 1 _−1_ 1 [1] b 
+
+= _X_ _[⊤]X + [1]_ _I_ _X_ _[⊤]Y + [1]_ _θp_
+
+_σω[2]_ _σp[2]_ _σω[2]_ _σp[2]_
+
+   
+
+= E [θ[⋆] _| D],_
+
+where X ∈ R[|D|×][d], Y ∈ R[|D|], and E [θ | D] is defined in (B.1). This implies that the hypermodel
+can recover the posterior mean.
+
+
+For the variable νw, we calculate its partial derivative ∂L/∂νw[⊤] [as]
+
+Ez _y + σωz[⊤]ξ_ _x[⊤]((νw +_ _νw)[⊤]z + (νb +_ _νb))_ ( _xz[⊤]) +_ _[σ]ω[2]_ (νw[⊤][z][ +][ ν][b][)][z][⊤] _[| D]_
+
+ _−_ _−_ _σp[2]_ 
+
+(x,y,ξX)∈D   
+
+ b b 
+
+= Ez _σωz[⊤]ξxz[⊤]_ + x[⊤](νw + _νw)[⊤]zxz[⊤][]_ + _[σ]ω[2]_ _νw[⊤][zz][⊤]_ _[| D]_ _._ (B.7)
+
+ _−_ _σp[2]_ 
+
+(x,y,ξX)∈D  
+
+To proceed, we utilize the following helpful lemma. b 
+
+
+**Lemma 3. Let z ∼N** (0, Id). For any fixed vector a ∈ R[d], we have
+
+Ez _a[⊤]zxz[⊤][]_ = xa[⊤].
+
+
+
+-----
+
+_Proof. The proof is easy if we look at each entry of the matrix,_
+
+_d_
+
+Ez _z[⊤]axz[⊤][]ij_ [=][ E][z] _z[⊤]a[xz[⊤]]ij_ = Ez _akzk_
+
+" k=1
+
+    X
+
+
+= ajxi = [xa[⊤]]ij.
+
+
+_xizj_
+
+
+Then, with the above Lemma 3 and (B.7), we further calculate
+_∂L_ = _σωxξ[⊤]_ + xx[⊤](νw + _νw)_ + _[σ]ω[2]_ _νw[⊤][.]_ (B.8)
+
+_∂νw[⊤]_ _−_ _σp[2]_
+
+(x,y,ξX)∈D   
+
+By the first order optimality condition, we have b
+
+1 _−1_
+(νw + _νw) =_ _X_ _[⊤]X + [1]_ _I_ _σωxξ[⊤]_ + [1] _νw_ _._
+
+_σω[2]_ _σp[2]_  _σω[2]_ _σp[2]_ 
+
+  (x,ξ)
+
+X∈D
+
+With the posterior covariance in ( b B.2)  [1] b 
+
+1 _−1_
+Σ[−][1] := Cov (θ[⋆] ) = _X_ _[⊤]X + [1]_ _I_ _,_
+_| D_ _σω[2]_ _σp[2]_
+ 
+
+and define the set Ξ = (ξ1, . . ., ξ ) corresponding to the ξi in (xi, yi, ξi), we obtain that
+_|D|_ _∈D_
+
+(νw + _νw)[⊤](νw +_ _νw)_
+
+1
+
+= Σ[−] b[1] b _xξ[⊤]ξ[′]x[′⊤]_ + [1] _νw[⊤]νw +_ _σωxξ[⊤]νw + σωνw[⊤][ξx][⊤][]_ Σ[−][1]
+
+ _σω[2]_ _σp[4]_ _σω[2]_ _[σ]p[2]_ 
+
+(x,ξ) (x[′],ξ[′]) (x,ξ)
+
+X X X  
+
+ [1] b [b] b b 
+
+1
+
+= Σ[−][1] _X_ _[⊤]X + [1]_ _I + [1]_ _xξ[⊤]ξ[′]x[′⊤]_ + (xξ[⊤] + ξx[⊤]) Σ[−][1]
+
+ _σω[2]_ _σp[2]_ _σω[2]_ _σωσp_ 
+
+(x,ξ)X=(̸ _x[′],ξ[′])_ (Xx,ξ)
+
+= Σ[−][1]ΣΣ _[−][1]_ [1] + err(Ξ), 
+where the second equality is due to the fact that ∥ξ∥ = 1 and we set _νw = σpI at the beginning;_
+
+and err(Ξ) = Σ[−][1][ ] _σ1ω[2]_ (x,ξ)=(̸ _x[′],ξ[′])_ _[xξ][⊤][ξ][′][x][′⊤]_ [+] _σω1σp_ (x,ξ)[(][xξ][⊤] [+][ ξx][⊤][)] Σ[−][1]. Taking the
+
+b
+
+expectation over Ξ = (ξ1, . . ., ξ ), we have 
+
+P _|D|_ P
+
+EΞ _xξ[⊤]ξ[′]x[′⊤]_ = 0, EΞ (xξ[⊤] + ξ[⊤]x) = 0.
+
+   
+
+(x,ξ)X=(̸ _x[′],ξ[′])_ (x,ξ)
+
+Finally, we have    [X] 
+
+EΞ (νw + _νw)[⊤](νw +_ _νw)_ = Σ[−][1]ΣΣ[−][1] + EΞ [err(Ξ)] = Σ[−][1].
+This implies the hypermodel can also recover the posterior covariance in expectation.
+ 
+b b
+
+B.4 WHY INDEPENDENT GAUSSIAN NOISE CANNOT WORK FOR HYPERMODEL?
+
+Following similar steps in Appendix B.3, we want to argue that the posterior approximation result
+cannot be achieved if we replace z[⊤]ξ with an independent Gaussian noise ω in (4.1).
+
+(Similarly, we augment each sampleω1, ω2, . . ., ω|D|)[⊤] as the noise vector. The dataset becomes (xi, yi) ∈D with ωi ∼N (0, σω[2] [)][ and denote][ ω][ =]
+
+_D = (xi, yi, ωi : i = 1, 2, . . ., |D|)._
+Now, the objective function for learning hypermodel given the data D becomes:
+
+(ν; ) = _p(z)_ _y + ω_ _x[⊤]((νw +_ _νw)[⊤]z + (νb +_ _νb))_ 2 + σω[2] _νw[⊤][z][ +][ ν][b]_ (dz).
+_L[ω]_ _D_ _z_ _−_ _σp[2]_
+Z  (x,y,ω)
+
+X∈D   
+
+b b [2][ ]
+
+
+-----
+
+Similar to (B.6), we have the first order optimality condition
+_∂L[ω]_ = _x(x[⊤]b + x[⊤]νb_ _y + ω) +_ _[σ]ω[2]_ _νb = 0._
+
+_∂νb_ _−_ _σp[2]_
+
+(x,y,ω)
+
+X
+
+Then, we have b
+
+1 _−1_ 1
+_νb +_ _νb =_ _X_ _[⊤]X + [1]_ _I_ _X_ _[⊤](Y + ω) + [1]_ _θp_ = E [θ ] .
+
+_σω[2]_ _σp[2]_ _σω[2]_ _σp[2]_ _̸_ _| D_
+
+   
+
+For the variable ν bw, similar to (B.7), we calculate the partial derivative ∂ _/∂νw[⊤]_ [as]
+_L_
+
+Ez _y + ω_ _x[⊤]((νw +_ _νw)[⊤]z + (νb +_ _νb))_ ( _xz[⊤]) +_ _[σ]ω[2]_ (νw[⊤][z][ +][ ν][b][)][z][⊤] _[| D]_
+
+ _−_ _−_ _σp[2]_ 
+
+(x,y,ξX)∈D   
+
+ b b 
+
+= Ez _ωxz[⊤]_ + x[⊤](νw + _νw)[⊤]zxz[⊤][]_ + _[σ]ω[2]_ _νw[⊤][zz][⊤]_ _[| D]_
+
+ _−_ _σp[2]_ 
+
+(x,y,ωX)∈D  
+
+ b 
+
+= Ez _x[⊤](νw +_ _νw)[⊤]zxz[⊤][]_ + _[σ]ω[2]_ _νw[⊤][zz][⊤]_ _[| D]_
+
+ _σp[2]_ 
+
+(x,y,ωX)∈D  
+
+=  _xx[⊤](νw +_ _νw) b[⊤][]_ + _[σ]ω[2]_ _νw[⊤][.]_ 
+
+_σp[2]_
+
+(x,y,ωX)∈D  
+
+By the first order optimality condition, we have b
+
+1 _−1_ 1
+(νw + _νw)[⊤]_ = _σω[2]_ _X_ _[⊤]X + σ[1]p[2]_ _I_ _σp[2]_ _νw[⊤]_ _._
+   
+
+Therefore, by the fact that _νw[⊤]ν bw = σp[2][I][,]_ b
+
+1
+(νw + _νw)[⊤](νw +_ _νw) = Σ[−][1]_ _I_ Σ[−][1] = [1] Σ[−][2] = Cov (θ ) .
+
+b [b] _σp[2]_ _σp[2]_ _̸_ _| D_
+
+ 
+
+This implies that an independent Gaussian noise ω cannot work and the z-dependent noise is
+
+b b
+
+indispensable for posterior approximation.
+
+
+C EXPERIMENT DETAILS
+
+C.1 ALGORITHM IMPLEMENTATION AND PARAMETERS
+
+**Common Hyperparameters. All agents use the same network structure as in (Mnih et al., 2015) on**
+Atari and SuperMarioBros:
+state → **conv(32, 8, 4) →** **relu →** **conv(64, 4, 2) →** **relu →** **conv(64, 3, 1)**
+_→_ **mlp(512) →** **relu →** **mlp(number of actions),**
+where conv(32, 8, 4) means a convolution layer with 64 filters of size 8 and stride of 4, and mlp(512)
+means a fully-connected layer with output size of 512, and relu stands for Rectified Linear Units.
+
+The algorithmic parameters on Atari and SuperMarioBros basically follow (Mnih et al., 2015, Table
+1). For example, the replay buffer size is 1M; the batch size is 32; the discount factor is 0.99; the
+target network update frequency is 10K agent steps; the train frequency is 4 agent steps; and the
+replay starts after 50K agent steps. For algorithms with ϵ-greedy (e.g., DQN, BootDQN, OPIQ and
+OB2I), the exploration ϵ is annealed from 1.0 to 0.1 linearly (from 50K agent steps to 1M agent steps,
+respectively); the test ϵ is 0.05.
+
+**DQN. The training result of DQN (Mnih et al., 2015) on Atari is based on DQN Zoo (Quan & Ostro-**
+vski, 2020)[9]. We implement DQN with tianshou[10] framework and train it on SuperMarioBros.
+
+[9https://github.com/deepmind/dqn_zoo/blob/master/results.tar.gz](https://github.com/deepmind/dqn_zoo/blob/master/results.tar.gz)
+
+[10https://github.com/thu-ml/tianshou](https://github.com/thu-ml/tianshou)
+
+
+-----
+
+**[OPIQ. We use the implementation in the public repository https://github.com/oxwhirl/](https://github.com/oxwhirl/opiq)**
+[opiq. For a fair comparison, we do no use the mixed Monte Carlo return and set the final ϵ to be](https://github.com/oxwhirl/opiq)
+0.05. Other parameters follow (Rashid et al., 2020).
+
+**[OB2I. We use the implementation for OB2I in the public repository https://github.com/](https://github.com/Baichenjia/OB2I)**
+[Baichenjia/OB2I. The training data of OB2I on Atari is partially shared by authors in (Bai et al.,](https://github.com/Baichenjia/OB2I)
+2021) (private communication). All parameters follow (Bai et al., 2021).
+
+**[BootDQN. We modify the implementation for BootDQN from the public repository https://](https://github.com/johannah/bootstrap_dqn)**
+[github.com/johannah/bootstrap_dqn to make a fair comparison. In particular, BootDQN](https://github.com/johannah/bootstrap_dqn)
+uses 10 independent ensembles and the ϵ-greedy strategy is same with DQN. We use the version with
+prior value functions (Osband et al., 2018). Note that we do not implement the “vote” mode because
+we observe that it does not matter in practice.
+
+**NoisyNet.** We modify the implementation for NoisyNet from the public repository
+
+[https://github.com/ku2482/fqf-iqn-qrdqn.pytorch/blob/master/fqf_](https://github.com/ku2482/fqf-iqn-qrdqn.pytorch/blob/master/fqf_iqn_qrdqn/network.py)
+[iqn_qrdqn/network.py to make a fair comparison. In particular, NoisyNet re-samples a](https://github.com/ku2482/fqf-iqn-qrdqn.pytorch/blob/master/fqf_iqn_qrdqn/network.py)
+noisy network for action selection and update. The noise scale is 0.5 and other parameters follow
+(Fortunato et al., 2018).
+
+**HyperDQN. We use the implementation as described in Appendix A.2. Algorithm parameters are**
+listed in Table 4. To stabilize training, each z corresponds to 32 mini-batch samples and the effective
+batch size of HyperDQN is 32 × 10 = 320.
+
+Table 4: Algorithmic parameters of HyperDQN for Atari and SuperMarioBros.
+
+|Col1|Atari SuperMarioBros Deep Sea|
+|---|---|
+|z dimension N z prior scale β in (A.5) prior differential scale β in (A.5) differential number of z for training in (A.6) noise scale σ in (A.6) w prior regularization scale σ in (A.6) p learning rate|32 32 2 0.1 0.1 10.0 0.1 0.1 1.0 10 10 20 0.01 0.01 0.0 0.1 0.1 0.0 0.0001 0.0001 0.001|
+
+
+
+C.2 ENVIRONMENT PREPROCESSING
+
+**Atari. We follow the same preprocessing as in (Mnih et al., 2015) and (van Hasselt et al., 2016).**
+In particular, there are random no-operation steps (up to 30) before the interaction. Each agent
+step corresponds to 4 environment steps by repeating the same action while each environment step
+corresponds to 4 frames of the simulator. The raw score is clipped to {−1, 0, +1} for training but the
+evaluation performance is based on the raw score. Episodes are early stopped after 108K frames as
+in (van Hasselt et al., 2016). The observation for the agent is based on 4 stacked frames, which is
+reshaped to (4, 84, 84).
+
+**SuperMarioBros. The observation and action preprocessing are the same with Atari 2600 suite.**
+Two things are different: 1) there is no random “no operation”; 2) the training reward is based on
+0.01×raw score rather than clipping. Moreover, the maximum episode length is 1500×4 = 6000
+frames.
+
+For algorithms (DQN, BootDQN, NoisyNet, HyperDQN) that we implement by the tianshou
+framework, the training frequency is 10 and the target update frequency is 500 to accelerate training
+speed. Other parameters are identical to the one for Atari.
+
+**Deep sea. The implementation of the deep sea task is from bsuite[11]** (Osband et al., 2020). The
+neural network architecture is :
+state → **mlp(64) →** **relu →** **mlp(64) →** **relu →** **mlp(number of actions).**
+
+[11https://github.com/deepmind/bsuite/blob/master/bsuite/environments/](https://github.com/deepmind/bsuite/blob/master/bsuite/environments/deep_sea.py)
+[deep_sea.py](https://github.com/deepmind/bsuite/blob/master/bsuite/environments/deep_sea.py)
+
+
+-----
+
+To make a fair comparison with BootDQN, we use the setting in (Osband et al., 2018). In particular,
+the training frequency is 1, target update frequency is 4, batch size is 128, and buffer size is 200K.
+For HyperDQN, its parameters are listed in Table 4. For BootDQN, it uses 10 ensembles and the
+other parameters are identical to HyperDQN. Both algorithms do not use ϵ-greedy.
+
+C.3 BAYESIAN LINEAR REGRESSION
+
+The 2-dimensional Bayesian linear regression problem used in Section 4.3 is based on y = θw
+_x + θb + ϵ, where x, y, θw, θb, ϵ ∈_ R. Specifically, ϵ is sampled from the Gaussian distribution. To ·
+generate the dataset, x is sampled from [−4, 4] uniformly. The total number of training samples is 50.
+The prior distribution for (θw, θb) is (0, I2) while the actual value (θw, θb) is (6.06, 0.47) for the
+_N_
+dataset generation.
+
+We obtain the exact posterior distribution by the Bayes update rule. For hypermodel, the dimension of
+_z is 2. We use gradient descent with a learning rate of 0.005 and momentum of 0.9. The number of of_
+the gradient descent iterations is 10000. After the optimization, we visualize the 5000 samples from
+different distributions (e.g., the posterior distribution and the one transformed by the hypermodel) in
+Figure 2. Indeed, the KL-divergence between the exact posterior distribution and the counterparts by
+hypermodel(z[⊤]ξ) and hypermodel(ω) are 0.1 and 326.4, respectively.
+
+C.4 PARAMETER CHOICE
+
+**Noise scale σω. In this part, we provide the ablation study about the noise scale σω. The numerical**
+result is displayed in Figure 7. We observe the performance of HyperDQN is not very sensitive to σω.
+
+
+10000 SuperMarioBros-1-2
+
+HyperDQN( =0.1)
+
+HyperDQN( =0.01)
+
+8000 HyperDQN( =0.001)
+
+6000
+
+4000
+
+Episode Score
+
+2000
+
+0
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+10000 SuperMarioBros-1-2
+
+HyperDQN( p[=0.0)]
+
+HyperDQN( p[=0.1)]
+
+8000 HyperDQN( p[=10.0)]
+
+6000
+
+4000
+
+Episode Score
+
+2000
+
+0
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+Figure 7: Comparison of HyperDQN with
+different noise scales σω.
+
+
+Figure 8: Comparison of HyperDQN with
+different prior scales σp.
+
+
+**Prior scale σp. In this part, we provide the ablation study about the prior scale σp. The numerical**
+result is shown in Figure 8. We find that a large prior scale results in a poor performance. The reason
+is that the posterior update is slow under this case.
+
+**Hypermodel architecture. In this paper, we mainly focus on the linear hypermodel. Here, we**
+investigate the variant with a non-linear hypermodel (i.e., an MLP hypermodel). In particular, we
+consider the hypermodel is a two-layer neural network of width 64 with ReLU activation. We call this
+variant as HyperDQN(MLP) and the original HyperDQN as HyperDQN(Linear). It is intuitive
+that HyperDQN(MLP) has a more powerful posterior approximation ability but it may be hard to
+train HyperDQN(MLP) since the architecture is more complex. The empirical results on Atari and
+SuperMarioBros are shown in Figure 9. We see that HyperDQN does not obtain significant gains by
+an MLP hypermodel. We conjecture the reason is the trainability issue of the MLP hypermodel.
+
+**Number of ensembles in BootDQN. In this paper, we implement BootDQN with 10 ensembles,**
+which follows the configuration in (Osband et al., 2016a, Section 6.1). However, in (Osband et al.,
+2018), BootDQN is implemented with 20 ensembles. We remark that the choice of 10 ensembles
+is commonly used in the previous literature (Rashid et al., 2020; Bai et al., 2021) since it is more
+computationally cheap. For completeness, we provide the ablation study about this parameter choice;
+see Figure 10 for the result.
+
+
+-----
+
+10000 SuperMarioBros-1-2
+
+HyperDQN(Linear)
+HyperDQN(MLP)
+
+8000
+
+6000
+
+4000
+
+Episode Score
+
+2000
+
+0
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+30 Pong
+
+HyperDQN(Linear)
+HyperDQN(MLP)
+
+20
+
+10
+
+0
+
+Episode Score 10
+
+20
+
+30
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+(a) Episode return on Pong.
+
+
+(b) Episode return on SuperMarioBros-1-2.
+
+
+Figure 9: Comparison of HyperDQN with a linear hypermodel and a MLP hypermodel.
+
+
+Pong
+
+19.8
+
+BootDQN(10 ensembles)
+
+20.0 BootDQN(20 ensembles)
+
+20.2
+
+20.4
+
+20.6
+
+Episode Score
+
+20.8
+
+21.0
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+SuperMarioBros-1-2
+
+6000
+
+BootDQN(10 ensembles)
+
+5000 BootDQN(20 ensembles)
+
+4000
+
+3000
+
+2000
+
+Episode Score
+
+1000
+
+0
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+(a) Episode return on Pong.
+
+
+(b) Episode return on SuperMarioBros-1-2.
+
+
+Figure 10: Comparison of BootDQN with 10 ensembles and 20 ensembles.
+
+D ADDITIONAL RESULTS
+
+D.1 ATARI
+
+For all algorithms, learning curves on each game are visualized in Figure 11. The maximum raw
+scores on each individual game are reported in Table 5.
+
+**Relative improvement on each game. To better understand the improvement of HyperDQN, we**
+visualize the relative score compared with baselines. Specifically, the relative score is calculated as
+proposed−baseline
+
+max(human,baseline) human [(][Wang et al.][,][ 2016][). According to the taxonomy in (][Bellemare et al.][,][ 2016][),]
+_−_
+we cluster environments by 4 groups: “hard exploration (dense reward)”, “hard exploration (sparse
+reward)”, “easy exploration”, and “unknown”. See the results in Figure 12, Figure 13, Figure 14, and
+Figure 15.
+
+We observe that HyperDQN has improvements on both “easy exploration” environments (e.g., Battle
+Zone, Jamesbond, and Pong) and “hard exploration” environments (e.g., Frostbite, Gravitar, and
+Zaxxon). However, we notice that HyperDQN does not work well on very sparse reward tasks
+like Montezuma’s Revenge. We explain the failure reason as follows. As we have discussed in the
+introduction, without a good feature, randomized exploration methods are rarely competent. On
+Montezuma’s Revenge, the extremely sparse reward provides limited feedback for feature selection.
+As a result, it is expected that randomized exploration methods (including BootDQN and NoisyNet)
+do not work well for this task. In contrast, prediction error based methods (Pathak et al., 2017; Burda
+et al., 2019b; Rashid et al., 2020) could leverage specific architecture designs to provide auxiliary
+reward feedback to help feature selection and exploration. As a result, these methods perform well
+on Montezuma’s Revenge. We kindly remind that these methods do not perform well on other tasks
+because specifically designed architectures in these methods do not generalize well as pointed out in
+(Ta¨ıga et al., 2020).
+
+**Commitment of randomized exploration. Here we provide the evidence that using the ϵ-greedy**
+strategy contradicts the commitment and leads to poor performance for HyperDQN; see the results in
+Figure 16. We observe that combing HyperDQN with ϵ-greedy results in poor performance.
+
+
+-----
+
+Alien Amidar 5000 Assault Asterix Asteroids
+
+1250 300 4000 3000 1500
+
+1000 240 2400 1200
+
+750 180 3000 1800 900
+
+500 120 2000 1200 600
+
+250 60 1000 600 300
+
+0 0 0 0 0
+
+2.5 [1e6] Atlantis 1200 Bank Heist Battlezone 6000 Beam Rider 50 Bowling
+
+2.0 1000 12500 5000 40
+
+1.5 800600 100007500 40003000 30
+
+1.0 400 5000 2000 20
+
+0.5 200 2500 1000 10
+
+0.0 0 0 0 0
+
+Boxing 400 Breakout 10000 Centipede 1200 Chopper Command 120000 Crazy Climber
+
+60 320 8000 1000 100000
+
+30 240 6000 800 80000
+
+0 160 4000 600400 6000040000
+
+30 80 2000 200 20000
+
+60 0 0 0 0
+
+Demon Attack 0 Double Dunk 1000 Enduro 0 Fishing Derby Freeway
+
+6000 5 800 20 30
+
+4500 10 600 40 24
+
+18
+
+3000 15 400 60 12
+
+1500 20 200 80 6
+
+0 25 0 100 0
+
+3000 Frostbite 6000 Gopher Gravitar 15000 H.E.R.O. 0 Ice Hockey
+
+2500 5000 300 12500 5
+
+2000 4000 240 10000 10
+
+1500 3000 180 7500
+
+1000 2000 120 5000 15
+
+500 1000 60 2500 20
+
+0 0 0 0 25
+
+600 James Bond 007 5000 Kangaroo 10000 Krull 25000 Kung-Fu Master 0.05 Montezuma s Revenge
+
+500 4000 8000 20000 0.04
+
+400 3000 6000 15000 0.03
+
+300
+
+200 2000 4000 10000 0.02
+
+100 1000 2000 5000 0.01
+
+0 0 0 0 0.00
+
+2500 Ms. Pac-Man Name This Game 30 Pong Private Eye Q*bert
+
+2000 6000 20 400 12500
+
+15001000 45003000 10100 4000 1000075005000
+
+500 1500 20 800 2500
+
+0 0 30 0
+
+7500 River Raid 40000 Road Runner 20 Robotank 2500 Seaquest 750 Space Invaders
+
+6000 32000 16 2000 600
+
+4500 24000 12 1500 450
+
+3000 16000 8 1000 300
+
+1500 8000 4 500 150
+
+0 0 0 0 0
+
+10000 Stargunner 0 Tennis 5000 Time Pilot 200 Tutankham 12000 Up n Down
+
+8000 5 4000 160 10000
+
+6000 10 3000 120 8000
+
+6000
+
+4000 15 2000 80 4000
+
+2000 20 1000 40 2000
+
+0 25 0 0 0
+
+0 5 10 15 20
+
+400 Venture Video Pinball 2000 Wizard of Wor 5000 Zaxxon Frame (millions)
+
+125000
+
+320 1600 4000
+
+100000
+
+240 75000 1200 3000
+
+160 50000 800 2000
+
+80 25000 400 1000
+
+0 0 0 0
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Frame (millions) Frame (millions) Frame (millions) Frame (millions)
+
+HyperDQN NoisyNet BootDQN OB2I OPIQ DQN
+
+
+Figure 11: Learning curves of algorithms on Atari. Solid lines correspond to the median performance
+over 3 random seeds while shaded ares correspond to 90% confidence interval. Same with other
+figures for Atari.
+
+D.2 SUPERMARIOBROS
+
+For all algorithms, learning curves on each game are visualized in Figure 17.
+
+
+-----
+
+Table 5: The maximal score over 200 evaluation episodes for the best policy in hindsight (after 20M frames) for Atari games. The performance of the random policy and the human
+[expert is from https://github.com/deepmind/dqn_zoo/blob/master/dqn_zoo/](https://github.com/deepmind/dqn_zoo/blob/master/dqn_zoo/atari_data.py#L41-L101)
+[atari_data.py#L41-L101. The performance of OB2I is from (Bai et al., 2021).](https://github.com/deepmind/dqn_zoo/blob/master/dqn_zoo/atari_data.py#L41-L101)
+
+|Col1|Random Human|OB2I OPIQ BootDQN NoisyNet HyperDQN|
+|---|---|---|
+|Alien Amidar Assault Asterix Asteroids Atlantis Bank Heist Battle Zone BeamRider Bowling Boxing Breakout Centipede Chopper Command Crazy Climber Demon Attack Double Dunk Enduro Fishing Derby Freeway Frostbite Gopher Gravitar H.E.R.O Ice Hockey Jamesbond Kangaroo Krull Kung-Fu Master Montezuma’s Revenge Ms. Pacman Name This Game Pong Private Eye Q*Bert River Raid Road Runner Robotank Seaquest Space Invaders Star Gunner Tennis Time Pilot Tutankham Up and Down Venture Video Pinball Wizard of Wor Zaxxon|227.8 7,127.7 5.8 1,719.5 222.4 742.0 210.0 8,503.3 719.1 47,388.7 12,850.0 29,028.1 14.2 753.1 2,360.0 13,454.5 363.9 16,926.5 23.1 160.7 0.1 12.1 1.7 30.5 2,090.9 12,017.0 811.0 7,387.8 10,780.5 35,829.4 152.1 1,971.0 -18.6 -16.4 0.0 860.5 -91.7 5.5 0.0 29.6 65.2 4,334.7 257.6 2,412.5 173.0 3,351.4 1,027.0 30,826.4 -11.2 0.9 29.0 302.8 52.0 3,035.0 1,598.0 2,665.5 258.5 22,736.3 0.0 4,753.3 307.3 6,951.6 2,292.3 4,076.0 -20.7 14.6 24.9 69,571.3 163.9 13,455.0 1,338.5 17,118.0 11.5 7,845.0 2.2 11.9 68.4 42,054.7 148.0 1,668.7 664.0 10,250.0 -23.8 -8.3 3,568.0 5,229.2 11.4 167.6 533.4 11,693.2 0.0 1,187.5 16,256.9 17,667.9 563.5 4,756.5 32.5 9,173.3|916.9 2,316.7 2,623.3 2,596.7 2,910.0 94.0 161.6 319.0 395.7 565.7 2,996.2 3,385.0 3,182.7 5,000.3 2,083.0 2,719.0 1,500.0 3,466.7 4,000.0 2,283.3 959.9 976.7 3,353.3 3,143.3 3,190.0 3,146,300.0 1,780,266.7 835,166.7 857,100.0 880,233.3 378.6 430.0 270.0 250.0 470.0 8,756.5 18,333.3 22,666.7 20,333.3 24,333.3 3,736.7 4,385.3 7,002.0 5,467.3 3,955.3 30.0 56.3 90.3 116.0 64.0 75.1 96.0 60.7 53.7 56.3 423.1 247.0 212.0 352.0 43.7 2,661.8 11,891.7 11,051.7 9,492.3 9,923.0 1,100.3 1,666.7 1,900.0 2,966.7 2,733.3 53,346.7 71,566.7 88,400.0 138,133.3 117,966.7 6,794.6 3,805.0 9,148.3 8,845.0 8,755.0 -18.2 -18.7 -6.0 3.3 2.7 719.0 1,033.3 626.3 1,169.7 456.0 -60.1 -91.3 -54.3 -3.7 -26.3 32.1 26.3 9.3 25.0 32.7 1,277.3 1,640.0 1,853.3 4,020.0 3,943.3 6,359.5 2,266.7 5,466.7 7,606.7 4,600.0 393.6 450.0 966.7 1,250.0 1,316.7 3,302.5 8,345.0 13,590.0 12,675.0 20,156.7 -4.2 -11.7 -4.0 0.7 -1.7 434.3 350.0 650.0 650.0 700.0 2,387.0 2,400.0 8,666.7 2,333.3 10,166.7 45,388.8 3,763.3 10,643.3 10,260.0 8,413.3 16,272.2 18,033.3 1,500.0 34,933.3 26,933.3 0.0 0.0 0.0 0.0 0.0 1,794.9 2,186.7 3,793.3 4,440.0 4,590.0 8,576.8 4,883.3 8,200.0 9,093.3 7,106.7 18.7 -20.0 -17.7 2.5 21.0 1,174.1 5,124.3 7,641.0 11,018.7 2,810.0 4,275.0 4,558.3 5,250.0 5,966.7 16,616.7 2,926.5 4,536.7 8,003.3 5,993.3 8,020.0 21,831.4 20,866.7 17,266.7 3,533.3 27,033.3 13.5 15.3 11.7 37.7 19.7 332.1 1,846.7 2,180.0 230.0 1,360.0 904.9 853.3 1,390.0 1,410.0 925.0 1,290.2 933.3 13,300.0 22,066.7 3,633.3 -1.0 -20.3 -1.0 -1.0 5.3 3,404.5 4,100.0 8,400.0 8,433.3 10,166.7 297.0 184.0 269.3 181.3 213.3 5,100.8 37,893.3 16,333.3 52,476.7 16,520.0 16.1 133.3 266.7 700.0 966.7 80,607.0 53,924.7 262,718.0 881,999.3 172,896.3 480.7 2,500.0 4,266.7 6,066.7 7,266.7 2,842.0 3,300.0 8,400.0 4,233.3 10,066.7|
+
+
+
+**Commitment of randomized exploration. Here we provide the evidence that using the ϵ-greedy**
+strategy contradicts the commitment and leads to poor performance for HyperDQN on SuperMarioBros; see the result in Figure 18.
+
+In addition, we provide the evidence that the randomized exploration approach BootDQN (Osband
+et al., 2016a) could obtain some gains if ϵ-greedy is not used; see the result in Figure 19. The result
+suggests that the original implementation of BootDQN does not satisfy the commitment property.
+Note that the variant without ϵ-greedy is still inferior compared with HyperDQN.
+
+
+-----
+
+1000% Hard Exploration (Dense Reward) Relative Score of HyperDQN Compared with OPIQ 973
+
+Hard Exploration (Sparse Reward)
+Unknown
+Easy Exploration
+
+800%
+
+600%
+
+Relative Score 400% 365
+
+316
+
+260
+
+200% 165 215
+
+0% -57 -56 -51 -41 -41 -20 -3 -3 -1 0 5 5 5 6 9 9 16 17 22 22 24 27 28 30 34 36 38 40 40 54 67 70 74 76 83 86 91 108 109 114 116 136
+
+-100% -83
+
+Breakout Up and Down Enduro Atlantis Boxing Assault Centipede Private Eye BeamRider Seaquest Montezuma's Revenge Space Invaders Asteroids Bank Heist Bowling Alien Asterix Chopper Command utankhamT Freeway River Raid Amidar Gravitar Star Gunner Road Runner Robotank Ms. Pacman Battle Zone Kung-Fu Master H.E.R.O Frostbite Fishing Derby Venture Zaxxon Crazy Climber Ice Hockey Name This Game Q*Bert Gopher Jamesbond Wizard of Wor Pong Demon Attack ennisT Krull Kangaroo Video Pinball Time Pilot Double Dunk
+
+
+Figure 12: Relative improvement of HyperDQN compared with OPIQ (Rashid et al., 2020) on Atari.
+The relative performance is calculated as max(humanproposed,baseline−baseline) human [(][Wang et al.][,][ 2016][). Environments]
+
+_−_
+are grouped according to the taxonomy in (Bellemare et al., 2016, Table 1). “Unknown” indicates
+such environments are not considered in (Bellemare et al., 2016).
+
+
+1000% Relative Score of HyperDQN Compared with OB2I
+
+Hard Exploration (Dense Reward)Hard Exploration (Sparse Reward) 950
+Unknown
+Easy Exploration
+
+800%
+
+600%
+
+Relative Score 400% 407
+
+261
+
+200% 140 143 152 162
+
+0% -33 -31 -29 -29 -25 -23 -5 0 1 1 2 2 2 5 6 12 21 24 24 25 25 28 28 29 29 30 32 35 42 47 55 57 62 66 73 79 80 93 102
+
+-100% -90 -84 -72
+
+Breakout Krull Atlantis Assault Enduro utankhamT Gopher Boxing Name This Game Asterix Montezuma's Revenge BeamRider Space Invaders Freeway Private Eye Seaquest Asteroids Pong Bank Heist Ice Hockey Road Runner Star Gunner Bowling Chopper Command Amidar ennisT Alien Gravitar Demon Attack River Raid Fishing Derby Ms. Pacman Kung-Fu Master Robotank H.E.R.O Frostbite Jamesbond Centipede Zaxxon Venture Q*Bert Up and Down Battle Zone Video Pinball Crazy Climber Wizard of Wor Kangaroo Time Pilot Double Dunk
+
+
+Figure 13: Relative improvement of HyperDQN compared with OB2I (Bai et al., 2021) on Atari. The
+relative performance is calculated as max(humanproposed,baseline−baseline) human [(][Wang et al.][,][ 2016][). Environments are]
+
+_−_
+grouped according to the taxonomy in (Bellemare et al., 2016, Table 1). “Unknown” indicates such
+environments are not considered in (Bellemare et al., 2016).
+
+
+-----
+
+150% Relative Score of HyperDQN Compared with BootDQN
+
+Unknown
+Hard Exploration (Sparse Reward)
+Easy Exploration
+Hard Exploration (Dense Reward) 110 113
+
+100%
+
+79 82 86
+
+69 72
+
+57 59
+
+50% 49
+
+37 38
+
+Relative Score 0% -25 -22 -20 -19 -19 -18 -17 -14 -11 -7 -7 -4 -2 -0 0 0 1 4 5 8 8 11 12 13 14 17 18 19 22 27 28 29
+
+-31
+
+-37 -36
+
+-50%
+
+-80 -77
+
+-100%
+
+Breakout Star Gunner Assault Video Pinball Space Invaders Krull utankhamT Enduro Bowling Name This Game BeamRider Gopher Asterix Centipede Boxing Private Eye Demon Attack Seaquest Asteroids Montezuma's Revenge River Raid Up and Down Alien Atlantis Jamesbond Battle Zone Gravitar Ms. Pacman Chopper Command Amidar Kangaroo Zaxxon Ice Hockey H.E.R.O Bank Heist ennisT Fishing Derby Time Pilot Crazy Climber Frostbite Road Runner Venture Double Dunk Wizard of Wor Freeway Robotank Q*Bert Pong Kung-Fu Master
+
+
+Figure 14: Relative improvement of HyperDQN compared with BootDQN (Osband et al., 2018)
+on Atari. The relative performance is calculated as max(humanproposed,baseline−baseline) human [(][Wang et al.][,][ 2016][).]
+
+_−_
+Environments are grouped according to the taxonomy in (Bellemare et al., 2016, Table 1). “Unknown”
+indicates such environments are not considered in (Bellemare et al., 2016).
+
+
+400% Relative Score of HyperDQN Compared with NoisyNet
+
+Unknown
+Hard Exploration (Sparse Reward)
+Easy Exploration
+Hard Exploration (Dense Reward)
+
+300% 300
+
+263
+
+200%
+
+Relative Score
+
+100%
+
+80
+
+64
+
+52
+
+0% -69 -61 -61 -51 -41 -38 -32 -29 -23 -23 -21 -21 -20 -16 -12 -9 -4 -3 -2 -1 0 0 2 2 3 3 4 5 5 8 10 13 19 22 22 22 25 26 28 30 36
+
+-100% -88 -86 -82
+
+Breakout Star Gunner Video Pinball Up and Down Assault Enduro Robotank Gopher Bowling Space Invaders Name This Game Fishing Derby Kung-Fu Master Krull Asterix Ice Hockey Crazy Climber Private Eye BeamRider Chopper Command Double Dunk Frostbite Demon Attack Montezuma's Revenge Asteroids Gravitar Ms. Pacman Seaquest Atlantis Centipede Alien Boxing Jamesbond Amidar River Raid utankhamT Wizard of Wor Battle Zone Venture H.E.R.O Freeway ennisT Bank Heist Time Pilot Pong Zaxxon Q*Bert Kangaroo Road Runner
+
+
+Figure 15: Relative improvement of HyperDQN compared with NoisyNet (Fortunato et al., 2018)
+on Atari. The relative performance is calculated as max(humanproposed,baseline−baseline) human [(][Wang et al.][,][ 2016][).]
+
+_−_
+Environments are grouped according to the taxonomy in (Bellemare et al., 2016, Table 1). “Unknown”
+indicates such environments are not considered in (Bellemare et al., 2016).
+
+Freeway Pong Q*bert
+
+30
+
+30 HyperDQNHyperDQN(with epsilon-greedy) 20 HyperDQNHyperDQN(with epsilon-greedy) 12500 HyperDQNHyperDQN(with epsilon-greedy)
+
+24 10 10000
+
+18 0 7500
+
+12 10 5000
+
+Episode Score
+
+6 20 2500
+
+0 30 0
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Frame (millions) Frame (millions) Frame (millions)
+
+
+Figure 16: Comparison of HyperDQN with and without ϵ-greedy on Atari.
+
+
+-----
+
+SuperMarioBros-1-1 10000 SuperMarioBros-1-2 SuperMarioBros-1-3
+
+15000
+
+6000
+
+8000
+
+12000
+
+9000 6000 4500
+
+6000 4000 3000
+
+Episode Score
+
+3000 2000 1500
+
+0 0 0
+
+SuperMarioBros-2-1 2500 SuperMarioBros-2-2 SuperMarioBros-2-3
+
+30000 6000
+
+2000
+
+24000 1500 4500
+
+18000
+
+1000 3000
+
+12000
+
+Episode Score
+
+6000 500 1500
+
+0 0 0
+
+SuperMarioBros-3-1 50000 SuperMarioBros-3-2 SuperMarioBros-3-3
+
+75000
+
+6000
+
+40000
+
+60000
+
+45000 30000 4500
+
+30000 20000 3000
+
+Episode Score
+
+15000 10000 1500
+
+0 0 0
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Frame (millions) Frame (millions) Frame (millions)
+
+HyperDQN NoisyNet BootDQN OB2I OPIQ DQN
+
+
+Figure 17: Learning curves of algorithms on SuperMarioBros. Solid lines correspond to the median
+performance over 3 random seeds while shaded ares correspond to 90% confidence interval. Same
+with other figures for SuperMarioBros.
+
+SuperMarioBros-1-1 SuperMarioBros-1-2 SuperMarioBros-1-3
+
+10000
+
+12500 HyperDQN HyperDQN 6000 HyperDQN
+
+HyperDQN(with epsilon-greedy) 8000 HyperDQN(with epsilon-greedy) HyperDQN(with epsilon-greedy)
+
+10000
+
+6000 4500
+
+7500
+
+5000 4000 3000
+
+Episode Score
+
+2500 2000 1500
+
+0 0 0
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Frame (millions) Frame (millions) Frame (millions)
+
+
+Figure 18: Comparison of HyperDQN with and without ϵ-greedy on SuperMarioBros.
+
+SuperMarioBros-1-1 SuperMarioBros-1-2 SuperMarioBros-1-3
+
+12000 5000
+
+BootDQN 7500 BootDQN BootDQN
+
+10000 BootDQN(without epsilon-greedy) BootDQN(without epsilon-greedy) 4000 BootDQN(without epsilon-greedy)
+
+6000
+
+8000
+
+4500 3000
+
+6000
+
+4000 3000 2000
+
+Episode Score
+
+2000 1500 1000
+
+0 0 0
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Frame (millions) Frame (millions) Frame (millions)
+
+
+Figure 19: Comparison of BootDQN with and without ϵ-greedy on SuperMarioBros.
+
+
+-----
+
+E DISCUSSION
+
+E.1 DIRECT EXTENSION OF RLSVI COULD FAIL
+
+In this part, we provide numerical evidence that the direct extension of RLSVI could fail for Atari
+tasks. In particular, we use a randomly initialized convolutional neural network as the fixed feature
+extractor and implement RLSVI according to Appendix A.1. Since we work with infinite horizon
+MDPs, we replace the non-discounted target in (A.3) by the corresponding discounted target. We
+display experiment results in Figure 20. In particular, we observe that such an implementation of
+RLSVI is unable to solve Atari tasks.
+
+Freeway Pong Q*bert
+
+30
+
+32 HyperDQN HyperDQN 12000 HyperDQN
+
+RLSVI 15 RLSVI RLSVI
+
+24 9000
+
+16 0 6000
+
+Episode Score 8 15 3000
+
+0 30 0
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Frame (millions) Frame (millions) Frame (millions)
+
+
+Figure 20: Comparison of RLSVI and HyperDQN on Atari.
+
+E.2 TRAINABILITY ISSUES OF HYPERDQN
+
+In this part, we continue the discussion of the architecture design in Section 4.1. In particular, we
+illustrate why the original architecture in (Dwaracherla et al., 2020) is not suitable for RL tasks.
+
+Table 6: Information about the base model used for deep sea.
+
+
+Shape (fin, fout) Expected Magnitude of Initialization (1/[√]fin)
+
+Layer 1 (900, 64) 1/30
+Layer 2 (64, 64) 1/8
+Layer 3 (64, 2) 1/8
+
+
+As we have argued in Section 4.1, the main challenge of applying the architecture in (Dwaracherla
+et al., 2020) is parameter initialization. To illustrate this issue, consider that we use a two-layer
+MLP neural network with a width of 64 for the deep sea task of size 30. Suppose we use the default
+PyTorch initialization[12] (i.e., sampling from the uniform distribution U [−1/ _di−1, 1/_ _di−1]),_
+
+which is also known as “1/[√]fin” with fin being the input dimension of the i-th layer. We list the
+
+p p
+
+parameter information in Table 6 (recall that the state dimension is 900 and the action dimension is 2
+for the deep sea task). We see that the expected magnitude of the parameter differs over layers. In
+particular, the desired magnitude is quite small compared with the magnitude of the output of the
+hypermodel (≈ 1). As a result, if we directly apply the hypermodel for all layers of the base model,
+the input signal over layers explodes and the gradient is quite large.
+
+-  After about 10 iterations, we observe that the parameter diverges if we use the SGD algorithm
+and apply the hypermodel for all layers of the base model.
+
+-  Even if we use adaptive algorithms like Adam, the training result is not expected; see the
+empirical result in Figure 21. In particular, if we apply the hypermodel for all layers of the
+base model, Q-values are very large and the resulting algorithm does not succeed.
+
+Furthermore, this parameter initialization issue becomes more severe when we use deep convolution
+neural networks for Atari and SuperMarioBros tasks.
+
+E.3 _ϵ-GREEDY IN MANY EFFICIENT ALGORITHMS_
+
+We realize many efficient algorithms (Osband et al., 2016a; Rashid et al., 2020; Bai et al., 2021)
+still use ϵ-greedy in practice. However, we argue that ϵ-greedy is not efficient since it cannot write
+
+[12https://pytorch.org/docs/stable/generated/torch.nn.Linear.html](https://pytorch.org/docs/stable/generated/torch.nn.Linear.html)
+
+
+-----
+
+1.00 Deep Sea-30
+
+HyperDQN(only last layer)
+HyperDQN(all layers)
+
+0.75
+
+0.50
+
+Episode Return 0.25
+
+0.00
+
+0 15000 30000 45000 60000
+
+Number of Interactions
+
+(a) Episode return on the deep sea.
+
+
+Deep Sea-30
+
+HyperDQN(only last layer)
+HyperDQN(all layers)
+
+101
+
+Q Values
+
+100
+
+0
+
+0 15000 30000 45000 60000
+
+Number of Interactions
+
+
+(b) Q-values on the deep sea.
+
+
+Figure 21: Comparison of HyperDQN with two configurations: 1) the hypermodel is applied only at
+the last layer of the base model (ours); 2) the hypermodel is applied for all layers of the base model.
+
+off sub-optimal actions after experimentation. In addition, combining with ϵ-greedy violates the
+principle of commitment as discussed in Section 4.5. We conjecture existing practical algorithms
+combine their exploration strategies with ϵ-greedy mainly due to imperfect imitation of theoretical
+algorithms, which is analyzed below. This direction deserves further investigation.
+
+Published as a conference paper at ICLR 2020 Published as a conference paper at ICLR 2020
+
+On the one hand, we believe BootDQN (Osband et al., 2016a) uses ϵ-greedy is to improve the
+diversity since finite ensembles could offer limited diverse action sequences. For instance, if the
+
+action sequences to explore at the initial stage. In this case,
+explanation is that BootDQN just follows the default setting of DQN (
+we see that the variant that drops the ϵ
+BootDQN in some tasks.
+
+number of actions is larger than the number of ensembles, BootDQN cannot produce all possible
+
+-greedy is somehow helpful. Another
+Mnih et al., 2015). In Figure 19,
+-greedy could be better than the original implementation of
+
+
+(a) Summary score (b) Examining learning scaling. (a) Summary score (b) Examining learning scaling.
+
+Figure 2: Selected output fromOn the other hand, there are many practical issues to implement OFU-based algorithms in real bsuite evaluation on ‘memory length’. Figure 2: Selected output from bsuite evaluation on ‘memory length’.
+
+applications, as discussed in Section 3. In fact, directly adding an exploration bonus yields unexpected
+
+consequences of its actions towards cumulative rewards, an agent seeking to ‘explore’ must consequences of its actions towards cumulative rewards, an agent seeking to ‘explore’ must
+consider how its actions can position it to learn more effectively in future timesteps. Theoutcomes. Let us (re-)illustrate this using the example of the deep sea (shown in Figureconsider how its actions can position it to learn more effectively in future timesteps. The 5). Imagine
+literature on efficient exploration broadly states that only agents that perform deep explo-ration can expect polynomial sample complexity in learning (Kearns & Singh, 2002). Thisthe agent visits a certain path to collect the data; for instance, the red path in Figureliterature on efficient exploration broadly states that only agents that perform deep explo-ration can expect polynomial sample complexity in learning (Kearns & Singh, 2002). This 22. With the
+literature has focused, for the most part, on uncovering possible strategies for deep explo-ration through studying the tabular setting analytically (Jaksch et al., 2010; Azar et al.,experience replay buffer, the agent can only update theliterature has focused, for the most part, on uncovering possible strategies for deep explo-ration through studying the tabular setting analytically (Jaksch et al., 2010; Azar et al., Q-value function with state-action pairs from
+2017). Our approach inbehavioural experiments that highlight the need for efficient exploration.the visited path. By exploration bonus, such state-action sequences would have larger bsuite is to complement this understanding through a series of 2017). Our approach inbehavioural experiments that highlight the need for efficient exploration. bsuite is to complement this understanding through a series of Q-values.
+
+The deep sea problem is implemented as anThe agent begins each episode in the top left corner of the grid and descends one rowDuring the next episode, the agent would repeat the same action sequences by following the greedy N ◊ _N grid with a one-hot encoding for state._ The deep sea problem is implemented as anThe agent begins each episode in the top left corner of the grid and descends one row N ◊ _N grid with a one-hot encoding for state._
+per timestep. Each episode terminates afterpolicy. It turns out that theoretical algorithms like ( N steps, when the agent reaches the bottom per timestep. Each episode terminates afterJin et al., 2018) do not have such an issue. This is N steps, when the agent reaches the bottom
+row. In each state there is a random but fixed mapping between actionsthe transitions ‘left’ and ‘right’. At each timestep there is a small costbecause theoretically, algorithms in ( r A = = {Jin et al.00.01, 1/N} and of, 2018row. In each state there is a random but fixed mapping between actionsthe transitions ‘left’ and ‘right’. At each timestep there is a small cost) can use an optimistic initialization. With the r A = = {00.01, 1/N} and of
+moving right, andtimestep of the episode it will be rewarded with an additional reward of +1. This presents aoptimistic initialization, the algorithm instead would select other actions rather than visited actions. r = 0 for moving left. However, should the agent transition right at every ≠ moving right, andtimestep of the episode it will be rewarded with an additional reward of +1. This presents a r = 0 for moving left. However, should the agent transition right at every ≠
+particularly challenging exploration problem for two reasons. First, following the ‘gradient’of small intermediate rewards leads the agentIn practice, however, it is not easy to obtain an optimistic initialization with deep neural networks away from the optimal policy. Second, a particularly challenging exploration problem for two reasons. First, following the ‘gradient’of small intermediate rewards leads the agent away from the optimal policy. Second, a
+
+policy that explores with actions uniformly at random has probability 2the rewarding state in any episode. For the(Rashid et al., 2020 bsuite). Again, experiment we run the agent on sizes ϵ-greedy could somehow avoid this issue.[≠][N] of reaching policy that explores with actions uniformly at random has probability 2the rewarding state in any episode. For the bsuite experiment we run the agent on sizes[≠][N] of reaching
+
+
+state s0. This issue is caused by the pessimistic initialization by neural network (6 6 Rashid et al., 2020).
+
+_, 12, .., 50 and look at the average regret compared to optimal after 10k episodes._ _N = 10, 12, .., 50 and look at the average regret compared to optimal after 10k episodes._
+The summary ‘score’ computes the percentage of runs for which the average regret drops The summary ‘score’ computes the percentage of runs for which the average regret drops
+below 0.9 faster than the 2[N] episodes expected by dithering. below 0.9 faster than the 2[N] episodes expected by dithering.
+
+### update(￼ s0, left)
+
+Figure 3: Deep-sea exploration: a simple example where deep exploration is critical. Figure 3: Deep-sea exploration: a simple example where deep exploration is critical.
+
+is a good bsuite experiment because it is targeted, simple, challenging, scalableQ￼ (s0, left) > Q(s0, right) _Deep SeaQ￼ is a good(s0, bsuite left) + bonus experiment because it is targeted, simple, challenging, scalable > Q(s0, right)_
+and fast. By construction, an agent that performs well on this task has mastered some and fast. By construction, an agent that performs well on this task has mastered some
+key properties of deep exploration. Our summary score provides a ‘quick and dirty’ way to key properties of deep exploration. Our summary score provides a ‘quick and dirty’ way to
+compare agent performance at a high level. Our sweep over different sizesvide empirical evidence of the scaling properties of an algorithm beyond a simple pass/fail.Figure 22: Illustration for the initialization issue of OFU-based algorithms. After the initialization, N can help to pro- compare agent performance at a high level. Our sweep over different sizesvide empirical evidence of the scaling properties of an algorithm beyond a simple pass/fail. N can help to proFigure 3 presents example output comparing A2C, DQN and Bootstrapped DQN on thisaction “left” dominates at state s0. After the experience replay buffer, action “left” dominates again atFigure 3 presents example output comparing A2C, DQN and Bootstrapped DQN on this
+
+
+In addition to the initialization issue, the uncertainty (i.e., the exploration bonus) should propagate
+over stages in a backward manner. In (Jin et al., 2018), this operation is implemented by the
+exact dynamic programming. In contrast, practical algorithms randomly draw mini-batch from the
+
+
+-----
+
+experience buffer to update, which may not properly propagate the uncertainty. As a result, the
+_Q-values are not always optimistic, and induced action sequences may not be diverse. This issue is_
+pointed out in (Bai et al., 2021). Again, ϵ-greedy may be helpful to address this issue.
+
+E.4 DISCUSSION OF NOISYNET
+
+In this part, we explain the differences between HyperDQN and NoisyNet in detail. The following
+discussion aims to provide insights about what HyperDQN can achieve while NoisyNet cannot. Note
+that we are by no means criticizing NoisyNet. Instead, NoisyNet is simple and has strong empirical
+performance. We hope the above discussion could provide intuitions (or explanations) why NoisyNet
+succeeds or fails under different cases.
+
+-  First, as remarked in (Fortunato et al., 2018), NoisyNet is not ensured to approximate
+the posterior distribution of parameters. Therefore, NoisyNet is not a typical Thompson
+sampling based algorithm. The implication is that we may not use the well-known theory
+(Osband et al., 2013; 2019; Zanette et al., 2020) to analyze NoisyNet.
+
+-  Second, NoisyNet re-samples a new policy every time step (Line 5 of Algorithm 1 in
+(Fortunato et al., 2018)). Consequently, it does not implement deep exploration like RLSVI
+(see (Osband, 2016b, Section 4.1)). This may explain the empirical result that NoisyNet can
+not solve the deep sea task when the problem size is large than 20 (see Figure (Osband et al.,
+2018, Figure 9)). Instead, BootDQN and HyperDQN can solve the deep sea task even if the
+problem size is large than 20.
+
+-  Third, NoisyNet does not have the mechanism of “prior” (Osband et al., 2018) even though
+it is randomized. As a consequence, NoisyNet cannot leverage an informative prior to
+accelerate exploration when such information is available. In contrast, HyperDQN can
+achieve this goal as discussed in Appendix E.6.
+
+E.5 EXTENSION TO CONTINUOUS CONTROL
+
+In this part, we briefly discuss how to extend the idea in this paper for continuous control tasks. We
+also present some preliminary results to support this direction.
+
+Following the idea presented in Section 4.3, we should leverage the hypermodel to capture the
+posterior distribution of the Q-value function. Considering the standard actor-critic methods, we can
+replace the vanilla critic with the one that is built by the hypermodel. In particular, we replace the
+last layer of the critic with a hypermodel. In this way, each z corresponds to a specific critic from
+the posterior distribution. To perform policy optimization, we notice that each actor (i.e., a policy
+network) should be greedy to a specific critic with the same index z. To this end, the last layer of the
+actor network is also built by a hypermodel. The architecture design is illustrated in Figure 23.
+
+DFWRUQHWZRUN FULWLFQHWZRUN
+
+Figure 23: Illustration for HAC. In addition to a hypermodel in the critic network, there is also a
+hypermodel for the actor network.
+
+Let (θhidden[critic] _[, ν][critic][)][ be the parameter for the critic network and][ (][θ]hidden[actor]_ _[, ν][actor][)][ be the parameter for the]_
+actor network. Following the optimization framework in (Lillicrap et al., 2016; Haarnoja et al., 2018),
+the training objective for the actor network is:
+
+
+_Qθhiddencritic_ _[,ν][critic]_ [(][s, a][z][, z][)][,] with az ∼ _πθhidden[actor]_ _[,ν][actor]_ [(][s][;][ z][)][,] (E.1)
+_s_
+
+X∈D[e]
+
+
+max
+_θhidden[actor]_ _[,ν][actor]_
+
+
+_z∈Z[e]_
+
+
+-----
+
+**Algorithm 3 HyperActorCritic(HAC)**
+
+**for episode k = 0, 1, 2, · · · do**
+
+generate a random vector z ∼N (0, I). _▷_ Sampling
+
+instantiate an actor πθ( ; z).
+
+_·_
+**for stage t = 0, 1, 2, · · ·, T −** 1 do _▷_ Interaction
+
+observe state st.
+sample the action at _πθ(st; z)._
+receive the next state ∼ st+1 and reward r(st, at).
+sample ξ uniformly from unit hypersphere.
+store (st, at, r, ξ, st+1) into the replay buffer .
+_D_
+agent step n ← _n + 1._
+**if mod (agent step n, train frequency M** ) == 0 then _▷_ Update
+
+sample a mini-batch _D of (s, a, r, ξ, s[′]) from the replay buffer D._
+
+sample N random vectors zi[′][:][ e]Z = {zi[′][}][N]i=1[.]
+
+optimize the critic network using the loss function ([e] E.2) with and .
+_D_ _Z_
+
+optimize the actor network using the loss function (E.1) with _D and_ _Z._
+
+update the critic target network with exponential moving average.[e] [e]
+
+**end if**
+
+[e] [e]
+
+**end for**
+
+**end for**
+
+
+where Qθhiddencritic _[,ν][critic][ is the critic network and][ π][θ]θ[actor]hidden_ _[,ν][actor][ is the actor network. In particular, objective]_
+(E.1) states that we should sample actions from the actor network to maximize the Q-value function.
+The difference with the traditional actor-critic methods is that we sample many actor networks
+(indexed by z) to optimize.
+
+Similarly, the training objective for the critic network is:
+
+2
+
+_θhidden[critic]min[,ν][critic]_ _Qθhiddencritic_ _[,ν][critic][(][s, a, z][)][ −]_ _[σ][w][ξ][⊤][z][ −]_ _r + γQθcritichidden[,ν][critic]_ [(][s][′][, a]z[′] _[, z][)]_ _,_
+
+_zX∈Z[e]_ (s,a,r,sX[′],ξ)∈D[e]   
+
+(E.2)
+with a[′]z _[∼]_ _[π]θhidden[actor]_ _[,ν][actor]_ [(][s][′][, z][)][. In (][E.2][),][ Q][θ][critic]hidden[,ν][critic][ is the target network. The goal of (][E.2][) is to]
+perform the temporal difference learning to optimize the critic. Note that the prior regularization term
+is not appeared in (E.2) for easy presentation.
+
+We call the above method as HyperActorCritic(HAC). Its implementation is outlined in Algorithm 3,
+which shares many features with Algorithm 2.
+
+Now, we consider the Cart Pole task from dm control[13] (Tunyasuvunakool et al., 2020) as a
+testbed; see Figure 24a . Detailed environment information is provided as follows: the dimension
+of the state space is 5, the dimension of the action space is 1, the planning horizon is 1000 and the
+reward is between 0 and 1. This environment is a standard platform to test the exploration efficiency
+for continuous control algorithms because the agent can only obtain +1 reward when it succeeds and
+obtain 0 reward otherwise.
+
+We compare our extension (HAC) with the strong baseline SAC (Haarnoja et al., 2018). Even
+though the policy entropy reward is used to guide exploration, SAC does not have the epistemic
+uncertainty qualification like HAC. As a result, we expect SAC does not perform well for Cart Pole.
+The numerical result is displayed in Figure 24b. We see that HAC outperforms SAC on this hard
+exploration task.
+
+E.6 WHEN AN INFORMATIVE PRIOR IS AVAILABLE
+
+In this part, we briefly discuss the role of prior value functions in our formulation. In particular,
+we argue that if an informative prior value function is available, the exploration efficiency can be
+significantly improved.
+
+[13https://github.com/deepmind/dm_control](https://github.com/deepmind/dm_control)
+
+
+-----
+
+#### The swingup and swingup_sparse tasks have smooth an wards, respectively.
+
+
+800 CartPole-Swingup(Sparse Reward)
+
+HAC
+SAC
+
+600
+
+#### plying forces to a cart at its base. The physical model confor
+
+400
+
+#### the pole starts pointing down while in. Four benchmarking tasks: inEpisode Score 200 the pole starts near the upright position.0
+
+0.00 0.25 0.50 0.75 1.00
+
+Number of Interactions (millions)
+
+
+#### Cart-k-pole (2k+2, 1, 3k+2): The ca
+
+2020). main allows to procedurally adding m
+
+#### connected serially. Two non-benchmar
+
+Here we show the learning curve with an informative prior in Figuretwo_poles 25. In particular, this informative and three_poles are availab
+
+Here we show the learning curve with an informative prior in Figure
+prior value function is obtained from the pre-trained model after
+
+informative prior value function improves efficiency a lot. Note that the main goal of this experiment
+is to illustrate that an informative prior could accelerate exploration. We will consider how to
+
+automatically acquire an informative prior with human demonstrations (Hester et al., 2018; Sun et al.,
+2018) in the future.
+
+9000 SuperMarioBros-1-3 23
+
+9000 SuperMarioBros-1-3
+
+HyperDQN
+HyperDQN(with an informative prior)
+
+7500
+
+6000
+
+4500
+
+Episode Score 3000
+
+1500
+
+0
+
+0 5 10 15 20
+
+Frame (millions)
+
+
+Figure 25: Comparison of HyperDQN with and without an informative prior on SuperMarioBros-1-3.
+
+
+-----
+

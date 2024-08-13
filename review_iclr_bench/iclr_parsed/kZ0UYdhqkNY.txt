@@ -1,0 +1,1841 @@
+# VARIATIONAL METHODS
+## FOR SIMULATION-BASED INFERENCE
+
+**Manuel Gl¨ockler** **Michael Deistler** **Jakob H. Macke**
+University of T¨ubingen University of T¨ubingen University of T¨ubingen
+
+ABSTRACT
+
+We present Sequential Neural Variational Inference (SNVI), an approach to perform Bayesian inference in models with intractable likelihoods. SNVI combines
+likelihood-estimation (or likelihood-ratio-estimation) with variational inference to
+achieve a scalable simulation-based inference approach. SNVI maintains the flexibility of likelihood(-ratio) estimation to allow arbitrary proposals for simulations,
+while simultaneously providing a functional estimate of the posterior distribution
+without requiring MCMC sampling. We present several variants of SNVI and
+demonstrate that they are substantially more computationally efficient than previous algorithms, without loss of accuracy on benchmark tasks. We apply SNVI to a
+neuroscience model of the pyloric network in the crab and demonstrate that it can
+infer the posterior distribution with one order of magnitude fewer simulations than
+previously reported. SNVI vastly reduces the computational cost of simulationbased inference while maintaining accuracy and flexibility, making it possible to
+tackle problems that were previously inaccessible.
+
+1 INTRODUCTION
+
+Many domains in science and engineering use numerical simulations to model empirically observed
+phenomena. These models are designed by domain experts and are built to produce mechanistic insights. However, in many cases, some parameters of the simulator cannot be experimentally
+measured and need to be inferred from data. A principled way to identify parameters that match
+empirical observations is Bayesian inference. However, for many models of interest, one can only
+_sample from the model by simulating a (stochastic) computer program, but explicitly evaluating_
+the likelihood p(x|θ) is intractable. Traditional methods to perform Bayesian inference in such
+_simulation-based inference (SBI), also known as likelihood-free inference scenarios, include Ap-_
+proximate Bayesian computation (ABC) (Beaumont et al., 2002) and synthetic likelihood (SL)
+(Wood, 2010) methods. However, these methods generally struggle with high-dimensional data and
+typically require one to design or learn (Chen et al., 2021) summary statistics and distance functions.
+
+Recently, several methods using neural density(-ratio) estimation have emerged. These methods
+train neural networks to learn the posterior (SNPE, Papamakarios & Murray, 2016; Lueckmann
+et al., 2017; Greenberg et al., 2019), the likelihood (SNLE, Papamakarios et al., 2019; Lueckmann
+et al., 2019a), or the likelihood-to-evidence ratio (SNRE, Thomas et al., 2021; Hermans et al., 2020;
+Durkan et al., 2020; Miller et al., 2022).
+
+To improve the simulation efficiency of these methods, sequential training schemes have been proposed: Initially, parameters are sampled from the prior distribution to train an estimation-network.
+Subsequently, new samples are drawn adaptively to focus training on specific regions in parameter
+space, thus allowing the methods to scale to larger models with more parameters.
+
+In practice, however, it has remained a challenge to realize the full potential of these sequential
+schemes: For sequential neural posterior estimation (SNPE) techniques, the loss function needs to be
+adjusted across rounds (Greenberg et al., 2019), and it has been reported that this can be problematic
+if the proposal distribution is very different from prior, and lead to ‘leakage’ of probability mass into
+regions without prior support (Durkan et al., 2020). Both sequential neural likelihood (SNLE) and
+likelihood-ratio (SNRE) methods require MCMC sampling, which can become prohibitively slow–
+MCMC sampling is required for each round of simulations, which, for high-dimensional models,
+can take more time than running the simulations and training the neural density estimator.
+
+
+-----
+
+**-**
+
+
+Figure 1: Illustration of SNVI. We first learn the likelihood p(x|θ) for any θ. We then use variational
+inference to learn the posterior distribution by minimizing a general divergence measure D. The
+obtained posterior distribution is sampled with sampling importance resampling (SIR) to run new
+simulations and refine the likelihood estimator.
+
+Our goal is to provide a method which combines the advantages of posterior-targeting methods and
+those targeting likelihood(-ratios): Posterior targeting methods allow rapid inference by providing
+a functional approximation to the posterior which can be evaluated without the need to use MCMC
+sampling. Conversely, a key advantage of likelihood(-ratio) targeting methods is their flexibility–
+learned likelihoods can e.g. be used to integrate information from multiple observations, or can be
+used without retraining if the prior is changed. In addition, they can be applied with any activelearning scheme without requiring modifications of the loss-function.
+
+We achieve this method by combining likelihood(-ratio) estimation with variationally learned inference networks using normalizing flows (Rezende & Mohamed, 2015; Papamakarios et al., 2017;
+Durkan et al., 2019a) and sampling importance resampling (SIR) (Rubin, 1988). We name our approach Sequential Neural Variational Inference (SNVI). We will show that our simulation-based
+inference methods are as accurate as SNLE and SNRE, while being substantially faster at inference
+as they do not require MCMC sampling. In addition, real-world simulators sometimes produce invalid outputs, e.g. when a simulation fails. We introduce a strategy that allows likelihood(-ratio)
+targeting methods (such as SNVI) to deal with such invalid simulation outputs.
+
+A recent method termed “Sequential Neural Posterior and Likelihood Approximation” (SNPLA)
+also proposed to use variational inference (VI) instead of MCMC to speed up inference in likelihoodtargeting methods (Wiqvist et al., 2021). While this proposal is related to our approach, their VI
+objective is based on the reverse Kullback Leibler (rKL) divergence for learning the posterior. As
+we also show on benchmark tasks, this leads to mode-seeking behaviour which can limit its performance. In contrast, we show how this limitation can be overcome through modifying the variational
+objective in combination with using SIR for adjusting posteriors.
+
+After an introduction on neural network-based simulation-based inference (SBI) and variational
+inference (Sec. 2), we present our method, Sequential Neural Variational Inference (SNVI) (Sec. 3).
+In Sec. 4.2, we empirically show that SNVI is significantly faster than state-of-the-art SBI methods
+while achieving similar accuracy on benchmark tasks. In Sec. 4.3, we demonstrate that SNVI is
+scalable, and that it is robust to invalid simulation outputs: We obtain the posterior distribution of a
+complex neuroscience model with one order of magnitude fewer simulations than previous methods.
+
+2 BACKGROUND
+
+2.1 SIMULATION-BASED INFERENCE
+
+Simulation-based inference (SBI) aims to perform Bayesian inference on statistical models for
+which the likelihood function is only implicitly defined through a stochastic simulator. Given a
+prior p(θ) and a simulator which implicitly defines the likelihood p(x|θ), the goal is to identify the
+posterior distribution p(θ **_xo) for an observation xo. The simulator is considered to be ‘black-box’,_**
+_|_
+i.e. one cannot evaluate p(x|θ) and does not have access to the internal states of the simulator, but
+only to its inputs θ and its outputs x.
+
+
+-----
+
+We focus on improving likelihood-estimation (SNLE) and likelihood-ratio-estimation (SNRE)
+methods. SNLE trains a deep neural density estimator ℓψ(x **_θ) by minimizing the forward_**
+_|_
+Kullback-Leibler divergence (fKL) between ℓψ(x **_θ) and p(x_** **_θ) using samples (x, θ)_** _p˜(x, θ) =_
+_p(x|θ)˜p(θ) from the simulator with L(ψ) = −_ _N[1]|_ _Ni=1_ [log][ ℓ]| _[ψ][(][x][i][|][θ][i][)][.][ Here,][ ℓ][ψ][(][x][|][θ] ∼[)][ is a condi-]_
+
+tional density estimator learning the conditional densityparameters, and ˜p(θ) is the proposal distribution from which the parametersP _p(x|θ) from (θ, x) pairs, θ are drawn (given by ψ are its learnable_
+e.g. a previous estimate of the posterior or by an active learning scheme, Papamakarios et al., 2019;
+Lueckmann et al., 2019a).
+
+Analogously, SNRE uses a discriminator, e.g. a deep logistic regression network, to estimate the density ratio r(x, θ) = _p˜p(˜x(x)˜p,θ(θ)_ ) [=][ p]p[(]˜[x](x[|][θ])[)] _[.][ (Hermans et al., 2020; Durkan et al., 2020), If the proposal is]_
+
+given by the prior, then one can recover the exact posterior density, otherwise the posterior can be recovered up to a normalizing constant (Durkan et al., 2020). Once the likelihood (or likelihood-ratio)
+has been learned, the posterior can be sampled with MCMC. In sequential schemes, the proposal ˜p
+is updated each round using the current estimate of the posterior – thus, computationally expensive
+MCMC sampling needs to be run in each round.
+
+2.2 VARIATIONAL INFERENCE
+
+
+We use variational inference (VI) to estimate the posterior distribution. VI formulates an optimization problem over a class of tractable distributions to find parameters φ[∗] such that qφ∗ is
+_Q_ _∈Q_
+closest to the true posterior p(θ **_xo) according to some divergence D (Blei et al., 2017). Formally,_**
+_|_
+
+_φ[∗]_ = arg min _D(qφ(θ)_ _p(θ_ **_xo))_**
+_φ_ _||_ _|_
+
+with qφ∗ (θ) = p(θ **_xo)_** _D(qφ∗_ (θ) _p(θ_ **_xo)) = 0. Recent work has introduced normaliz-_**
+_|_ _⇐⇒_ _||_ _|_
+ing flows as a variational family for VI (Ranganath et al., 2014; Agrawal et al., 2020; Rezende &
+Mohamed, 2015). Normalizing flows define a distribution qφ(θ) by learning a bijection Tφ which
+transforms a simpler distribution into a complex distribution p(θ **_xo). Normalizing flows provide a_**
+_|_
+highly flexible variational family, while at the same time allowing low variance gradient estimation
+of an expectation by the reparameterization trick, i.e. _φEθ_ _qφ_ [f (θ)] = Eθ0 _q0_ [ _φf_ (Tφ(θ0))]
+_∇_ _∼_ _∼_ _∇_
+with θ = Tφ(θ0) (Kingma & Welling, 2014; Rezende et al., 2014; Rezende & Mohamed, 2015).
+
+3 SEQUENTIAL NEURAL VARIATIONAL INFERENCE (SNVI)
+
+3.1 KEY INGREDIENTS
+
+We propose a framework to use variational inference (VI) for simulation-based inference. Our
+method consists of three parts: A learnable likelihood (or likelihood-ratio) model, a posterior model
+(typically parameterized as a normalizing flow) to be learned with VI, and sampling importance
+resampling (SIR) (Rubin, 1988) to refine the accuracy of the posterior (Fig. 1). The likelihood(ratio) model ℓψ(x|θ) learns to approximate the likelihood p(x|θ) or the likelihood-ratio _[p]p[(][x](x[|][θ])[)]_ [from]
+
+pairs of parameters and simulation outputs (θ, x). We use the term SNLVI to refer to SNVI with
+likelihoods, and SNRVI with likelihood-ratios. After a likelihood(-ratio) model has been trained,
+the posterior model qφ(θ) is trained with variational inference using normalizing flows. Finally, SIR
+is used to correct potential inaccuracies in the posterior qφ(θ)– as we will show below, the SIR step
+leads to empirical improvements at modest computational overhead. To refine the likelihood(-ratio)
+model and the posterior, the procedure can be repeated across several ‘rounds’. We opt to sample
+the parameters θ from the previous posterior estimate qφ(θ), but other strategies for active learning
+(e.g. Lueckmann et al., 2019b) could be plugged into SNVI. The algorithm is summarized in Alg. 1.
+We will now describe three variational objectives that can be used with SNVI, the SIR procedure to
+refine the posterior, and a strategy for dealing with invalid simulation outputs.
+
+3.2 VARIATIONAL OBJECTIVES FOR SBI
+
+Because of the expressiveness of normalizing flows, the true posterior can likely be approximated
+well by a member of the variational family (Papamakarios et al., 2021). Thus, the quality of the
+
+
+-----
+
+**Algorithm 1: SNVI**
+
+
+**1 Inputs: prior p(θ), observation xo, divergence D, simulations per round N**, number of
+rounds R, selection strategy S.
+
+**2 Outputs: Approximate likelihood ℓψ and variational posterior qφ.**
+
+**3 Initialize: Proposal ˜p(θ) = p(θ), simulation dataset X = {}**
+
+**4 for r ∈** [1, ..., R] do
+
+**5** **for i ∈** [1, ..., N ] do
+
+**76** simulateθi = S(˜p, ℓ xi _φ, pp)( ;x_ **_θi) ;_** // run the simulator on// sample θi ∼ _p˜ θ(θ)i_
+**8** add (θi, xi) ∼ to _|_
+_X_
+
+**9** **end**
+
+**10** (re-)train ℓψ; _ψ[∗]_ = arg minψ _N_ (xi,θi) [log][ ℓ][ψ][(][x][i][|][θ][i][)][ ;][ // or SNRE loss]
+_−_ [1] _∈X_
+
+**11** (re-)train qφ; _φ[∗]_ = arg minφ D(qφ(θ) _p(θ_ **_xo)) with_**
+
+P _||_ _|_
+
+_p(θ_ **_xo)_** _p(xo_ **_θ)p(θ)_** _ℓψ∗_ (xo **_θ)p(θ)_**
+_|_ _∝_ _|_ _≈_ _|_
+
+
+**12** _p˜(θ) = qφ(θ)_
+
+**13 end**
+
+variational approximation is strongly linked to the ability to achieve the best possible approximation
+through optimization, which in turn depends on the choice of variational objective D. Using the
+reverse Kullback-Leibler Divergence (rKL) as proposed by Wiqvist et al. (2021) can give rise to
+mode-seeking behaviour and qφ might not cover all regions of the posterior (Bishop, 2006; Blei
+et al., 2017). As a complementary approach, we suggest and evaluate three alternative variational
+objectives that induce a mass-covering behaviour and posit that this strategy will be particularly
+important in sequential schemes.
+
+**1. Forward KL divergence (fKL)** In contrast to the reverse KL (rKL), the forward KullbackLeibler divergence (fKL) is mass-covering (Bishop, 2006). Wan et al. (2020) minimize the following
+upper bound to the evidence, which implicitly minimizes the fKL: (φ) = Eθ _qφ [w(θ) log (w(θ))]_
+_L_ _∼_
+with w(θ) = p(xo, θ)/qφ(θ). This expression is hard to estimate with samples: If qφ(θ) is different
+from p(xo, θ) then w(θ) 0 for most θ _qφ(θ), thus_ _φ_ (φ) 0, which would prevent learning
+_≈_ _∼_ _∇_ _L_ _≈_
+(see Appendix Sec. A.3).
+
+To overcome this problem, we rewrite the fKL using self-normalized importance sampling (Jerfel
+et al., 2021). Let θ1, . . ., θN _π be samples from an arbitrary proposal distribution π. We then_
+minimize the loss: _∼_
+
+_N_
+
+_w(θi)_ _p(xo, θi)_
+
+_LfKL(φ) = DKL(p||qφ) ≈_ _N_ log _qφ(θi)_
+
+_i=1_ _j=1_ _[w][(][θ][j][)]_  
+
+X
+
+where w(θ) = p(xo, θ)/π(θ). As a self-normalized importance sampling scheme, this estimate isP
+biased, but the bias vanishes at rate (1/N ) (Hesterberg, 2003). In our experiments, we use π = qφ,
+_O_
+which provides a good proposal when qφ is close to p (Chatterjee & Diaconis, 2018). Even though
+_qφ will differ from p initially, sufficient gradient information is available to drive qφ towards p, as_
+we demonstrate in Appendix Sec. A.3.
+
+**2. Importance weighted ELBO** The importance weighted ELBO (IW-ELBO) introduced by
+Burda et al. (2016) uses the importance-weighted gradient of the evidence lower bound (ELBO). It
+minimizes the KL divergence between the self-normalized importance sampling distribution of qφ
+and the posterior and thus provides a good proposal for sampling importance resampling (Cremer
+et al., 2017; Domke & Sheldon, 2018; Ranganath et al., 2014). It can be formulated as
+
+
+log [1]
+
+
+_p(xo, θk)_
+
+_qφ(θk)_
+
+
+_IW_ [(][φ][) =][ E][θ]1[,...,][θ]k[∼][q]φ
+_L[(][K][)]_
+
+
+_k=1_
+
+
+To avoid a low SNR of the gradient estimator (Rainforth et al., 2018), we use the ‘Sticking the
+Landing‘ (STL) estimator introduced by Roeder et al. (2017).
+
+
+-----
+
+**3. R´enyi α-divergences** R´enyi α-divergences are a divergence family with a hyperparameter α
+which allows to tune the mass-covering (or mode-seeking) behaviour of the algorithm. For α → 1,
+the divergence approaches the rKL. For α < 1, the divergence becomes more mass-covering, for
+_α > 1 more mode-seeking. We use α = 0.1 in our experiments. A R´enyi variational bound was_
+established by Li & Turner (2016) and is given by
+
+
+_p(xo, θ)_
+
+_qφ(θ)_
+
+"
+
+
+1 _α[#!]_
+_−_
+
+
+
+Eθ _qφ_
+_∼_
+
+
+_α(φ) =_
+_L_
+
+
+1 _α_ [log]
+_−_
+
+
+For α = 0, Lα is a single sample Monte Carlo estimate of the IW-ELBO (when using K samples
+to estimate the expectation in _α(φ)) and thus also suffers from a low SNR as α_ 0 (Rainforth
+_L_ _→_
+et al., 2018; Li & Turner, 2016). Just as for the IW-ELBO, we alleviate this issue by combining the
+_α-divergences with the STL estimator._
+
+3.3 SAMPLING IMPORTANCE RESAMPLING
+
+After the variational posterior has been trained, qφ approximates ℓψ(xo|θ)p(θ)/Z with normalization constant Z. We propose to improve the quality of posterior samples by applying Sampling
+Importance Resampling (SIR) (Rubin, 1988). We sample K = 32 samples from θ _qφ(θ), com-_
+_∼_
+pute the corresponding importance weights wi = ℓψ(xo|θi)p(θi)/qφ(θi) and resample a single
+sample from a categorical distribution whose probabilities equal the normalized importance weights
+(details in Appendix Sec. A.4). This strategy enriches the variational family with minimal computational cost (Agrawal et al., 2020). SIR is particularly useful when qφ(θ) covers the true posterior
+and is thus well-suited for the objectives described above (see Appendix Fig. 6).
+
+3.4 EXCLUDING INVALID DATA
+
+Simulators may produce unreasonable or undefined values (e.g. NaN), as we will also see in the
+pyloric network model described later. In posterior estimation methods (SNPE), one can simply
+remove these ‘invalid’ simulations from the training dataset, and the trained neural density estimator
+will still approximate the true posterior (Lueckmann et al., 2017). However, as we show in Appendix
+Sec. A.6, this is not the case for likelihood(-ratio)-methods– when ‘invalid’ simulations are removed,
+the network will converge to ℓψ(xo|θ) ≈ _Z[1]_ _[p][(][x][o][|][θ][)][/p][(][valid][|][θ][)][, i.e. the learned likelihood-function]_
+
+will be biased towards parameter regions which often produce ‘invalid’ simulations. This prohibits
+any method that estimates the likelihood(-ratio) (i.e. SNVI, SNLE, SNRE) from excluding ‘invalid’
+simulations, and would therefore prohibit their use on models that produce such data.
+
+To overcome this limitation of likelihood-targeting techniques, we propose to estimate the bias-term
+_p(valid_ **_θ) with an additional feedforward neural network cζ(θ)_** _p(valid_ **_θ) (details in Appendix_**
+_|_ _≈_ _|_
+Sec. A.6). Once trained, cζ(θ) can be used to correct for the bias in the likelihood network. Given
+the (biased) likelihood network ℓψ(xo **_θ) and the correction factor cζ(θ), the posterior distribution_**
+_|_
+is proportional to
+
+(θ) = ℓψ(xo **_θ)p(θ)cζ(θ)_** _p(xo_ **_θ)p(θ)_** _p(θ_ **_xo)._**
+_P_ _|_ _∝_ _|_ _∝_ _|_
+
+We sample from this distribution with VI in combination with SIR. Details, proof and extension to
+SNRVI in Appendix Sec. A.6. The additional network cζ(θ) is only required in models which can
+produce invalid simulations. This is not the case for the toy models in Sec. 4.2, but it is required
+in the model in Sec. 4.3. Alg. 1 shows SNVI without the additional bias-correction step, Appendix
+Alg. 3 shows the method with correction.
+
+4 EXPERIMENTS
+
+We demonstrate the accuracy and the computational efficiency of SNVI on several examples. First,
+we apply SNVI to an illustrative example to demonstrate its ability to capture complex posteriors
+without mode-collapse. Second, we compare SNVI to alternative methods on several benchmark
+tasks. Third, we demonstrate that SNVI can obtain the posterior distribution in models with many
+parameters by applying it to a neuroscience model of the pyloric network in the crab Cancer borealis.
+
+
+-----
+
+Figure 2: A Posterior approximations of SNLE, SNPLA, and SNVI+fKL for the two moons benchmark example. B Runtime of all algorithms.
+
+4.1 ILLUSTRATIVE EXAMPLE: TWO MOONS
+
+We use the ‘two moons’ simulator (Greenberg et al., 2019) to illustrate the ability of SNVI to capture
+complex posterior distributions. The two moons simulator has two parameters with a uniform prior
+and generates a posterior that has both local and global structure. Fig. 2A shows the ground truth
+posterior distribution as well as approximations learned by several methods using 10[5] simulations.
+
+SNLE with MCMC (in the form of Slice Sampling with axis-aligned updates (Neal, 2003)) can
+recover the bimodality when running 100 chains in parallel (Lueckmann et al., 2021) (not shown:
+individual chains typically only explore a single mode). SNPLA, which is based on the modeseeking rKL (and could thus also be considered as SNVI+rKL, see Appendix Sec. A.7) captures
+only a single mode. In contrast, SNLVI (using the fKL and SIR, denoted as SNVI+fKL) recovers
+both the local and the global structure of the posterior accurately. In terms of runtime, SNPLA and
+SNVI+fKL are up to twenty times faster than 100 chain MCMC in our implementation (Fig. 2B),
+and two to four orders of magnitude faster than single chain MCMC (single chain not shown, the
+relative speed-up for multi-chain MCMC is due to vectorization).
+
+4.2 RESULTS ON BENCHMARK PROBLEMS
+
+We compare the accuracy and computational cost of SNVI to that of previous methods, using SBI
+benchmark tasks (Lueckmann et al., 2021):
+
+**Bernoulli GLM: Generalized linear model with Bernoulli observations. Inference is performed**
+on 10-dimensional sufficient summary statistics of the originally 100 dimensional raw data. The
+resulting posterior is 10-dimensional, unimodal, and concave.
+
+**Lotka Volterra: A traditional model in ecology (Wangersky, 1978), which describes a predator-**
+prey interaction between species, illustrating a task with complex likelihood and unimodal posterior.
+
+**Two moons: Same as described in the previous section.**
+
+**SLCP: A task introduced by Papamakarios et al. (2019) with a simple likelihood and complex**
+posterior. The prior is uniform, the likelihood has Gaussian noise but is nonlinearly related to the
+parameters, resulting in a posterior with four symmetrical modes.
+
+For each task, we perform inference for ten different runs, each with a different observation. As
+performance metric, we used classifier 2-sample tests (C2ST) (best is 0.5, worst is 1.0) (Friedman,
+2004; Lopez-Paz & Oquab, 2017). For each method, we perform inference given a total of 10[3],
+10[4] and 10[5] simulations, evenly distributed across ten rounds of simulation and training. Details
+on the hyperparameters are provided in Appendix Sec. A.8, details on results in Appendix Fig. 9,
+comparisons to the forward KL without self-normalized weights as well as to the IW-ELBO and the
+_α-divergences without STL in Appendix Fig. 11._
+
+We show results for two reference methods, SNLE with MCMC sampling, and SNPLA, and compare them to three variants of SNLVI using the forward KL (SNVI+fKL), the importance-weighted
+ELBO (SNVI+IW) as well as an alpha-divergence (SNVI+α). We find that all three SNVI-variants
+achieve performance comparable to MCMC across all four tasks (Fig. 3 A-D, left), and outperform SNPLA on the two tasks with multi-modal posteriors (Two moons and SLCP). We find that
+omitting the SIR-adjustment (dotted lines) leads to a small but consistent degradation in inference
+
+
+-----
+
+Bernoulli GLM
+
+SNLE SNPLA SNVI+fKL SNVI+IW SNVI+α
+
+Lotka volterra
+
+
+3200
+
+Time [s]
+
+0
+
+3200
+
+
+1.0
+
+0.5
+
+
+1.0
+
+0.5
+
+1.0
+
+
+Two moons
+
+
+2000
+
+Time [s]
+
+0
+
+3200
+
+
+0.5
+
+1.0
+
+0.5
+
+
+SLCP
+
+10[3] 10[4] 10[5]
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+Simulations
+
+
+Figure 3: C2ST benchmark results for SNVI with likelihood-estimation (SNLVI) for four models, Bernoulli GLM (A), Lotka volterra (B), Two moons (C) and SLCP (D). Each point represents
+the average metric value for ten different observations, as well as the confidence intervals. Bars
+on the right indicate the average runtime. Two reference methods: SNLE with MCMC sampling,
+and SNPLA (which uses rKL), as well as three variants of SNVI, with forward KL (SNVI+fKL),
+importance-weighted ELBO (SNVI+IW) and α-divergence (SNVI+α). Dotted lines: Performance
+when not using SIR.
+
+performance for all SNVI-variants, but not for SNPLA with the rKL: When using the rKL, the
+approximate posterior qφ is generally narrower than the posterior and thus ill-suited for SIR (Appendix Fig. 6). Qualitatively similar results were found when using likelihood-ratio approaches with
+the same hyperparameters, see Appendix Fig. 10.
+
+In terms of runtime, all three variants of SNLVI are substantially faster than SNLE on every task
+(bars in Fig. 3 on the right), in some cases by more than an order of magnitude. When using
+likelihood-ratio estimation, MCMC with 100 chains can be as fast as SNRVI on tasks with few
+parameters (Appendix Fig. 10). On tasks with many parameters, however, SNRVI is significantly
+faster than SNRE (see e.g. Bernoulli GLM with 10 parameters).
+
+
+4.3 INFERENCE IN A NEUROSCIENCE MODEL OF THE PYLORIC NETWORK
+
+Finally, we applied SNVI to a simulator of the pyloric network in the stomatogastric ganglion (STG)
+of the crab Cancer Borealis, a well-characterized circuit producing rhythmic activity. The model
+consists of three model neurons (each with eight membrane conductances) with seven synapses (31
+parameters in total) and produces voltage traces that can be characterized with 15 established summary statistics (Prinz et al., 2003; 2004). In this model, disparate parameter sets can produce similar
+activity, leading to a posterior distribution with broad marginals but narrow conditionals (Prinz et al.,
+2004; Gonc¸alves et al., 2020). Previous work has used millions of simulations from prior samples
+and performed amortized inference with NPE (18 million simulations in Gonc¸alves et al. (2020),
+9 million in Deistler et al. (2021)). Sequential neural posterior estimation (SNPE) struggles on
+this problem due to leakage, whereas SNLE and SNRE with MCMC are inefficient (Durkan et al.,
+2020). Here, we apply SNVI to identify the posterior distribution given an extracellular recording
+of the stomatogastric motor neuron (Fig. 4A) (Haddad & Marder, 2021; 2018). We demonstrate that
+SNVI can perform multi-round inference and obtains the posterior distribution with only 350,000
+simulations – 25 times fewer than previous methods!
+
+
+-----
+
+Empricial observation
+
+AB/PD CaS
+
+
+AB/PD CaS
+
+
+0 15
+
+AB/PD CaT
+
+10 2 10 [4]
+
+AB LP
+
+|4|Col2|
+|---|---|
+
+
+
+10 2 10 [3]
+
+PD LP
+
+1% 'valid'
+
+94% 'valid'
+
+
+Median ||x - xo||2 3
+
+
+0 15
+
+AB/PD CaT
+
+10 2 10 [4]
+
+AB LP
+
+10 2 10 [3]
+
+PD LP
+
+
+LP
+
+PY
+
+**D**
+
+AB/PD
+
+LP
+
+PY
+
+
+Posterior mean/mapMean MAP
+
+
+Prior
+
+Posterior
+
+**G**
+
+SNVI+fKL
+
+SNLE
+
+
+13
+
+
+Time [h]
+
+
+Figure 4: (A) Empirical observation, arrows indicate some of the summary statistics. Scale bar is one
+second. (B) Cornerplot showing a subset of the marginal and pairwise marginal distributions of the
+31-dimensional posterior (full posterior in Appendix Fig. 12). Red dot: MAP. Black dot: Posterior
+mean. (C) Conditional distributions p(θi,j **_x, θ=i,j). Green dot shows the sample on which we_**
+_|_ _̸_
+condition. (D) Simulated traces from the posterior mean and MAP. Scale bar is one second. (E)
+Simulated traces of three posterior samples. (F) Posterior predictive and prior predictive median
+(z-scored) distances from the observation. (G) Time required to obtain 10k samples: SNVI takes 11
+minutes and SNLE with 100-chain MCMC 808 minutes, i.e. over 13 hours.
+
+We ran SNVI with a likelihood-estimator with the fKL divergence (SNVI+fKL) and SIR. Since the
+simulator produces many invalid summary statistics (e.g. gaps between bursts cannot be defined
+if there are no bursts) we employed the strategy described in Sec. 3.4. Because only 1% of the
+simulations from prior samples are valid (Fig. 4F), we used 50,000 simulations in the first round and
+continued for 30 rounds with 10,000 simulations each.
+
+The posterior is complex and reveals strong correlations and nonlinear relationships between parameters (Fig. 4B showing 4 out of 31 dimensions, full posterior in Appendix Fig. 12). The conditional
+distributions p(θi,j|x, θ≠ _i,j) given a posterior sample (Fig. 4C) are narrow, demonstrating that pa-_
+rameters have to be finely tuned to generate the summary statistics of the experimentally measured
+activity. We used posterior predictive checks to inspect the quality of the posterior. When simulating data from the posterior mean and posterior mode (MAP), we find that both of them match the
+statistics of the experimental activity (Fig. 4D). Similarly, samples from the posterior distribution
+closely match statistics of the experimental activity (Fig. 4E). Out of 10,000 posterior samples, 9366
+(≈94%) generated activity with well-defined summary statistics (compared to 1% of prior samples).
+For the samples which generate well-defined summary statistics, the (z-scored) median distance between the observed data xo and generated activity is smaller for posterior samples than for prior
+samples (Fig. 4F). We emphasize that an application of SNLE with MCMC would be estimated to
+take an additional 400 hours, due to 30 rounds of slow MCMC sampling (Fig. 4G) that would be
+required– instead of 27 hours for SNVI. Likewise, when running SNPE-C on this example, only one
+out of 2 million samples was within the prior bounds after the second round, requiring computationally expensive rejection sampling (Greenberg et al., 2019; Durkan et al., 2020). Finally, we note that
+the additional neural network cζ(θ) (required to correct for the effect of invalid simulations) can be
+learned robustly and with low computational cost (see Appendix Fig. 13 for runtime).
+
+
+-----
+
+These results show that SNVI makes it possible to overcome the limitations of previous methods
+and allows sequential neural simulation-based inference methods to effectively and robustly scale
+to challenging inference problems of scientific interest. While it is difficult to rigorously evaluate
+the accuracy of the obtained posterior distribution due to a lack of ground truth, we observed that
+almost all posterior predictives have well-defined summary statistics (94% vs 80% in Gonc¸alves
+et al. (2020)) and that the posterior predictives closely match xo.
+
+5 DISCUSSION
+
+We introduced Sequential Neural Variational Inference (SNVI), an efficient, flexible, and robust approach to perform Bayesian inference in models with an intractable likelihood. We achieve this by
+combining likelihood-estimation (or likelihood-ratio estimation) with variational inference, further
+improved by using SIR for refining posteriors. We demonstrate that SNVI reduces the computational
+cost of inference while maintaining accuracy. We applied our approach to a neuroscience model of
+the pyloric network with 31 parameters and showed that it is 25 times more efficient than previous
+methods. Our results demonstrate that SNVI is a scalable and robust method for simulation-based
+inference, opening up new possibilities for Bayesian inference in models with intractable likelihoods.
+
+We selected three variational objectives for SNVI which induce mass-covering behaviour and are,
+therefore, well suited as a proposal for sampling from complex posterior distributions. We empirically evaluated all of these methods in terms of runtime and accuracy on four benchmark tasks. We
+found that, while their performance differed when using the raw VI output, they all showed similar performance after an additional, computationally cheap, sampling importance resampling (SIR)
+step. After the SIR step, all methods had similar accuracy as MCMC, and all methods outperformed
+a mode-seeking variational objective (reverse KL) which was used in a previously proposed method
+Wiqvist et al. (2021). Our results suggest that mass-covering VI objectives (regardless of their exact
+implementation) provide a means to perform fast and accurate inference in models with intractable
+likelihood, without loss of accuracy compared to MCMC. In Appendix Sec. A.2, we provide technical recommendations for choosing a variational objective for specific problems.
+
+A common approach in sequential methods is to use the current posterior estimate as the proposal distribution for the next round, but more elaborate active-learning strategies for choosing new
+simulations are possible (Papamakarios & Murray, 2016; Papamakarios et al., 2019; Lueckmann
+et al., 2019a). SNVI can flexibly be combined with any active learning scheme, and unlike neural
+likelihood(-ratio) methods, does not require expensive MCMC sampling for updating posterior estimates. While this comes at the cost of having to train two neural networks (a likelihood-model
+and a posterior-model), the cost of training these neural networks is often negligible compared to
+the cost of simulations. Another method that trains both a likelihood- and a posterior network is
+Posterior-Aided Regularization (Kim et al., 2021), which regularizes the likelihood-estimate with a
+simultaneously trained posterior-estimate. This improves the modelling of multimodal posteriors,
+but the method still requires MCMC and thus scales poorly with the number of samples and dimensions. Likelihood-free variational inference (Tran et al., 2017) avoids learning a likelihood model
+by learning an implicit posterior distribution, but it requires an adversarial training objective which
+can be difficult to optimize and requires extensive hyperparameter tuning (Husz´ar, 2017). Ong et al.
+(2018) is another method that performs variational inference with a synthetic likelihood, but their
+approach requires that the summary statistics are approximately Gaussian in order to obtain unbiased
+estimates of the log-likelihood.
+
+Overall, SNVI combines the desirable properties of current methods: It can be combined with any
+active learning scheme, it can flexibly combine information from multiple datapoints, it returns a
+posterior distribution that can be sampled quickly, and it can robustly deal with missing data. SNVI
+speeds up inference relative to MCMC-based methods, sometimes by orders of magnitude, and can
+perform inference in large models with many parameters. SNVI therefore has potential to provide
+a new ’go-to’ approach for simulation-based inference, and to open up new application domains for
+simulation-based Bayesian inference.
+
+
+-----
+
+6 REPRODUCIBILITY STATEMENT
+
+We used the configuration manager hydra to track the configuration and seeds of each run (Yadan,
+2019). [The results shown in this paper can be reproduced with the git repository https:](https://github.com/mackelab/snvi_repo)
+[//github.com/mackelab/snvi_repo.](https://github.com/mackelab/snvi_repo) The algorithms developed in this work are also
+available in the sbi toolbox (Tejero-Cantero et al., 2020). All simulations and runs were performed
+on a high-performance computer. For each run, we used 16 CPU cores (Intel family 6, model 61)
+and 8GB RAM.
+
+7 ACKNOWLEDGEMENTS
+
+We thank Jan-Matthis Lueckmann for insightful comments on the manuscript. This work was funded
+by the German Research Foundation (DFG; Germany’s Excellence Strategy MLCoE – EXC number 2064/1 PN 390727645) and the German Federal Ministry of Education and Research (BMBF;
+T¨ubingen AI Center, FKZ: 01IS18039A).
+
+8 ETHICS STATEMENT
+
+We used data recorded from animal experiments in the crab Cancer borealis. The data we used were
+recorded for a different, independent study and have recently been made publicly available (Haddad
+& Marder, 2018; 2021). While simulation-based inference has the potential to greatly accelerate
+scientific discovery across a broad range of disciplines, one could also imagine undesired use-cases
+of SBI.
+
+REFERENCES
+
+LF Abbott and Eve Marder. Modeling small networks. Methods in Neuronal Modeling, pp. 361–410,
+1998.
+
+Abhinav Agrawal, Daniel Sheldon, and Justin Domke. Advances in black-box vi: Normalizing
+flows, importance weighting, and optimization. arXiv preprint arXiv:2006.10343, 2020.
+
+Mark A Beaumont, Wenyang Zhang, and David J Balding. Approximate bayesian computation in
+population genetics. Genetics, 162(4):2025–2035, 2002.
+
+Eli Bingham, Jonathan P. Chen, Martin Jankowiak, Fritz Obermeyer, Neeraj Pradhan, Theofanis
+Karaletsos, Rohit Singh, Paul A. Szerlip, Paul Horsfall, and Noah D. Goodman. Pyro: Deep
+universal probabilistic programming. J. Mach. Learn. Res., 20:28:1–28:6, 2019.
+
+Christopher M Bishop. Pattern recognition. Machine learning, 128(9), 2006.
+
+David M. Blei, Alp Kucukelbir, and Jon D. McAuliffe. Variational inference: A review for statisticians. Journal of the American Statistical Association, 112(518):859–877, Apr 2017.
+
+Yuri Burda, Roger Grosse, and Ruslan Salakhutdinov. Importance weighted autoencoders. Interna_tional Conference on Learning Representations, 2016._
+
+Sourav Chatterjee and Persi Diaconis. The sample size required in importance sampling. The Annals
+_of Applied Probability, 28(2):1099–1135, 2018._
+
+Yanzhi Chen, Dinghuai Zhang, Michael Gutmann, Aaron Courville, and Zhanxing Zhu. Neural
+approximate sufficient statistics for implicit models. International Conference on Learning Rep_resentations, 2021._
+
+Kyle Cranmer, Juan Pavez, and Gilles Louppe. Approximating likelihood ratios with calibrated
+discriminative classifiers. arXiv preprint arXiv:1506.02169, 2015.
+
+Chris Cremer, Quaid Morris, and David Duvenaud. Reinterpreting importance-weighted autoencoders, 2017.
+
+
+-----
+
+Michael Deistler, Jakob H. Macke, and Pedro J. Gonc¸alves. Disparate energy consumption despite
+similar network activity. bioRxiv, 2021.
+
+Laurent Dinh, Jascha Sohl-Dickstein, and Samy Bengio. Density estimation using real nvp. Inter_national Conference in Learning Representations 2017, 2017._
+
+Justin Domke and Daniel Sheldon. Importance weighting and variational inference. In Proceedings
+_of the 32nd International Conference on Neural Information Processing Systems, pp. 4475–4484,_
+2018.
+
+Conor Durkan, Artur Bekasov, Iain Murray, and George Papamakarios. Neural spline flows. Ad_vances in Neural Information Processing Systems, 32:7511–7522, 2019a._
+
+Conor Durkan, Artur Bekasov, Iain Murray, and George Papamakarios. Neural spline flows. In
+H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alch´e-Buc, E. Fox, and R. Garnett (eds.), Ad_vances in Neural Information Processing Systems, volume 32. Curran Associates, Inc., 2019b._
+
+Conor Durkan, Iain Murray, and George Papamakarios. On contrastive learning for likelihood-free
+inference. In International Conference on Machine Learning, pp. 2771–2781. PMLR, 2020.
+
+Jerome Friedman. On multivariate goodness-of-fit and two-sample testing. Technical report, Citeseer, 2004.
+
+Pedro J Gonc¸alves, Jan-Matthis Lueckmann, Michael Deistler, Marcel Nonnenmacher, Kaan Ocal,[¨]
+Giacomo Bassetto, Chaitanya Chintaluri, William F Podlaski, Sara A Haddad, Tim P Vogels, et al.
+Training deep neural density estimators to identify mechanistic models of neural dynamics. Elife,
+9:e56261, 2020.
+
+David Greenberg, Marcel Nonnenmacher, and Jakob Macke. Automatic posterior transformation
+for likelihood-free inference. In International Conference on Machine Learning, pp. 2404–2414,
+2019.
+
+Michael U Gutmann, Ritabrata Dutta, Samuel Kaski, and Jukka Corander. Likelihood-free inference
+via classification. Statistics and Computing, 28(2):411–425, 2018.
+
+Sara A. Haddad and Eve Marder. Circuit robustness to temperature perturbation is altered by neuromodulators. Neuron, 100(3):609–623.e3, 2018.
+
+Sara Ann Haddad and Eve Marder. Recordings from the C. borealis Stomatogastric Nervous System
+[at different temperatures in the decentralized condition, July 2021. URL https://doi.org/](https://doi.org/10.5281/zenodo.5139650)
+[10.5281/zenodo.5139650.](https://doi.org/10.5281/zenodo.5139650)
+
+Joeri Hermans, Volodimir Begy, and Gilles Louppe. Likelihood-free mcmc with amortized approximate ratio estimators. In International Conference on Machine Learning, pp. 4239–4248. PMLR,
+2020.
+
+Timothy Classen Hesterberg. Advances in importance sampling. PhD thesis, Citeseer, 2003.
+
+Ferenc Husz´ar. Variational inference using implicit distributions, 2017.
+
+Ghassen Jerfel, Serena Wang, Clara Fannjiang, Katherine A. Heller, Yian Ma, and Michael I. Jordan.
+Variational refinement for importance sampling using the forward kullback-leibler divergence,
+2021.
+
+Dongjun Kim, Kyungwoo Song, Seungjae Shin, Wanmo Kang, and Il-Chul Moon. Posterior-aided
+regularization for likelihood-free inference. arXiv preprint arXiv:2102.07770, 2021.
+
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes, 2014.
+
+Durk P Kingma, Tim Salimans, Rafal Jozefowicz, Xi Chen, Ilya Sutskever, and Max Welling. Improved variational inference with inverse autoregressive flow. Advances in neural information
+_processing systems, 29:4743–4751, 2016._
+
+Y Li and RE Turner. R´enyi divergence variational inference. Advances in Neural Information
+_Processing Systems 29 (NIPS 2016), pp. 1073–1081, 2016._
+
+
+-----
+
+David Lopez-Paz and Maxime Oquab. Revisiting classifier two-sample tests. In International Con_ference on Learning Representations, 2017._
+
+Jan-Matthis Lueckmann, Pedro J Goncalves, Giacomo Bassetto, Kaan Ocal, Marcel Nonnenmacher,[¨]
+and Jakob H Macke. Flexible statistical inference for mechanistic models of neural dynamics. In
+_Advances in Neural Information Processing Systems, pp. 1289–1299, 2017._
+
+Jan-Matthis Lueckmann, Giacomo Bassetto, Theofanis Karaletsos, and Jakob H. Macke.
+Likelihood-free inference with emulator networks. In Francisco Ruiz, Cheng Zhang, Dawen
+Liang, and Thang Bui (eds.), Proceedings of The 1st Symposium on Advances in Approximate
+_Bayesian Inference, volume 96 of Proceedings of Machine Learning Research, pp. 32–53, 2019a._
+
+Jan-Matthis Lueckmann, Giacomo Bassetto, Theofanis Karaletsos, and Jakob H Macke. Likelihoodfree inference with emulator networks. In Symposium on Advances in Approximate Bayesian
+_Inference, pp. 32–53. PMLR, 2019b._
+
+Jan-Matthis Lueckmann, Jan Boelts, David Greenberg, Pedro Goncalves, and Jakob Macke. Benchmarking simulation-based inference. In Arindam Banerjee and Kenji Fukumizu (eds.), Proceed_ings of The 24th International Conference on Artificial Intelligence and Statistics, volume 130 of_
+_Proceedings of Machine Learning Research, pp. 343–351. PMLR, 13–15 Apr 2021._
+
+Benjamin Kurt Miller, Alex Cole, Patrick Forr´e, Gilles Louppe, and Christoph Weniger. Truncated
+marginal neural ratio estimation. Advances in Neural Information Processing Systems, 2022.
+
+Shakir Mohamed and Balaji Lakshminarayanan. Learning in implicit generative models. arXiv
+_preprint arXiv:1610.03483, 2016._
+
+Radford M Neal. Slice sampling. The annals of statistics, 31(3):705–767, 2003.
+
+Victor MH Ong, David J Nott, Minh-Ngoc Tran, Scott A Sisson, and Christopher C Drovandi.
+Variational bayes with synthetic likelihood. Statistics and Computing, 28(4):971–988, 2018.
+
+George Papamakarios and Iain Murray. Fast ε-free inference of simulation models with bayesian
+conditional density estimation. In Advances in Neural Information Processing Systems, pp. 1028–
+1036, 2016.
+
+George Papamakarios, Theo Pavlakou, and Iain Murray. Masked autoregressive flow for density estimation. In Proceedings of the 31st International Conference on Neural Information Processing
+_Systems, pp. 2335–2344, 2017._
+
+George Papamakarios, David Sterratt, and Iain Murray. Sequential neural likelihood: Fast
+likelihood-free inference with autoregressive flows. In The 22nd International Conference on
+_Artificial Intelligence and Statistics, pp. 837–848, 2019._
+
+George Papamakarios, Eric Nalisnick, Danilo Jimenez Rezende, Shakir Mohamed, and Balaji Lakshminarayanan. Normalizing flows for probabilistic modeling and inference. Journal of Machine
+_Learning Research, 22(57):1–64, 2021._
+
+Astrid A Prinz, Cyrus P Billimoria, and Eve Marder. Alternative to hand-tuning conductance-based
+models: construction and analysis of databases of model neurons. Journal of neurophysiology,
+2003.
+
+Astrid A Prinz, Dirk Bucher, and Eve Marder. Similar network activity from disparate circuit parameters. Nature neuroscience, 7(12):1345–1352, 2004.
+
+Tom Rainforth, Adam Kosiorek, Tuan Anh Le, Chris Maddison, Maximilian Igl, Frank Wood, and
+Yee Whye Teh. Tighter variational bounds are not necessarily better. In International Conference
+_on Machine Learning, pp. 4277–4285. PMLR, 2018._
+
+Rajesh Ranganath, Sean Gerrish, and David Blei. Black box variational inference. In Artificial
+_Intelligence and Statistics, pp. 814–822. PMLR, 2014._
+
+Danilo Rezende and Shakir Mohamed. Variational inference with normalizing flows. In Interna_tional conference on machine learning, pp. 1530–1538. PMLR, 2015._
+
+
+-----
+
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic backpropagation and approximate inference in deep generative models. In International conference on machine learning,
+pp. 1278–1286. PMLR, 2014.
+
+Geoffrey Roeder, Yuhuai Wu, and David K Duvenaud. Sticking the landing: Simple, lower-variance
+gradient estimators for variational inference. Advances in Neural Information Processing Systems,
+30:6925–6934, 2017.
+
+Donald B Rubin. Using the sir algorithm to simulate posterior distributions. Bayesian statistics, 3:
+395–402, 1988.
+
+Alvaro Tejero-Cantero, Jan Boelts, Michael Deistler, Jan-Matthis Lueckmann, Conor Durkan, Pedro J. Gonc¸alves, David S. Greenberg, and Jakob H. Macke. sbi: A toolkit for simulation-based
+inference. Journal of Open Source Software, 5(52):2505, 2020. doi: 10.21105/joss.02505.
+
+Owen Thomas, Ritabrata Dutta, Jukka Corander, Samuel Kaski, Michael U Gutmann, et al.
+Likelihood-free inference by ratio estimation. Bayesian Analysis, 2021.
+
+Dustin Tran, Rajesh Ranganath, and David M Blei. Hierarchical implicit models and likelihood-free
+variational inference. In Proceedings of the 31st International Conference on Neural Information
+_Processing Systems, pp. 5529–5539, 2017._
+
+George Tucker, Dieterich Lawson, Shixiang Gu, and Chris J Maddison. Doubly reparameterized
+gradient estimators for monte carlo objectives. In International Conference on Learning Repre_sentations, 2018._
+
+Neng Wan, Dapeng Li, and Naira Hovakimyan. f-divergence variational inference. Advances in
+_Neural Information Processing Systems, 33, 2020._
+
+Peter J Wangersky. Lotka-volterra population models. Annual Review of Ecology and Systematics,
+9(1):189–218, 1978.
+
+Samuel Wiqvist, Jes Frellsen, and Umberto Picchini. Sequential neural posterior and likelihood
+approximation, 2021.
+
+Simon N. Wood. Statistical inference for noisy nonlinear ecological dynamic systems. Nature, 466
+(7310):1102–1104, Aug 2010.
+
+Omry Yadan. Hydra - a framework for elegantly configuring complex applications. Github, 2019.
+[URL https://github.com/facebookresearch/hydra.](https://github.com/facebookresearch/hydra)
+
+
+-----
+
+A APPENDIX
+
+A.1 GRADIENTS OF THE DIVERGENCES
+
+For completeness, we provide the gradients of the divergences introduced in Sec. 3.2.
+
+**Forward Kullback-Leibler divergence** The gradient estimate is given by
+
+_N_
+
+_w(θi)_
+
+_∇φLfKL(φ) = −Eθ∼p [∇φ log (qφ(θ))] ≈−_ _N_ _∇φ log qφ(θi)_
+
+_i=1_ _j=1_ _[w][(][θ][j][)]_
+
+X
+
+P
+
+**Importance-weighted ELBO** A gradient estimator is given by
+
+
+_K_
+
+_p(xo, θi)_
+_w˜(θi)_ _φ log_
+
+" _i=1_ _∇_  _qφ(θi)_
+X
+
+
+[#]
+
+
+_w(θi)_
+_w˜(θi) =_ _K_
+_i=1_ _[w][(][θ][i][)]_
+P
+
+
+_φ_ _IW_ [(][φ][) =][ E][θ]1[,...,][θ]K _[∼][q]φ_
+_∇_ _L[(][K][)]_
+
+where w(θ) = p(xo, θ)/qφ(θ).
+
+
+**R´enyi α-divergence A biased gradient estimator using the reparameterization trick can be written**
+as:
+
+_p(xo, θ)_ _w(θ)[1][−][α]_
+
+_φ_ _α(φ) = Eθ_ _qφ_ _w˜α(θ)_ _φ log_ _w˜α =_
+_∇_ _L_ _∼_ _∇_ _qφ(θ)_ Eθ _qφ [w(θ)[1][−][α]]_ _[,]_
+
+   _∼_
+
+where w(θ) = p(xo, θ)/qφ(θ). This gradient estimator is biased towards the rKL but the bias
+vanishes as more samples are used for the Monte Carlo approximation (Li & Turner, 2016).
+
+A.2 CHOICE OF DIVERGENCE
+
+In Fig. 4.2, we demonstrated that all mass-covering objectives perform similarly in terms of accuracy
+and runtime on the problems we considered. We here give technical recommendations for choosing
+a variational objective:
+
+(i) Closed-form posterior: The variational posterior provides a closed-form approximation to
+the posterior, but this is no longer the case when SIR is used. While, in our results, all three
+approaches performed similarly with SIR, they can differ in their performance without it,
+and the forward KL and the α-divergence provided better approximations than the IWELBO. Thus, if one seeks a posterior density that can be evaluated in closed-form, our
+results suggest to use the forward KL or the α-divergence.
+
+(ii) Dimensionality of the parameter space: We use an autoregressive normalizing flow as variational family. These flows are very expressive, yet the computation time of their forward
+or backward passes scale with the dimensionality of θ (Papamakarios et al., 2017; Kingma
+et al., 2016; Durkan et al., 2019a). The IW-ELBO and the α-divergences only require
+forward passes, whereas the forward KL requires forward and backward passes, thus making the forward KL expensive for high-dimensional parameter spaces. The STL estimator
+used in the IW-ELBO and the α-divergences also requires forward and backward passes.
+We found that the STL estimator improves performance of the IW-ELBO only weakly
+(Fig. 11). Thus, in cases where computational cost is critical, our results suggest that using
+the IW-ELBO without the STL can give high accuracy at low computational cost. Another
+way to reduce computational cost is to use alternative architectures for the normalizing
+flow, e.g. coupling layers (Durkan et al., 2019a; Papamakarios et al., 2021).
+
+(iii) Trading-off the mass-covering property with computational cost: For α-divergences, one
+can trade-off the extent to which the divergence is mass-covering by choosing the value of
+_α (low α is more mass-covering). As shown in Fig. 11, high values of α benefit less from_
+using the STL estimator. Thus, in cases where mass-covering behavior of the algorithm is
+less crucial, the STL estimator can be waived, leading to lower computational cost because
+the normalizing flow requires only forward passes (see point (ii)).
+
+
+-----
+
+**A** **B**
+
+
+Figure 5: A Left: Gradient estimation on the Gaussian example. For values of µ around µ[∗] = 4/5,
+all estimators provide good gradients. As µ is farther from µ[∗], the forward variational bound (fVB)
+(grey) vanishes, whereas the self-normalized fVB approaches a constant. Right: SNR for the fVB
+and the self-normalized fVB. B Theoretical and empirical densities pR(r) for µ = 6 and µ = 12.
+
+A.3 OVERCOMING VANISHING GRADIENTS IN THE FORWARD KL ESTIMATOR
+
+We use an estimator of the forward Kullback-Leibler divergence (fKL) that is based on selfnormalized importance sampling. In this section, we demonstrate that this estimator moves the
+variational distribution qφ(θ) towards the target density p(xo, θ) even if qφ(θ) and p(xo, θ) differ
+strongly.
+
+For this analysis, we consider a Gaussian toy example with prior p(θ) = N (θ; 0, 4), likelihood
+_p(x|θ) = N_ (x; θ, 1), and observation xo = 1. The posterior distribution can be computed in
+closed-form as p(θ **_xo) =_** (θ; 4/5, 4/5). We aim to learn the posterior distribution using varia_|_ _N_
+tional inference with the variational family qµ(θ) = (µ, 4/5) (note that µ is the only parameter).
+_N_
+The best approximation within this family is µ[∗] = 4/5.
+
+We use this toy example to compare the gradient and the signal-to-noise ratio (SNR) of the selfnormalized fKL estimator to the fKL estimator introduced by Wan et al. (2020). Fig. 5A (left)
+shows the gradient of the loss for different values of µ. When µ ≈ _µ[∗]_ = 4/5, the fKL (gray)
+without self-normalization closely matches the true gradient (red). However, as µ is further from
+_µ[∗], the fKL first points in the wrong direction and then vanishes, which prevents learning. The_
+self-normalized fKL (blue, orange, green) closely matches the gradient around µ ≈ _µ[∗]_ = 4/5 and
+does not vanish for µ that are far from µ[∗]. The gradient is stronger if more samples N are used
+to approximate the fKL. Similarly, the SNR(∇φL(φ)) = |E[∇φL(φ)]/ Var(∇φL(φ))| does not
+
+vanish for µ that are far from µ[∗] for the self-normalized fKL.
+
+p
+
+To understand this behaviour of the self-normalized fKL, we computed an approximation to the
+gradient ∇µLfKL(µ) in this toy example. The fKL loss is given as:
+
+
+_w(θ)_
+_N_ _µ log qµ(θ)_
+_∇_
+_i=1_ _[w][(][θ][)]_
+P
+
+
+_w(θi)_
+_N_ _µ log qµ(θi)_
+_∇_
+_i=1_ _[w][(][θ][i][)]_
+P
+
+
+_µ_ fKL(µ) = Eθ _qφ_
+_∇_ _L_ _−_ _∼_
+
+
+_≈−_
+
+
+_i=1_
+
+
+with weights w(θi) = _[p]q[(][x]φ([o]θ[,][θ])[)]_ [. In the case where][ q][φ][(][θ][)][ differs strongly from][ p][(][x][o][,][ θ][)][, the weights]
+
+are often degenerate, i.e. the strongest weight is much larger than all others. In the worst case,
+_w˜(θi) =_ _Nw(θi)_
+Pi=1 _[w][(][θ][i][)][ = 1][ for some][ i][ and the gradient estimator reduces to]_
+
+_∇µLfKL(µ) = −∇µ log qµ(arg maxθ1,...,θN_ _w(θ)) = −∇µ log qµ(r)_
+
+The gradient of µ is thus determined by r = arg maxθ1,...,θN w(θ), which itself can be considered
+a draw from a random variable R. We will now derive the probability density pR(r) of R.
+
+
+-----
+
+**Algorithm 2: SIR**
+
+
+**1 Input: K the number of importance samples, proposal qφ, joint density**
+_p(xo, θ) = ℓψ(xo_ **_θ)p(θ)_**
+_|_
+
+**2 for i ∈** [1, ..., K] do
+
+**3** **_θi_** _qφ(θ)_
+_∼_
+
+**4** _wi =_ _[p]q[(][x]φ([o]θ[,][θ]i)[i][)]_
+
+**5 end**
+
+**6 Each ˜wi = wi/[P][K]k=1** _[w][k]_
+**7 j ∼** Categorical( ˜w)
+
+**8 return θj**
+
+If µ > µ[∗], then w(θ) is monotonically decreasing in θ because w(θ) (θ;µ,4/5)
+_∝_ _[N]N[ (][θ][;][µ][∗][,][4][/][5)]_ _[∝]_ [exp(5][/][4][ ·]
+
+**_θ(µ[∗]_** _µ)). The cumulative distribution function FR(R_ _r) can then be written as_
+_−_ _≤_
+_FR(R_ _r) = P_ (arg max _w(θ)_ _r) = P_ (min(θ1, . . ., θn) _r)_
+_≤_ **_θ1,...,θn_** _≤_ _≤_
+
+
+= 1 _P_ (min(θ1, . . ., θn) > r) = 1
+_−_ _−_
+
+
+_P_ (θi > r)
+_i=1_
+
+Y
+
+
+= 1 (1 _Fqφ_ (r))[N]
+_−_ _−_
+
+Thus, R has the density pR(r) = _drd_ _[F]_ [(][R][ ≤] _[r][) =][ N]_ [(1][ −] _[F][q][φ]_ [(][r][))][N] _[−][1][q][µ][(][r][)][. The derivation is]_
+
+analogous for the case µ < µ[∗]. Because ∇µLfKL(µ) = ∇µ log qµ(r) for r ∼ _pR, this allows us to_
+compute the distribution of the gradient of µ (under the assumption that weights are degenerate).
+
+We empirically validate this result on the Gaussian toy example. Fig. 5B (left) shows the true posterior distribution (black), the variational density qµ(θ) for µ = 6 and µ = 10 and the corresponding
+_pR(r) for N = 1000. The theoretically computed density pR(r) (dashed lines) matches the empir-_
+ically observed distribution of arg maxθi=1...N w(θi). For almost every value of r ∼ _pR(r), the_
+gradient ∇µ log qµ(r) is negative, thus driving ∇µLfKL(µ) into the correct direction. For larger N,
+the distribution pR(r) shifts towards the true posterior distribution and thus also the gradient signal
+increases.
+
+Notably, for µ that are even further from µ[∗], ∇µ log qµ(r) remains relatively constant (Fig. 5B,
+right). This explains why the gradient ∇µLfKL(µ) becomes constant in Fig. 5A (left).
+
+A.4 IMPROVEMENT THROUGH SIR
+
+We use Sampling Importance Resampling (SIR) to refine samples obtained from the variational
+posterior. The SIR procedure is detailed in Alg. 2 for drawing a single sample from the posterior.
+Consistent with Agrawal et al. (2020), we found that using SIR always helps to improve the approximation quality even when using complex variational families such as normalizing flows (compare
+dotted and solid lines in Fig. 3).
+
+We visualize the benefits of SIR in Fig. 6 on an example which uses a Gaussian proposal distribution
+(i.e. variational family). SIR enhances the variational family and allows to approximate the bimodal
+target distribution. SIR particularly improves the posterior estimate when the proposal (i.e. the
+variational posterior) is overdispersed. This provides an explanation for why SIR is particularly
+useful for the mass-covering divergences used in SNVI, and less so for mode-covering divergences
+(as used in SNPLA).
+
+A.5 QUALITY OF THE LIKELIHOOD ESTIMATOR
+
+The estimated variational posterior is based on the estimated likelihood ℓ(xo **_θ). It is thus important_**
+_|_
+to accurately learn the likelihood from simulations. To be able to learn skewed or bimodal likelihoods, we use a conditional autoregressive normalizing flow for ℓ(x|θ) (Papamakarios et al., 2017;
+Kingma et al., 2016; Durkan et al., 2019a). Fig. 7 demonstrates that these flows can learn complex
+likelihoods (Papamakarios et al., 2019).
+
+
+-----
+
+Figure 6: Visualization of SIR. A Toy example with a Gaussian proposal density. Left: Two toy examples with a Gaussian (top) or bimodal (bottom) target density. SIR (with K = 32) can extend the
+Gaussian density and refine the approximation if the proposal is overdispersed (middle), but helps
+less when it is too narrow (right). B SIR improvements on two moons example. We plot the joint
+density as learned by the likelihood-model p(xo, θ) = ℓψ(xo **_θ)p(θ) against the variational poste-_**
+_|_
+rior qφ (blue, obtained with the fKL), as well as the SIR-corrected density with K = 2 (orange) and
+_K = 32 (green). Despite using an expressive normalizing flow as qφ, SIR improves the accuracy._
+
+
+
+_p(x, )= p(x| )_ (0,2)
+
+
+(
+
+
+1 [= 0]
+
+2 [= 2]
+
+3 [= 4]
+
+
+Esimate | ) (x _p(x,  )≈  (x| )_ (0,2)
+
+4
+
+2
+
+x 0
+
+2
+
+4
+
+Esimate | ) (x
+
+_p(x, )≈ (x| )_ (0,2)
+
+
+6 4 2 0 2 4 6 4 2 0 2 4
+
+Figure 7: A neural spline flow (NSF) estimating a bimodal likelihood with 10[4] simulations with prior
+_N_ (0, 2). Top: Ground truth. Bottom: Likelihood-approximation with NSF. The learned likelihood
+closely matches the true likelihood.
+
+
+A.6 PROOFS FOR EXCLUDING INVALID DATA
+
+Many simulators can produce unreasonable or undefined values when fed with parameters sampled
+from the prior (Lueckmann et al., 2017). These invalid simulations are not useful for accurately
+learning the likelihood, and we would like to ignore them. To do so, we developed a loss-reweighing
+strategy.
+
+
+-----
+
+**Algorithm 3: SNVI with calibration kernel**
+
+
+**1 Inputs: prior p(θ), observation xo, divergence D, simulations per round N**, number of
+rounds R, selection strategy S and calibration kernel K.
+
+**2 Outputs: Approximate likelihood ℓψ, variational posterior qφ and calibration network cζ.**
+
+**3 Initialize: Proposal ˜p(θ) = p(θ), simulation dataset X = {}, calibration dataset C = {}**
+
+**4 for r ∈** [1, ..., R] do
+
+**5** **for i ∈** [1, ..., N ] do
+
+**76** simulateθi = S(˜p, ℓ xi _φ, pp)( ;x_ **_θi) ;_** // run the simulator on// sample θi ∼ _p˜ θ(θ)i_
+**8** add (θi, K( ∼xi, xo))| to
+_C_
+
+**9** **if K(x, xo) > 0 then**
+
+**10** add (θi, xi) to
+_X_
+
+**11** **end**
+
+**12** **end**
+
+**13** (re-)train ℓψ; _ψ[∗]_ = arg minψ _N_ (xi,θi) _[K][(][x][i][,][ x][o][) log][ ℓ][ψ][(][x][i][|][θ][i][)][ ;]_ // or
+_−_ [1] _∈X_
+
+SNRE
+
+**14** (re-)train cζ; _ξ[∗]_ = arg minξ _N1_ (Pθi,K(xi,xo))∈C _[L][(][c][ζ][(][θ][i][)][, K][(][x][i][,][ x][o][))][ ;]_ // MSE
+
+or cross-entropy for binary calibration kernel
+
+P
+
+**15** (re-)train qφ; _φ[∗]_ = arg minφ D(qφ(θ)||p(θ|xo)) with
+
+_p(θ_ **_xo)_** _p(xo_ **_θ)p(θ)_** _ℓψ∗_ (xo **_θ)cξ∗_** (θ)p(θ)
+_|_ _∝_ _|_ _≈_ _|_
+
+
+**16** _p˜(θ) = qφ(θ)_
+
+**17 end**
+
+We formulate the exclusion of invalid simulations by the means of a calibration kernel K(x, xo)
+(originally introduced for neural posterior estimation in Lueckmann et al. (2017)). This calibration kernel can be any function, and can thus be used beyond excluding invalid data. The case of
+excluding invalid simulations can be recovered by using a binary calibration kernel:
+
+0 if x invalid
+_K(x, xo) =_ 1 if x valid (1)
+
+
+Alg. 3 shows SNVI with calibration kernel. Notice that, in the case of a binary calibration kernel,
+the loss for the likelihood ℓψ; _ψ[∗]_ = arg minψ _N_ (xi,θi) _[K][(][x][i][,][ x][o][) log][ ℓ][ψ][(][x][i][|][θ][i][)][ is zero]_
+_−_ [1] _∈X_
+
+for all invalid simulations (because K(x, xo) = 0). Thus, since these simulations do not contribute
+
+P
+
+to the loss, we exclude these simulations from the dataset that is used to train the likelihood(-ratio)
+model.
+
+Below, we provide proofs of convergence for Alg. 3. Theorem 1 and Lemma 1 are relevant to SNLVI,
+Theorem 2 and Lemma 2 are relevant to SNRVI, and Lemma 3 is relevant to both methods. Theorem
+1 and Theorem 2 provide a means to use a calibration kernel in the training of the likelihood(ratio)-model such that one can still recover the posterior density. In SNVI, we sample from the
+(unnormalized) potential function with variational inference. However, one can also use Theorem 1
+and Theorem 2 in combination with SNLE and SNRE and draw samples from the potential function
+with MCMC.
+
+Both SNLVI and SNRVI with calibration kernels rely on the estimation of Ex _p(x_ **_θ)[K(x, xo)]_**
+_∼_ _|_
+(note that this turns into p(valid|θ) for the binary calibration kernel). We estimate this term with
+a feed-forward regression neural network cζ(θ) (see Lemma 3). The network is trained on pairs
+(θ, K(x, xo)), where θ and x are the same pairs as used for training the likelihood(-ratio)-model.
+For general calibration kernels K(x, xo), we use a mean-squared error loss, whereas in the case of
+invalid data, we parameterize cζ(θ) as a logistic regression network and train it with a cross-entropy
+loss (since the calibration kernel K(x, xo) is a binary function: 0 for invalid data, 1 for valid data).
+
+**Theorem 1. Let K : X × X →** R[+] _be a kernel. Let ℓψ[∗]_ (x|θ) be the maximizer of the objective
+
+= Eθ,x _p˜(θ,x)[[][K][(][x][,][ x]o[) log(][ℓ]ψ[(][x][|][θ][))]]_
+_L_ _∼_
+
+
+-----
+
+_and let cζ∗_ (θ) be the minimizer of
+
+= Eθ,x _p˜(θ,x)[[(][c]ζ[(][θ][)][ −]_ _[K][(][x][,][ x]o[))][2][]]_
+_L_ _∼_
+_Then the potential function_
+
+(θ) = ℓψ∗ (xo **_θ)p(θ)cζ∗_** (θ)
+_P_ _|_
+
+_is proportional to the posterior density p(θ_ **_xo)._**
+_|_
+
+
+_Proof. Using Lemma 1 and Lemma 3, we get_
+(θ) = ℓψ∗ (xo **_θ)p(θ)cζ∗_** (θ)
+_P_ _|_
+
+_K(x, xo)p(xo_ **_θ)_**
+= _|_
+
+Ex _p(x_ **_θ)[K(x, xo)]_** _[p][(][θ][)][E][x][∼][p][(][x][|][θ][)][[][K][(][x][,][ x][o][)]]_
+_∼_ _|_
+
+= K(x, xo)p(xo **_θ)p(θ)_**
+_|_
+_p(θ_ **_xo)_**
+_∝_ _|_
+
+**Theorem 2. Let K :** R[+] _be a kernel. Let ℓψ∗_ (x, θ) be the minimizer of the objective
+_X × X →_
+= Eθ,x _p˜(θ,x)_ [[][K][(][x][,][ x]o[) log(][ℓ]ψ[∗] [(][x][,][ θ][))] +][ E]θ,x _p(θ)p(x)_ [[][K][(][x][,][ x]o[) log(1][ −] _[ℓ]ψ[∗]_ [(][x][,][ θ][))]]
+_L_ _∼_ _∼_
+
+_and let cζ∗_ (θ) be the minimizer of
+
+
+= Eθ,x _p˜(θ,x)[[(][c]ζ[(][θ][)][ −]_ _[K][(][x][,][ x]o[))][2][]]_
+_L_ _∼_
+_Then the potential function_
+
+(θ) = ℓψ∗ (xo, θ)p(θ)cζ∗ (θ)
+_P_
+
+_is proportional to the posterior density p(θ_ **_xo)._**
+_|_
+
+
+_Proof. Using Lemma 2 and Lemma 3, we get_
+(θ) = ℓψ∗ (xo, θ)p(θ)cζ∗ (θ)
+_P_
+
+_p(xo_ **_θ)_**
+
+= [E][x][∼][p][(][x][)][[][K][(][x][,][ x][o][)]] _|_
+
+Ex _p(x_ **_θ)[K(x, xo)]_** _p(xo)_ _[p][(][θ][)][E][x][∼][p][(][x][|][θ][)][[][K][(][x][,][ x][o][)]]_
+_∼_ _|_
+
+= Ex _p(x)[K(x, xo)]_ _[p][(][x][o][|][θ][)]_
+_∼_ _p(xo)_ _[p][(][θ][)]_
+
+_p(θ_ **_xo)_**
+_∝_ _|_
+
+
+**Lemma 1. Let K : X × X →** R[+] _be an arbitrary kernel. Then, the objective_
+= Eθ,x _p˜(θ,x)[[][K][(][x][,][ x]o[) log(][ℓ]ψ[(][x][|][θ][))]]_
+_L_ _∼_
+
+_is maximized if and only if ℓψ(x|θ) =_ _Z(1θ)_ _[K][(][x][,][ x][o][)][p][(][x][|][θ][)][ for all][ θ][ ∈]_ _[support][(˜]p(θ)), with nor-_
+
+_malizing constant Z(θ) =_ _K(x, xo)p(x_ **_θ)dx = Ex_** _p(x_ **_θ)[K(x, xo)]._**
+_|_ _∼_ _|_
+R
+
+_Proof._
+
+
+= Eθ,x _p˜(θ,x)[[][K][(][x][,][ x]o[) log(][ℓ]ψ[(][x][|][θ][))]]_
+_L_ _∼_
+
+= _K(x, xo)˜p(θ, x) log(ℓψ(x_ **_θ))dxdθ_**
+_|_
+ZZ
+
+= _K(x, xo)˜p(θ)p(x_ **_θ) log(ℓψ(x_** **_θ))dxdθ_**
+_|_ _|_
+ZZ
+
+
+= _p˜(θ)_ _K(x, xo)p(x_ **_θ) log(ℓψ(x_** **_θ))dxdθ_**
+_|_ _|_
+Z Z
+
+maximized if and only ifSince R _K(x, xo)p(x|θ) log( ℓψ(xℓ|ψθ() =x|θ))Zd(1θx) ∝−[K][(][x][,][ x]D[o]KL[)][p]([(][x]Z[|](1[θ]θ)[)][K][ for all][(][x][,][ x][ θ][o][)][ ∈][p][(][x][support][|][θ][)][, ℓ][ψ][(˜][(]p[x](θ[|][θ]))[))] with[, this term is] Z(θ) =_
+
+_K(x, xo)p(x_ **_θ)dx = Ex_** _p(x_ **_θ)[K(x, xo)]._**
+_|_ _∼_ _|_
+R
+
+
+-----
+
+**Lemma 2. Let K : X × X →** R[+] _be an arbitrary kernel. Then, the objective_
+
+= Eθ,x _p˜(θ,x)_ [[][K][(][x][,][ x]o[) log(][ℓ]ψ[∗] [(][x][,][ θ][))] +][ E]θ,x _p˜(θ)p(x)_ [[][K][(][x][,][ x]o[) log(1][ −] _[ℓ]ψ[∗]_ [(][x][,][ θ][))]]
+_L_ _∼_ _∼_
+
+_is minimized if and only if ℓψ(x, θ) =_ EExx∼∼pp(x(x|θ))[K[K((xx,x,xoo)])] _pp(x(x|θ))_ _[for all][ θ][ ∈]_ _[support][(˜]p(θ))._
+
+_Proof. We begin by rearranging the expectations:_
+
+
+= Eθ,x _p˜(θ,x)_ [[][K][(][x][,][ x]o[) log(][ℓ]ψ[∗] [(][x][,][ θ][))] +][ E]θ,x _p˜(θ)˜p(x)_ [[][K][(][x][,][ x]o[) log(1][ −] _[ℓ]ψ[∗]_ [(][x][,][ θ][))]]
+_L_ _∼_ _∼_
+
+= _p˜(θ, x)K(x, xo) log(ℓψ∗_ (x, θ))dθdx+
+ZZ
+_p˜(θ)˜p(x)K(x, xo) log(1_ _ℓψ∗_ (x, θ))dθdx
+_−_
+ZZ
+
+_p˜(θ, x)K(x, xo)_
+=
+_p˜(θ, x)K(x, xo)dθdx_ [log(][ℓ][ψ][∗] [(][x][,][ θ][))][d][θ][d][x][+]
+ZZ
+_p˜(θ)˜p(x)K(x, xo)_
+RR
+_p˜(θ)˜p(x)K(x, xo)dθdx_ [log(1][ −] _[ℓ][ψ][∗]_ [(][x][,][ θ][))][d][θ][d][x]
+ZZ
+
+= Eθ,x∼πjoint(θ,x) [log(ℓψ∗ (x, θ))] + Eθ,RRx∼πmarginal(θ,x) [log(1 − _ℓψ∗_ (x, θ))]
+
+where we introduced
+
+_p˜(θ, x)K(x, xo)_ _p˜(θ)˜p(x)K(x, xo)_
+_πjoint(θ, x) =_ _πmarginal(θ, x) =_
+_p˜(θ, x)K(x, xo)dθdx_ _p˜(θ)˜p(x)K(x, xo)_
+RR RR
+
+Since binary classification recovers density ratios (Cranmer et al., 2015; Mohamed & Lakshminarayanan, 2016; Gutmann et al., 2018), we get
+
+
+_πjoint(θ, x)_
+_ℓψ∗_ (x, θ) =
+
+_πmarginal(θ, x)_
+
+_p˜(θ,x)K1(x,xo)dθdx_ _p[˜](θ, x)K(x, xo)_
+
+
+RR _p˜(p˜θ()θp()˜xp)(K1x()xK,x(ox)d,θ xdxo)p[˜]d(θθd)˜px(xp)(Kx(θx), xo)_
+
+= _|_
+
+_p˜(θ)p(x_ **_θ)K(x, xo)dθdx_** _p˜(x)_
+RR _|_
+
+_p˜(x)K(x, xo)_ _p˜(θ)dθdx_ _p(x_ **_θ)_**
+
+RR
+
+= _|_
+
+_p(x_ **_θ)K(x, xo)_** _p˜(θ)dθdx_ _p˜(x)_
+R _|_ R
+
+_p(x)[[][K][(][x][,][ x]o[)]]_ _p(x_ **_θ)_**
+= R[E][x][∼] [˜] R _|_
+
+Ex _p(x_ **_θ)[K(x, xo)]_** _p˜(x)_
+_∼_ _|_
+
+
+**Lemma 3. The objective**
+
+= Eθ,x _p˜(θ,x)[[(][c]ζ[(][θ][)][ −]_ _[K][(][x][,][ x]o[))][2][]]_
+_L_ _∼_
+
+_is minimized if and only if cζ(θ) = Ex_ _p(x_ **_θ)[K(x, xo))] for all θ_** _support(˜p(θ))._
+_∼_ _|_ _∈_
+
+
+_Proof._
+
+= Eθ,x _p˜(θ,x)[[(][c]ζ[(][θ][)][ −]_ _[K][(][x][,][ x]o[))][2][]]_
+_L_ _∼_
+
+= _p˜(θ, x)(cζ(θ)_ _K(x, xo))[2]dxdθ_
+_−_
+ZZ
+
+= _p˜(θ)_ _p(x_ **_θ)(cζ(θ)_** _K(x, xo))[2]dxdθ_
+_|_ _−_
+Z Z
+
+= _p˜(θ)Ex_ _p(x_ **_θ)[(cζ(θ)_** _K(x, xo))[2]]dθ_
+_∼_ _|_ _−_
+Z
+
+which is minimized if and only if cζ(θ) = Ex _p(x_ **_θ)[K(x, xo))]) for all θ_** support(˜p(θ)).
+_∼_ _|_ _∈_
+
+
+-----
+
+Figure 8: Comparison between SNPLA implementation of (Wiqvist et al., 2021) and SNVI with
+rKL.
+
+A.7 SNPLA
+
+In Fig. 2 and Fig. 3, we compared SNVI to SNPLA (Wiqvist et al., 2021). To ensure comparability
+between SNPLA and SNVI, we implemented SNPLA ourselves and used the same likelihood- and
+posterior-model for both methods. The main difference between our implementation and the original
+implementation of SNPLA are:
+
+1. We do not use the proposal ˆpr(θ) = αp(θ) + (1 _α)qφ(θ) for α_ [0, 1], instead we use
+_−_ _∈_
+_α = 0, i.e. we use the current posterior estimate as proposal._
+
+2. Secondly, we use a Rational Linear Spline Flow (RSF) based on pyro (Bingham et al.,
+2019), whereas Wiqvist et al. (2021) uses a Masked Autoregressive Flow based on nflows
+(Durkan et al., 2019b).
+
+Fig. 8 compares the performance of our SNPLA implementation to the original implementation.
+Our implementation performs slightly better, likely due to the use of more expressive normalizing
+flows. We used our implementation for all experiments and nonetheless refer to the method with the
+name ‘SNPLA’.
+
+A.8 EXPERIMENTS: BENCHMARK
+
+All tasks were taken from an sbi benchmark (Lueckmann et al., 2021). For a description of the
+simulators, summary statistics, and prior distributions, we refer the reader to that paper.
+
+We use the SNLE and SNRE as implemented in the sbi package (Tejero-Cantero et al., 2020).
+In all experiments, we learn the likelihood with a Masked Autoregressive Flow (MAF) with five
+autoregressive layers each with two hidden layers and 50 hidden units (Tejero-Cantero et al., 2020;
+Durkan et al., 2019b). For SNRE we use a two block residual network with 50 hidden units. Just as
+in Lueckmann et al. (2021), we implement SNRE with the loss described in Durkan et al. (2020).
+
+The implementation of the posterior normalizing flows is based on pyro (Bingham et al., 2019),
+as pyro caches intermediate values during sampling and thus allow cheap density evaluation on
+obtained samples. We use MAFs for higher dimensional problems and Rational Linear Spline Flows
+(RSF) for low dimensional but complex problems (SLCP, Two moons). We always use a standard
+Gaussian base distribtuion and five autoregressive layers with a hidden size depending on input
+dimension ([dim·10, dim·10] for spline autoregressive nets and [dim·5+5] for affine autoregressive
+nets, each with ReLU activations). As the posterior support must match that of the prior, we add
+a bijective mapping that maps the support to that of the prior. This allows to train the normalizing
+flows directly on the constrained domain.
+
+We used a total sampling budget of N = 256 for any VI loss. To estimate the IW-ELBO we use
+_N = 32 to estimate_ _IW_ (φ) (Rainforth et al., 2018). Additionally, we use the STL estimator
+_L[(][K][=8)]_
+(Roeder et al., 2017). An alternatively would be the doubly reparameterized gradient estimator,
+which is unbiased. We choose the STL estimator as it admits larger SNRs at the cost of introducing
+some bias (Tucker et al., 2018). Because for α 0 we have that _α_ _IW_ we use this
+_→_ _L_ _→L[(][K][=1)]_
+
+
+-----
+
+Bernoulli GLM (SNLE) Bernoulli GLM (SNPLA) Bernoulli GLM (SNVI+fKL)
+
+Lotka volterra (SNLE) Lotka volterra (SNPLA) Lotka volterra (SNVI+fKL)
+
+Figure 9: Samples from the posterior distributions for SNLE with MCMC, SNVI + fKL, SNVI +
+rKL. First row: results for SLCP. Second row: Lotka-Volterra. Third row: Bernoulli GLM.
+
+estimator also to estimate _α=0.1(φ). While the estimator can also be used for the ELBO, it requires_
+_L_
+additional computational cost i.e. we additionally need to calculate the inverse transformation, which
+is costly for autoregressive flows. Note that the fKL estimator also requires the inverse transform,
+thus we recommend to use a normalizing flow with fast forward and inverse passes in problems with
+many parameters, e.g. normalizing flows based on coupling layers (Dinh et al., 2017; Durkan et al.,
+2019a).
+
+We trained for 10 rounds of simulations. In each round, we initialize the likelihood- and the
+posterior-model as their respective last estimates from the previous round. We train the posterior
+model for each round for at least 100 iterations and at most 1000 iterations. We evaluate convergence by tracking the decrease within the loss. For this automated benchmark, the convergence
+criteria are chosen conservative too avoid early stopping. More elaborate convergence criteria may
+improve runtime.
+
+As metrics, we used classifier 2-sample tests (C2ST). C2ST trains a classifier to distinguish posterior
+samples produced by a specific method to ground truth posterior samples. Thus, a value of 0.5
+means that the distributions are identical, whereas higher values indicate a mismatch between the
+distributions. As in Lueckmann et al. (2021), we computed the C2ST using 10,000 samples. Each
+figure shows the average metric value over 10 different observations, as well as the corresponding
+95% confidence interval.
+
+
+-----
+
+Bernoulli GLM
+
+SNRE SNVI+rKL SNVI+fKL SNVI+IW SNVI+α
+
+Lotka volterra
+
+
+2800
+
+Time [s]
+
+0
+
+2200
+
+
+1.0
+
+0.5
+
+
+1.0
+
+0.5
+
+
+Two moons
+
+
+1400
+
+Time [s]
+
+0
+
+2000
+
+
+1.0
+
+0.5
+
+1.0
+
+
+SLCP
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+0.5
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+10[3] 10[4] 10[5]
+
+Simulations
+
+
+Figure 10: C2ST benchmark results for SNVI with ratio estimation (SNRVI) for four models,
+Bernoulli GLM (A), Lotka Volterra (B), Two moons (C) and SLCP (D). Each point represents the
+average metric value for ten different observations, as well as the confidence intervals. Bars on the
+right indicate the average runtime. Two reference methods: SNRE with MCMC sampling and the
+rKL, as well as three variants of SNVI, with forward KL (SNVI+fKL), importance-weighted ELBO
+(SNVI+IW) and α-divergence (SNVI+α). Dotted lines: performance when not using SIR.
+
+Fig. 11 shows results for further variational objectives on the two moons (top) and on the SLCP task
+(bottom). The self-normalization used for the forward KL estimator improves the approximation
+quality (11, left, dark vs light purple). For the IW-ELBO (middle) as well as for the α-divergences
+(right), the STL estimator improves performance (Rainforth et al., 2018). The gains from the STL
+are stronger for α-divergences as for the IW-ELBO (especially when using SIR). The STL particularly improves the estimate for low values of alpha (which are more support-covering).
+
+
+A.9 EXPERIMENTS: INFERENCE IN A NEUROSCIENCE MODEL OF THE PYLORIC NETWORK
+
+We used the same simulator as in Gonc¸alves et al. (2020); Deistler et al. (2021) and the 15 summary
+statistics originally described in Prinz et al. (2004) and also used in Gonc¸alves et al. (2020); Deistler
+et al. (2021) (notably, Gonc¸alves et al. (2020); Deistler et al. (2021) used 3 additional features).
+Below, we describe the simulator briefly, for a full description we refer the reader to Prinz et al.
+(2004); Gonc¸alves et al. (2020); Deistler et al. (2021).
+
+The model is composed of three single-compartment neurons, AB/PD, LP, and PY, where the electrically coupled AB and PD neurons are modeled as a single neuron. Each of the model neurons
+contains 8 currents. In addition, the model contains 7 synapses. As in Prinz et al. (2004), these
+synapses are simulated using a standard model of synaptic dynamics (Abbott & Marder, 1998).
+
+For each set of membrane and synaptic conductances, we numerically simulate the circuit for 10
+seconds with a step size of 0.025 ms. At each time step, each neuron receives Gaussian noise with
+mean zero and standard deviation 0.001 mV·ms[−][0][.][5].
+
+We applied SNVI to infer the posterior over 24 membrane parameters and 7 synaptic parameters,
+i.e. 31 parameters in total. The 7 synaptic parameters are the maximal conductances of all synapses
+in the circuit, each of which is varied uniformly in logarithmic domain and the membrane parameters
+
+
+-----
+
+Two moons
+
+SNLVI+fKL SNLVI+IW SNLVI+
+
+1.0
+
+0.9
+
+0.8
+
+C2ST 0.7
+
+0.6
+
+0.5
+
+10[3] 10[4] 10[5] 10[3] 10[4] 10[5] 10[3] 10[4] 10[5]
+
+Simulations Simulations Simulations
+
+SLCP
+
+SNLVI+fKL SNLVI+IW SNLVI+
+
+1.0
+
+0.9
+
+C2ST 0.80.7
+
+0.6
+
+0.5
+
+10[3] 10[4] 10[5] 10[3] 10[4] 10[5] 10[3] 10[4] 10[5]
+
+Simulations Simulations Simulations
+
+_q_ _fKL_ _IW_ ( = 0.1) ( = 0.5)
+
+_q_ + SIR _fKL_ [(fVB)] _IW_ [(STL)] ( = 0.1,STL) ( = 0.5, STL)
+
+Figure 11: Evaluation of further variational objectives for the two moons (top) and the SLCP (bottom) task. Left: Variations of the forward KL (with and without self-normalized weights). Middle:
+Variations of the IW-ELBO (with and without STL). Right: Variations of the α-divergence (with
+and without STL as well as for different values of α.
+
+are the maximal membrane conductances for each neuron. All membrane and synaptic conductances
+are varied over the same range as in Gonc¸alves et al. (2020); Deistler et al. (2021).
+
+The 15 summary features proposed by Prinz et al. (2004) are salient features of the pyloric rhythm:
+Cycle period (s), three burst durations (s), two gap durations between bursts, two phase delays, three
+duty cycles, two phase gaps, and two phases of burst onsets. Note that several of these values are only
+defined if each neuron produces rhythmic bursting behavior. In particular we call any simulations
+invalid if at least one of the summary features is undefined.
+
+The experimental data is taken from file 845 082 0044 in a publicly available dataset (Haddad &
+Marder, 2021).
+
+For the likelihood-model, we use a Neural Spline Flow (NSF) with five autoregressive layers. Each
+layer has two hidden layers and 50 hidden neurons, as implemented in the sbi package (TejeroCantero et al., 2020; Durkan et al., 2019b). The posterior-model is a Masked autoregressive flow
+(MAF) with five autoregressive layers each with one hidden layer and 160 hidden units.
+
+We train a total of 31 rounds. In the first round we use 50000 simulations from which only
+492 are valid, and thus used to estimate the likelihood. For all other rounds we each simulated 10000 samples. To account for invalid summary features, we use the calibration kernel K(x, xo) = I(x is valid), hence can simply exclude any invalid simulations from training the likelihood-model. By Theorem 1 we have to correct the likelihood by multiplication of
+Ex _p(x_ **_θ)[I(x is valid)] = P_** (x is valid **_θ)._** To estimate this probability we use a deep logis_∼_ _|_ _|_
+tic regression net with 3 hidden layers each with 50 neurons and ReLU activations. We train
+this classifier simultaneously with the likelihood-model, that is in each round we add new data
+_{(θi, I(θi is valid))}i[N]=1_ [and retrain the classifier using the weighted binary-cross-entropy loss. We]
+weight the loss by the estimated class probabilities to account for class imbalance especially in early
+rounds. We fix the number of epochs to 200 per round. We use the fKL loss with N = 1024
+samples, as well as SIR.
+
+
+-----
+
+Figure 12: Posterior distribution for the neuroscience model of the pyloric network. In Fig. 4B we
+show a subset. The black point is a mean estimate using 10[7] samples. The red point is a maximum
+a-posterior estimate, obtained by gradient ascent.
+
+In total, the procedure took 27 hours, with the runs of the simulator being parallelized across several
+nodes. Because of this, the runtime also depends greatly on availability of computing resources on
+the cluster.
+
+
+-----
+
+Pyloric 10k simulations (9k invalid, 1k valid)
+
+
+140
+
+120
+
+100
+
+80
+
+60
+
+40
+
+20
+
+
+Classifier Likelihood
+
+(valid data)
+
+
+Classifier +
+
+Likelihood
+
+
+Likelihood
+
+(full sub. data)
+
+
+Figure 13: Runtime of the classifier cζ(θ) in the model of the pyloric network (90% of simulations
+are invalid). Training the classifier is approximately three times cheaper than training the likelihoodmodel (compare left bar to second left) and thus increases the computational cost only modestly.
+The likelihood-model is trained only on valid simulations. The combined runtime of classifier and
+likelihood-model (third bar) is still far less then the time it would take to train the likelihood-model
+on all simulations (right bar. To estimate the runtime of the likelihood-model on all simulations, we
+substituted invalid simulation outputs (i.e. NaN) with an unreasonably low value and trained on all
+simulations).
+
+
+-----
+

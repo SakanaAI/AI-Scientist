@@ -1,0 +1,2058 @@
+## NEURAL STOCHASTIC DUAL DYNAMIC PROGRAMMING
+
+**Hanjun Dai[†∗], Yuan Xue[⋄∗], Zia Syed[⋄], Dale Schuurmans[†], Bo Dai[†]**
+
+_†Google Research, Brain Team ⋄_ Google Cloud AI
+_{hadai, yuanxue, zsyed, schuurmans, bodai}@google.com_
+
+ABSTRACT
+
+Stochastic dual dynamic programming (SDDP) is a state-of-the-art method for
+solving multi-stage stochastic optimization, widely used for modeling real-world
+process optimization tasks. Unfortunately, SDDP has a worst-case complexity that
+scales exponentially in the number of decision variables, which severely limits
+applicability to only low dimensional problems. To overcome this limitation, we
+extend SDDP by introducing a trainable neural model that learns to map problem
+instances to a piece-wise linear value function within intrinsic low-dimension
+_space, which is architected specifically to interact with a base SDDP solver, so that_
+can accelerate optimization performance on new instances. The proposed Neural
+_Stochastic Dual Dynamic Programming (ν-SDDP) continually self-improves by_
+solving successive problems. An empirical investigation demonstrates that ν-SDDP
+can significantly reduce problem solving cost without sacrificing solution quality
+over competitors such as SDDP and reinforcement learning algorithms, across a
+range of synthetic and real-world process optimization problems.
+
+1 INTRODUCTION
+
+Multi-stage stochastic optimization (MSSO) considers the problem of optimizing a sequence of
+decisions over a finite number of stages in the presence of stochastic observations, minimizing
+an expected cost while ensuring stage-wise action constraints are satisfied (Birge & Louveaux,
+2011; Shapiro et al., 2014). Such a problem formulation captures a diversity of real-world process
+optimization problems, such as asset allocation (Dantzig & Infanger, 1993), inventory control (Shapiro
+et al., 2014; Nambiar et al., 2021), energy planning (Pereira & Pinto, 1991), and bio-chemical process
+control (Bao et al., 2019), to name a few. Despite the importance and ubiquity of the problem, it has
+proved challenging to develop algorithms that can cope with high-dimensional action spaces and
+long-horizon problems (Shapiro & Nemirovski, 2005; Shapiro, 2006).
+
+There have been a number of attempts to design scalable algorithms for MSSO, which generally
+attempt to exploit scenarios-wise or stage-wise decompositions. An example of a scenario-wise
+approach is Rockafellar & Wets (1991), which proposed a progressive hedging algorithm that
+decomposes the sample averaged approximation of the problem into individual scenarios and applies
+an augmented Lagrangian method to achieve consistency in a final solution. Unfortunately, the number
+of subproblems and variables grows exponentially in the number of stages, known as the “curse-of_horizon”. A similar proposal in Lan & Zhou (2020) considers a dynamic stochastic approximation,_
+a variant of stochastic gradient descent, but the computational cost also grows exponentially in the
+number of stages. Alternatively, stochastic dual dynamic programming (SDDP) (Birge, 1985; Pereira
+& Pinto, 1991), considers a stage-wise decomposition that breaks the curse of horizon (Fullner &¨
+Rebennack, 2021) and leads to an algorithm that is often considered state-of-the-art. The method
+essentially applies an approximate cutting plane method that successively builds a piecewise linear
+convex lower bound on the optimal cost-to-go function. Unfortunately, SDDP can require an
+exponential number of iterations with respect to the number of decision variables (Lan, 2020), known
+as the “curse-of-dimension” (Bal´azs et al., 2015).
+
+Beyond the scaling challenges, current approaches share a common shortcoming that they treat each
+optimization problem independently. It is actually quite common to solve a family of problems that
+share structure, which intuitively should allow the overall computational cost to be reduced (Khalil
+et al., 2017; Chen et al., 2019). However, current methods, after solving each problem instance via
+
+_∗Equal contribution_
+
+
+-----
+
+intensive computation, discard all intermediate results, and tackle all new problems from scratch.
+Such methods are destined to behave as a perpetual novice that never shows any improvement with
+problem solving experience.
+
+In this paper, we present a meta-learning approach, Neural Stochastic Dual Dynamic Programming (ν_SDDP), that, with problem solving experience, learns to significantly improve the efficiency of SDDP_
+in high-dimensional and long-horizon problems. In particular, ν-SDDP exploits a specially designed
+neural network architecture that produces outputs interacting directly and conveniently with a base
+SDDP solver. The idea is to learn an operator that take information about the specific problem
+instance, and map it to a piece-wise linear function in the intrinsic low-dimension space for accurate
+value function approximation, so that can be plugged into a SDDP solver. The mapping is trainable,
+leading to an overall algorithm that self-improves as it solves more problem instances. There are
+three primary benefits of the proposed approach with carefully designed components:
+
+**i) By adaptively generating a low-dimension projection for each problem instance, ν-SDDP reduces**
+the curse-of-dimension effect for SDDP.
+
+**ii) By producing a reasonable value function initialization given a description of the problem**
+instance, ν-SDDP is able to amortize its solution costs, and gain a significant advantage over the
+initialization in standard SDDP on the two benchmarks studied in the paper.
+
+**iii) By restricting value function approximations to a piece-wise affine form, ν-SDDP can be**
+seamlessly incorporated into a base SDDP solver for further refining solution, which allows
+solution time to be reduced.
+
+Figure 1 provides an illustration of the overall ν-SDDP method developed in this paper.
+
+Figure 1: Overall illustration of ν-SDDP. For training, the algorithm iterates N times to solve different
+problem instances. For each instance, it repeats two passes: forward (solving LPs to estimate
+an optimal action sequence) and backward (adding new affine components to the value function
+estimate). Once a problem instance is solved, the optimal value function and optimal actions are used
+for neural network training. During inference time for a new problem, it can predict high-quality
+value function with little cost, which can be embedded into SDDP for further improvements.
+
+The remainder of the paper is organized as follows. First, we provide the necessary background on
+MSSO and SDDP in Section 2. Motivated by the difficulty of SDDP and shortcomings of existing
+learning-based approaches, we then propose ν-SDDP in Section 3, with the design of the neural
+component and the learning algorithm described in Section 3.1 and Section 3.2 respectively. We
+compare the proposed approach with existing algorithms that also exploit supervised learning (SL)
+and reinforcement learning (RL) for MSSO problems in Section 4. Finally, in Section 5 we conduct
+an empirical comparison on synthetic and real-world problems and find that ν-SDDP is able to
+effectively exploit successful problem solving experiences to greatly accelerate the planning process
+while maintaining the quality of the solutions found.
+
+2 PRELIMINARIES
+
+We begin by formalizing the multi-stage stochastic optimization problem (MSSO), and introducing
+the stochastic dual dynamic programming (SDDP) strategy we exploit in the subsequent algorithmic
+development. We emphasize the connection and differences between MSSO and a Markov decision
+process (MDP), which shows the difficulties in applying the advanced RL methods for MSSO.
+
+**Multi-Stage Stochastic Optimization (MSSO).** Consider a multi-stage decision making problem
+with stages t = 1, . . ., T, where an observation ξt _Pt(_ ) is drawn at each stage from a known
+_∼_ _·_
+
+
+-----
+
+observation distribution Pt. A full observation history {ξt}t[T]=1 [forms a][ scenario][, where the obser-]
+vations are assumed independent between stages. At stage t, an action is specified by a vector xt.
+The goal is to choose a sequence of actions {xt}t[T]=1 [to minimize the overall expected sum of linear]
+costs _t=1_ _[c][t][(][ξ][t][)][⊤][x][t][ under a known][ cost function][ c][t][. This is particularly challenging with feasible]_
+constraints on the action set. Particularly, the feasible action set χt at stage t is given by
+_χ[P]t(x[T]t−1, ξt)_ := _{xt|At (ξt) xt = bt (ξt) −_ _Bt−1 (ξt) xt−1, xt ⩾_ 0}, _∀t = 2, . . ., T, (1)_
+
+_χ1 (ξ1)_ := _{x1|A1(ξ1)x1 = b1 (ξ1), x1 ⩾_ 0}, (2)
+
+where At, Bt and bt are known functions. Notably, the feasible set χt(xt 1, ξt) at stage t depends
+_−_
+on the previous action xt 1 and the current stochastic observation ξt. The MSSO problem can then
+_−_
+be expressed as
+
+minx1 c1(ξ1)[⊤]x1 + Eξ2 minx2 c2 (ξ2)[⊤] _x2_ + EξT minxT cT (ξT )[⊤] _xT_ _,_
+
+_v :=_ _· · ·_ (3)
+
+(s.t. _xt_ _χt(xt_ 1, ξt) h _t =_ 1, . . ., T _,_ h ii
+
+_∈_ _−_ _∀_ _{_ _}_
+
+where ξ1 and the problem context U = {ut}t[T]=1 [for][ u][t][ := (][P][t][, c][t][, A][t][, B][t][, b][t][)][ are provided. Given the]
+context U given, the MSSO is specified. Since the elements in U are probability or functions, the
+definition of U is only conceptual. In practice, we implement U with its sufficient representations. We
+will demonstrate the instantiation of U in our experiment section. MSSO is often used to formulate
+real-world inventory control and portfolio management problems; we provide formulations for these
+specific problems in in Appendix B.1 and Appendix B.2.
+
+Similar to MDPs, value functions provide a useful concept for capturing the structure of the optimal
+solution in terms of a temporal recurrence. Following the convention in the MSSO literature (Fullner¨
+& Rebennack, 2021), let
+_Qt (xt_ 1, ξt) := min _,_ _t = 2, . . ., T,_ (4)
+_−_ _xt_ _χt(xt_ 1,ξt) _[c][t][ (][ξ][t][)][⊤]_ _[x][t][ +][ E][ξ][t][+1][ [][Q][t][+1][ (][x][t][, ξ][t][+1][)]]_ _∀_
+_∈_ _−_
+_Vt+1(xt)_
+
+which expresses a Bellman optimality condition over the feasible action set. Using this definition, the
+
+| {z }
+
+MSSO problem (3) can then be rewritten as
+_v :=_ minx1 c1(ξ1)[⊤]x1 + V2 (x1), s.t. x1 ∈ _χ1(ξ1)_ _._ (5)
+
+**Theorem 1 (informal, Theorem 1.1 and Corollary 1.2 in** **F¨ullner & Rebennack (2021)) When**
+_the optimization (5) almost surely has a feasible solution for every realized scenario, the value_
+_functions Qt (·, ξ) and Vt (·) are piecewise linear and convex in xt for all t = 1, . . ., T_ _._
+
+**Stochastic Dual Dynamic Pro-** **Algorithm 1 SDDP(** _Vt[0]_ _Tt=1_ _[, ξ][1][, n][)]_
+**gramming (SDDP).** Given the
+problem specificationnow consider solution strate- (3) we 2:1: for Sample i = 1 {, . . ., nξt[j][}]j[m]=1 do[∼] _[P][t][ (][·][)][ for][ t][ = 2][, . . ., T]_
+gies. Stochastic dual dynamic 3: Select J samples from uniform{1, ..., m} _▷_ minibatch
+_programming (SDDP) (Shapiro_ 4: **for t = 1, . . ., T and j = 1, . . ., J do** _▷_ forward pass
+et al., 2014; Fullner & Reben-¨ 5: arg min ct(ξtj[)][⊤][x][t] [+][ V][ i]t+1 [(][x][t][)][,]
+nack, 2021) is a state-of-the-art _x[i]tj_ (6)
+
+_[∈]_ s.t. xtj _χt(x[i]t_ 1,j[, ξ]t[j][)]
+
+approach that exploits the key ob- 6: **end for**  _∈_ _−_ 
+servation in Theorem 1 that the 7: **for t = T, . . ., 1 do** _▷_ backward pass
+optimal V function can be ex- 8: Calculate the dual variables of (6) for each ξt[j] [in][ (][29][)][;]
+pressed as a maximum over a 9: Update Vt[i] [with dual variables via][ (][32][)][ (Appendix][ C][)]
+finite number of linear compo- 10: **end for**
+nents. Given this insight, SDDP 11: end for
+applies Bender’s decomposition
+to the sample averaged approximation of (3). In particular, it performs two steps in each iteration: (i)
+in a forward pass from t = 0, trial solutions for each stage are generated by solving subproblems (4)
+using the current estimate of the future expected-cost-to-go function Vt+1; (ii) in a backward pass
+from t = T, each of the V -functions are then updated by adding cutting planes derived from the
+optimal actions xt 1 obtained in the forward pass. (Details for the cutting plan derivation and the
+_−_
+connection to TD-learning are given in Appendix C due to lack of space.) After each iteration, the
+current Vt+1 provides a lower bound on the true optimal expected-cost-to-go function, which is being
+successively tightened; see Algorithm 1.
+
+
+-----
+
+**MSSO vs. MDPs. At the first glance, the dynamics in MSSO (3) is describing markovian relationship**
+on actions, i.e., the current action xt is determined by current state ξt and previous action xt 1, which
+_−_
+is different from the MDPs on markovian states. However, we can equivalently reformulate MSSO as
+
+a MDP with state-dependent feasible action set, by defining the t-th step state as st := (xt 1, ξt),
+_−_
+and action as at := _xt_ _χt (xt_ 1, ξt). This indeed leads to the markovian transition
+_∈_ _−_
+_pset (st+1_ _st, xt) = 1 (xt_ _χt (xt_ 1, ξt)) pt+1 (ξt+1), where 1 (xt _χt (xt_ 1, ξt)) := 1 if xt
+_χt (xt_ 1, ξ| _t), 0 otherwise ∈._ _−_ _∈_ _−_ _{_ _∈_
+_−_ _}_
+
+Although we can represent MSSO equivalently in MDP, the MDP formulation introduces extra
+difficulty in maintaining state-dependent feasible action and ignores the linear structure in feasibility,
+which may lead to the inefficiency and infeasibility when applying RL algorithms (see Section 5).
+Instead MSSO take these into consideration, especially the feasibility.
+
+Unfortunately, MSSO and MDP comes from different communities, the notational conventions of the
+MSSO versus MDP literature are directly contradictory: the Q-function in (4) corresponds to the
+state-value V -function in the MDP literature, whereas the V -function in (4) is particular to the MSSO
+setting, integrating out of randomness in state-value function, which has no standard correspondent
+in the MDP literature. In this paper, we will adopt the notational convention of MSSO.
+
+3 NEURAL STOCHASTIC DUAL DYNAMIC PROGRAMMING
+Although SDDP is a state-of-the-art approach that is widely deployed in practice, it does not scale
+well in the dimensionality of the action space (Lan, 2020). That is, as the number of decision variables
+in xt increases, the number of generated cutting planes in the Vt+1 approximations tends to grow
+exponentially, which severely limits the size of problem instance that can be practically solved.
+To overcome this limitation, we develop a new approach to scaling up SDDP by leveraging the
+generalization ability of deep neural networks across different MSSO instances in this section.
+
+We first formalize the learning task by introducing the contextual MSSO. Specifically, as discussed
+in Section 2, the problem context U = {ut}t[T]=1 [with][ u][t][ := (][P][t][, c][t][, A][t][, B][t][, b][t][)][ soly defines the]
+MSSO problem, therefore, we denote W (U ) as an instance of MSSO (3) with explicit dependence
+on U . We assume the MSSO samples can be instantiated from contextual MSSO following some
+distribution, i.e., W(U ) ∼P (W), or equivalently, U ∼P (U ). Then, instead of treating each MSSO
+_independently from scratch, we can learn to amortize and generalize the optimization across different_
+MSSOs in ( ). We develop a meta-learning strategy where a model is trained to map the ut
+_P_ _W_
+and t to a piecewise linear convex Vt-approximator that can be directly used to initialize the SDDP
+solver in Algorithm 1. In principle, if optimal value information can be successfully transferred
+between similar problem contexts, then the immense computation expended to recover the optimal Vt
+functions for previous problem contexts can be leveraged to shortcut the nearly identical computation
+of the optimal Vt functions for a novel but similar problem context. In fact, as we will demonstrate
+below, such a transfer strategy proves to be remarkably effective.
+
+3.1 NEURAL ARCHITECTURE FOR MAPPING TO VALUE FUNCTION REPRESENTATIONS
+
+To begin the specific development, we consider the structure of the value functions, which are desired
+in the deep neural approximator.
+
+-  Small approximation error and easy optimization over action: recall from Theorem 1 that the
+optimal Vt-function must be a convex, piecewise linear function. Therefore, it is sufficient for the
+output representation from the deep neural model to express max-affine function approximations
+for Vt, which conveniently are also directly usable in the minimization (6) of the SDDP solver.
+
+-  Encode the instance-dependent information: to ensure the learned neural mapping can account
+for instance specific structure when transferring between tasks, the output representation needs to
+encode the problem context information, {(Pt, ct, At, Bt, bt)}t[T]=1[.]
+
+-  Low-dimension representation of state and action: the complexity of subproblems in SDDP
+depends on the dimension of the state and action exponentially, therefore, the output Vt-function
+approximations should only depend on a low-dimension representation of x.
+
+For the first two requirements, we consider a deep neural representation for functions f ( _, ut)_
+
+_·_ _∈M[K]_
+for t = 1, . . ., T, where M[K] is the piece-wise function class with K components, i.e.,
+
+:= _φ (_ ) : R _φ (x) =_ max _k_ _[x][ +][ α][k][, β][k]_ _._ (7)
+_M[K]_ _·_ _X →_ _k=1,...,K_ _[β][⊤]_ _[∈]_ [R][d][, α][k] _[∈]_ [R]
+ 
+
+
+-----
+
+That is, such a function f takes the problem context information u as input, and outputs a set of
+parameters ( _αk_, _βk_ ) that define a max-affine function φ. We emphasize that although we
+_{_ _}_ _{_ _}_
+consider M[K] with fixed number of linear components, it is straightforward to generalize to the
+function class with context-dependent number of components via introducing learnable K(ut) ∈ N.
+A key property of this output representation is that it always remains within the set of valid V functions, therefore, it can be naturally incorporated into SDDP as a warm start to refine the solution.
+This approach leaves design flexibility around the featurization of the problem context U and actions
+_x, while enabling the use of neural networks for f (·, u), which can be trained end-to-end._
+
+To further achieve a low-dimensional dependence on the action space while retaining convexity of the
+value function representations for the third desideratum, we incorporate a linear projection x = Gy
+with y ∈ R[p] and p < d, such that G = ψ (u) satisfies G[⊤]G = I. With this constraint, the mapping
+_f (·, u) will be in:_
+
+_G_ [:=] _φ(_ ) : R _φG (y) =_ max _k_ _[Gy][ +][ α][k][, β][k]_ _._ (8)
+_M[K]_ _·_ _Y →_ _k=1,...,K_ _[β][⊤]_ _[∈]_ [R][d][, G][ ∈] [R][d][×][p][, α][k] _[∈]_ [R]
+ 
+
+We postpone the learning of f and ψ to Section 3.2 and first illustrate the accelerated SDDP solver
+in the learned effective dimension of the action space in Algorithm 2. Note that after we obtain the
+solution y in line 3 in Algorithm 2 of the projected problem, we can recover x = Gy as a coarse
+solution for fast inference. If one wanted a more refined solution, the full SDDP could be run on the
+un-projected instance starting from the updated algorithm state after the fast call.
+
+**Practical representation de-**
+we first encode the index of timetails: In our implementation, **Algorithm 2 Fast-Inference({ut}t[T]=1** _[, f, ψ, ξ][1][)]_
+step t by a positional encoding 1: Set G = ψ (U ) _▷_ fast inference
+(Vaswani et al., 2017) and exploit 2: Projected problem instance {qt}t[T]=1 [=][ {][Gu][t][}]t[T]=1[,]
+sufficient statistics to encode the
+
+3: _y˜t_ _ξt[j]_ _f (_ _, qt)_ _t=1_ _[, ξ][1][,][ 1]_, _▷_ we only
+
+distribution P (ξ) (assuming in _t,j_ [=][SDDP] _{_ _·_ _}[T]_
+addition that the Pt are station- needn  one forward passo  in low-dimension space.
+ary). As the functions ct, At, 4: _x˜t_ _ξt[j]_ _Gy˜t_ _ξt[j]_
+_Bt and bt are typically static and_ _t,j_ [=] _t,j[,]_
+
+n/* Optional refinement */ o n  o
+
+problem specific, there structures
+will remain the same for differ- 5: _x[∗]t_ [(][ξ]t[j][)] _f (_ _, ut)_ _t=1_ _[, ξ][1][, n]_ _▷_ refine solution.
+
+_t,j_ [=][ SDDP] _{_ _·_ _}[T]_
+
+ent Pt. In our paper we focus on
+
+n o  
+
+the generalization within a problem type (e.g., the inventory management) and do not expect the
+generalization across problems (e.g., train on portfolio management and deploy on inventory management). Hence we can safely ignore these LP specifications which are typically of high dimensions.
+The full set of features are vectorized, concatenated and input to a 2-layer MLP with 512-hidden
+relu neurons. The MLP outputs k linear components, _αk_ and _βk_, that form the piece-wise
+_{_ _}_ _{_ _}_
+linear convex approximation for Vt. For the projection G, we simply share one G across all tasks,
+although it is not hard to incorporate a neural network parametrized G. The overall deep neural
+architecture is illustrated in Figure 5 in Appendix D.
+
+3.2 META SELF-IMPROVED LEARNING
+The above architecture will be trained using a meta-learning strategy, where we collect successful
+
+_n_
+
+prior experience Dn := _zi :=_ _U, {Vt[∗][}]t[T]=1_ _[,][ {][x]t[∗][(][ξ][j][)][}][T,m]t=1,j_ _i_ _i=1_ [by using][ SDDP][ to solve a set]
+
+of training problem instances. Here,T,m n  _U = {ut}t[T]=1_ [denotes a problem context, and] o _[ {][V][ ∗]t_ _[}]t[T]=1_ [and]
+_x[∗]tj_ _t,j_ are the optimal value functions and actions obtained by SDDP for each stage.
+Given the dataset _n, the parameters of f and ψ, W :=_ _Wf_ _, Wψ_, can be learned by optimizing
+
+_D_ _{_ _}_
+the following objective via stochastic gradient descent (SGD):
+
+_n_ _T_ _m_
+
+_⊤_
+
+minW _ℓ_ (W ; z) := _−_ (x[i]tj[∗][)][⊤][G][i]ψ _G[i]ψ_ _x[i]tj[∗]_ [+][ EMD] _f_ (·; u[i]t[)][, V][ i]t _[∗][(][·][)]_ + λσ (W ),
+
+_zX∈Dn_ Xi=1 Xt=1 Xj    [!]
+
+_⊤_
+s.t. _G[i]ψ_ _G[i]ψ_ [=][ I]p[,] _∀i = 1, . . ., n_ (9)
+ 
+
+where Gψ := ψ(u), EMD (f, V ) denotes the Earth Mover’s Distance between f and V, and
+_σ (W_ ) denotes a convex regularizer on W . Note that the loss function (9) is actually seeking
+
+
+-----
+
+**Algorithm 3 ν-SDDP**
+
+1: Initialize dataset 0;
+_D_
+2: for epoch i = 1, . . ., n do
+3: Sample a multi-stage stochastic decision problems U = _ut_ _t=1_
+
+4: Initial _Vt[0]_ _Tt=1_ [= (1][ −] _[γ][)][0][ +][ γ]_ _fW_ _·, {ut}t[T]=1_ _Tt=0 {[with]}[T][ γ][ ∼B][∼]_ _[P][ (][ (][p][U][i][)][)][;][;]_
+
+5: _x[∗](ξt[j][)]_ _T,mt,j=1_ = SDDP( _Vt[0]_ nTt=1 _[, ξ][1][, n][)][;]_ o
+
+6: nCollect solved optimization instanceo   _Di = Di−1 ∪_ _U, {Vt[∗][}]t[T]=1_ _[,][ {][x]t[∗][(][ξ][j][)][}][T,m]t=1,j_ ;
+
+7: **for iter = 1, . . ., b do**  
+
+8: Sample zl _i;_
+
+9: Update parameters ∼D _W with stochastic gradients: W = W −_ _η∇W ℓ_ (W ; zl) ;
+
+10: **end for**
+
+11: end for
+
+to maximize _i=1_ _tt=1_ _mj_ [(][x]tj[i][∗][)][⊤][G][ψ][G][⊤]ψ _[x]tj[i][∗]_ [under orthonormality constraints, hence it seeks]
+principle components of the action spaces to achieve dimensionality reduction.
+
+To explain the role of[P][n] P EMDP, recall that f (x, u) outputs a convex piecewise linear function represented
+_K_ _t_
+by (βk[f] [)][⊤][x][ +][ α]k[f] _k=1[, while the optimal value function][ V][ ∗]t_ [(][x][) :=] (βl[∗][)][⊤][x][ +][ α]l[∗][(][ξ][)] _l=1_ [in]
+SDDP is also a convex piecewise linear function, hence expressible by a maximum over affine
+  _K_
+functions. Therefore, EMD (f, Vt[∗][)][ is used to calculate the distance between the sets] _βk[f]_ _[, α]k[f]_ _k=1_
+and {βl[∗][, α]l[∗][}]l[t]=1[, which can be recast as] 
+
+_M_ minΩ(K,t) Ω(K, t) = _M ∈_ R[K]+ _[×][t]|M_ **1 ⩽** 1, M _[⊤]1 ⩽_ 1, 1[⊤]M **1 = min(K, t)** _, (10)_
+_∈_ _[⟨][M, D][⟩]_ _[,]_
+
+
+where D ∈ R[K][×][t] denotes the pairwise distances between elements of the two sets. Due to space
+limits, please refer to Figure 6 in Appendix D for an illustration of the overall training setup. The
+main reason we use EMD is due to the fact that f and V _[∗]_ are order invariant, and EMD provides an
+optimal transport comparison (Peyr´e et al., 2019) in terms of the minimal cost over all pairings.
+**Remark (Alternative losses): One could argue that it suffices to use the vanilla regression losses,**
+such as the L2-square loss ∥f (·, u, ξ) − _V_ _[∗]_ (·, ξ)∥2[2][, to fit][ f][ to][ V][ ∗][. However, there are several]
+drawbacks with such a direct approach. First, such a loss ignores the inherent structure of the
+functions. Second, to calculate the loss, the observations x are required, and the optimal actions
+from SDDP are not sufficient to achieve a robust solution. This approach would require an additional
+sampling strategy that is not clear how to design (Defourny et al., 2012).
+**Training algorithm: The loss (9) pushes f to approximate the optimal value functions for the**
+training contexts, while also pushing the subspace Gψ to acquire principle components in the action
+space. The intent is to achieve an effective approximator for the value function in a low-dimensional
+space that can be used to warm-start SDDP inference Algorithm 2. Ideally, this should result in an
+efficient optimization procedure with fewer optimization variables that can solve a problem instance
+with fewer forward-backward passes. In an on-line deployment, the learned components, f and ψ,
+can be continually improved from the results of previous solves. One can also optinally exploit the
+learned component for the initialization of value function in SDDP by annealing with a mixture of
+zero function, where the weight is sampled from a Bernolli distribution. Overall, this leads to the
+Meta Self-Improved SDDP algorithm, ν-SDDP, shown in Algorithm 3.
+4 RELATED WORK
+The importance of MSSO and the inherent difficulty of solving MSSO problems at a practical scale
+has motivated research on hand-designed approximation algorithms, as discussed in Appendix A.
+**Learning-based MSSO approximations have attracted more attentions. Rachev & Romisch¨** (2002);
+
+Høyland et al. (2003); Hochreiter & Pflug (2007) learn a sampler for generating a small scenario tree
+while preserving statistical properties. Recent advances in RL is also exploited. Defourny et al. (2012)
+imitate a parametrized policy that maps from scenarios to actions from some SDDP solvers. Direct
+policy improvement from RL have also been considered. Ban & Rudin (2019) parametrize a policy
+as a linear model in (25), but introducing large approximation errors. As an extension, Bertsimas
+& Kallus (2020); Oroojlooyjadid et al. (2020) consider more complex function approximators for
+the policy parameterization in (25). Oroojlooyjadid et al. (2021); Hubbs et al. (2020); Balaji et al.
+
+
+-----
+
+(2019); Barat et al. (2019) directly apply deep RL methods. Avila et al. (2021) exploit off-policy
+RL tricks for accelerating the SDDP Q-update. More detailed discussion about Avila et al. (2021)
+can be found in Appendix A. Overall, the majority of methods are not able to easily balance MSSO
+problem structures and flexibility while maintaining strict feasibility with efficient computation. They
+also tend to focus on learning a policy for a single problem, which does not necessarily guarantee
+effective generalization to new cases, as we find in the empirical evaluation.
+**Context-based meta-RL is also relevant, where the context-dependent policy (Hausman et al., 2018;**
+Rakelly et al., 2019; Lan et al., 2019) or context-dependent value function (Fakoor et al., 2019;
+Arnekvist et al., 2019; Raileanu et al., 2020) is introduced. Besides the difference in MSSO vs.
+MDP in Section 2, the most significant difference is the parameterization and inference usage of
+context-dependent component. In ν-SDDP, we design the specific neural architecture with the output
+as a piece-wise linear function, which takes the structure of MSSO into account and can be seamlessly
+integrated with SDDP solvers for further solution refinement with the feasibility guaranteed; while in
+the vanilla context-based meta-RL methods, the context-dependent component with arbitrary neural
+architectures, which will induce extra approximation error, and is unable to handle the constraints.
+Meanwhile, the design of the neural component in ν-SDDP also leads to our particular learning
+objective and stochastic algorithm, which exploits the inherent piece-wise linear structure of the
+functions, meanwhile bypasses the additional sampling strategy required for alternatives.
+
+5 EXPERIMENTS
+
+**Problem Definition.** We first tested on
+**inventory optimization with the prob-** **Problem Setting** **Configuration (S-I-C, T )**
+lem configuration in Table. 1. We break
+the problem contexts into two sets: 1) Small-size topology, Short horizon (Sml-Sht)Mid-size topology, Long horizon (Mid-Lng) 10-10-20, 102-2-4, 5
+_topology, parameterized via the number_ Portfolio Optimization _T = 5_
+of suppliers S, inventories I, and customers C; 2) decision horizon T . Note Table 1: Problem Configuration in Inventory Optimization.
+that in the Mid-Lng setting there are 310 continuous action variables, which is of magnitudes larger
+than the ones used in inventory control literature (Graves & Willems, 2008) and benchmarks, e.g.,
+ORL (Balaji et al., 2019) or meta-RL (Rakelly et al., 2019) on MuJoCo (Todorov et al., 2012).
+
+Within each problem setting, a problem instance is further captured by the problem context. In
+inventory optimization, a forecast model is usually used to produce continuous demand forecasts
+and requires re-optimization of the inventory decisions based on the new distribution of the demand
+forecast, forming a group of closely related problem instances. We treat the parameters of the demand
+forecast as the primary problem context. In the experiment, demand forecasts are synthetically
+generated from a normal distribution: dt (µd, σd). For both problem settings, the mean and
+the standard deviation of the demand distribution are sampled from the meta uniform distributions: ∼N
+_µd_ (11, 20), σd (0, 5). Transport costs from inventories to customers are also subject to
+frequent changes. We model it via a normal distribution: ∼U _∼U_ **ct** (µc, σc) and use the distribution
+meanthis case, the context for each problem instance that µc ∼U(0.3, 0.7) as the secondary problem context parameter with fixed f (·, µt) needs to care about is ∼N _σ uct = 0 = (.µ2d. Thus in, σd, µc)._
+
+The second environment is portfolio optimization. A forecast model is ususally used to produce
+updated stock price forcasts and requires re-optimization of asset allocation decisions based on the
+new distribution of the price forecast, forming a group of closely related problem instances. We use
+an autoregressive process of order 2 to learn the price forecast model based on the real daily stock
+prices in the past 5 years. The last two-day historical prices are used as problem context parameters
+in our experiments. In this case the stock prices of first two days are served as the context U for f .
+
+Due to the space limitation, we postpone the detailed description of problems and additional performances comparison in Appendix E.
+
+**Baselines.** In the following experiments, we compare ν-SDDP with mainstream methodologies:
+
+-  SDDP-optimal: This is the SDDP solver that runs on each test problem instance until convergence,
+and is expected to produce the best solution and serve as the ground-truth for comparison.
+
+-  SDDP-mean: It is trained once based on the mean values of the problem parameter distribution,
+and the resulting V -function will be applied in all different test problem instances as a surrogate of
+the true V -function. This approach enjoys the fast runtime time during inference, but would yield
+suboptimal results as it cannot adapt to the change of the problem contexts.
+
+
+-----
+
+**Task** **Parameter Domain** **SDDP-mean** _ν-SDDP-fast_ _ν-SDDP-accurate_ **Best RL**
+
+demand mean (µd) 16.15 ± 18.61% 2.42 ± 1.84% **1.32 ± 1.13%** 38.42 ± 17.78%
+
+Sml-Sht joint (µd & σd) 20.93 ± 22.31% 4.77 ± 3.80% **1.81 ± 2.19%** 33.08 ± 8.05%
+
+
+demand mean (µd) 24.77 ± 27.04% 2.90 ± 1.11% **1.51 ± 1.08%** 17.81 ± 10.26%
+
+joint (µd & σd) 27.02 ± 29.04% 5.16 ± 3.22% **3.32 ± 3.06%** 50.19 ± 5.57%
+
+Mid-Long joint (µd & σd & µc) 29.99 ± 32.33% 7.05 ± 3.60% **3.29 ± 3.23%** 135.78 ± 17.12%
+
+Table 2: Average Error Ratio of Objective Value.
+
+**Task** **Parameter Domain** **SDDP-optimal** **SDDP-mean** _ν-SDDP-fast_ _ν-SDDP-accurate_ **Best RL**
+
+
+demand mean (µd) 6.80 ± 7.45 14.83 ± 17.90 9.60 ± 3.35 10.12 ± 4.03 **3.90± 8.39**
+
+Sml-Sht joint (µd & σd) 10.79 ± 19.75 19.83 ± 22.02 11.04 ± 10.83 13.73 ± 16.64 **1.183± 4.251**
+
+demand mean (µd) 51.96 ± 14.90 73.39 ± 59.90 44.27 ± 9.00 33.42 ± 18.01 **1.98± 2.65**
+
+joint (µd & σd) 54.89 ± 32.35 85.76 ± 77.62 45.53 ± 24.14 **36.31 ± 20.49** 205.51 ± 150.90
+
+Mid-Long joint (µd & σd & µc) 55.14 ± 38.93 86.26 ± 81.14 44.80 ± 28.57 **36.19 ± 20.08** 563.19 ± 114.03
+
+Table 3: Objective Value Variance.
+
+-  Model-free RL algorithms: Four RL algorithms, including DQN, DDPG, SAC, PPO, are directly
+trained online on the test instances without the budget limit of number of samples. So this setup
+has more privileges compared to typical meta-RL settings. We only report the best RL result
+in Table 2 and Table 3 due to the space limit. Detailed hyperparameter tuning along with the other
+performance results are reported in Appendix E.
+
+-  ν-SDDP-fast: This is our algorithm where the the meta-trained neural-based V -function is directly
+evaluated on each problem instance, which corresponds to Algorithm 2 without the last refinement
+step. In this case, only one forward pass of SDDP using the neural network predicted V -function is
+needed and the V -function will not be updated. The only overhead compared to SDDP-mean is the
+feed-forward time of neural network, which can be ignored compared to the expensive LP solving.
+
+-  ν-SDDP-accurate: It is our full algorithm presented in Algorithm 2 where the meta-trained
+neural-based V -function is further refined with 10 more iterations of vanilla SDDP algorithm.
+
+
+5.1 SOLUTION QUALITY COMPARISON
+
+For each new problem instance, we evaluate the algorithm performance by solving and evaluating
+the optimization objective value using the trained V -function model over 50 randomly sampled
+trajectories. We record the mean(candidate) and the standard derivation of these objective values
+produced by each candidate method outlined above. As SDDP-optimal is expected to produce the
+best solution, we use its mean on each problem instance to normalize the difference in solution quality.
+Specifically, error ratio of method candidate with respect to SDDP-optimal is:
+
+_φ =_ [mean][(]abs[candidate]{mean[)][−](SDDP-optimal[mean][(][SDDP-optimal])} [)] (11)
+
+**Inventory optimization: We report the average optimalty ratio of each method on the held-out**
+test problem set with 100 instances in Table 2. By comparison, ν-SDDP learns to adaptive to each
+problem instance, and thus is able to outperform these baselines by a significantly large margin. Also
+we show that by tuning the SDDP with the V -function initialized with the neural network generated
+cutting planes for just 10 more steps, we can further boost the performance (ν-SDDP-accurate). In
+addition, despite the recent reported promising results in applying deep RL algorithms in small-scale
+inventory optimization problems (Bertsimas & Kallus, 2020; Oroojlooyjadid et al., 2020; 2021;
+Hubbs et al., 2020; Balaji et al., 2019; Barat et al., 2019), it seems that these algorithms get worse
+results than SDDP and ν-SDDP variants when the problem size increases.
+
+We further report the average variance along with its standard deviation of different methods in Table 3.
+We find that generally our proposed ν-SDDP (both fast and accurate variants) can yield solutions
+with comparable variance compared to SDDP-optimal. SDDP-mean gets higher variance, as its
+performance purely depends on how close the sampled problem parameters are to their means.
+
+**Portfolio optimization: We evaluated the same metrics as above. We train a multi-dimensional**
+second-order autoregressive model for the selected US stocks over last 5 years as the price forecast
+model, and use either synthetic (low) or estimated (high) variance of the price to test different models.
+When the variance is high, the best policy found by SDDP-optimal is to buy (with appropriate but
+different asset allocations at different days) and hold for each problem instance. We found our
+
+
+-----
+
+1.75
+
+1.50
+
+1.25
+
+1.00
+
+0.75
+
+0.50
+
+0.25
+
+0.00
+
+
+10[2]
+
+10[1]
+
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0
+
+|Col1|Col2|Col3|Col4|Col5|Col6|-SDDP-|-accurate|
+|---|---|---|---|---|---|---|---|
+||||||S|-SDDP- -SDDP- DDP|accurate fast|
+|||||||||
+|||||||||
+
+
+-SDDP-accurate
+-SDDP-fast
+
+SDDP
+
+Time (s)
+
+|Col1|Col2|Col3|SDDP-2 SDDP-4|Col5|
+|---|---|---|---|---|
+||||SDDP-8 SDDP-16 SDDP-32 SDDP-mean||
+||||||
+||||||
+||||-SDDP-fast||
+||||||
+
+|Col1|SDD SDD|Col3|P-2 P-4|Col5|
+|---|---|---|---|---|
+|||SDD SDD|P-8 P-16||
+|||SDD SDD|P-32 P-mean||
+||-SD||DP-fast||
+||||||
+||||||
+
+
+10 1 10[0]
+
+SDDP-2
+SDDP-4
+SDDP-8
+SDDP-16
+SDDP-32
+SDDP-mean
+
+-SDDP-fast
+
+1 [0]
+
+Time (s)
+
+
+10[0] 10[1]
+
+SDDP-2
+SDDP-4
+SDDP-8
+SDDP-16
+SDDP-32
+SDDP-mean
+
+-SDDP-fast
+
+Time (s)
+
+
+Sml-Sht-joint (µd & σd) Mid-Lng-joint (µd & σd & µc) Mid-Lng-joint (µd & σd & µc)
+
+Figure 2: Time-solution trade-off. In the left two plots, each dot represents a problem instance with
+the runtime and the solution quality obtained by corresponding algorithm. The right most plot shows
+how ν-SDDP-accurate improves further when integrated into SDDP solver.
+
+175
+
+600
+
+400 75 20
+
+Error ratio/% 200 Error ratio/% 50 Error ratio/%10
+
+25
+
+
+20 40 60 80 100
+
+# generated cutting planes
+
+|lver.|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+|||||-|SDDP-fa|st|
+|||||SD|DP-mea|n|
+||||||||
+||||||||
+||||||||
+||||||||
+||||||||
+
+
+10 20 30 40 50
+
+# generated cutting planes
+
+
+50 100 150 200 250 300
+
+-SDDP-fast
+
+SDDP-mean
+
+Dimension of generated cutting planes
+
+
+Sml-Sht-joint (µd & σd) Mid-Lng-joint (µd & σd & µc)
+
+Figure 4: Performance of ν
+Figure 3: ν-SDDP-fast with different # generated cutting planes. SDDP with low-rank projection.
+
+_ν-SDDP is able to rediscover this policy; when the variance is low, our model is also able to achieve_
+much lower error ratio than SDDP-mean. We provide study details in Appendix E.2.
+
+5.2 TRADE-OFF BETWEEN RUNNING TIME AND ALGORITHM PERFORMANCE
+We study the trade-off between the runtime and the obtained solution quality in Figure 2 based on the
+problem instances in the test problem set. In addition to ν-SDDP-fast and SDDP-mean, we plot the
+solution quality and its runtime obtained after different number of iterations of SDDP (denoted as
+SDDP-n with n iterations). We observe that for the small-scale problem domain, SDDP-mean runs
+the fastest but with very high variance over the performance. For the large-scale problem domain,
+_ν-SDDP-fast achieves almost the same runtime as SDDP-mean (which roughly equals to the time_
+for one round of SDDP forward pass). Also for large instances, SDDP would need to spend 1 or 2
+magnitudes of runtime to match the performance of ν-SDDP-fast. If we leverage ν-SDDP-accurate to
+further update the solution in each test problem instance for just 10 iterations, we can further improve
+the solution quality. This suggests that our proposed ν-SDDP achieves better time-solution trade-offs.
+
+5.3 STUDY OF NUMBER OF GENERATED CUTTING PLANES
+In Figure 3 we show the performance of ν-SDDP-fast with respect to different model capacities,
+captured by the number of cutting planes the neural network can generate. A general trend indicates
+that more generated cutting planes would yield better solution quality. One exception lies in the
+Mid-Lng setting, where increasing the number of cutting planes beyond 64 would yield worse results.
+As we use the cutting planes generated by last n iterations of SDDP solving in training ν-SDDP-fast,
+our hypothesis is that the cutting planes generated by SDDP during the early stages in large problem
+settings would be of high variance and low-quality, which in turn provides noisy supervision. A more
+careful cutting plane pruning during the supervised learning stage would help resolve the problem.
+
+5.4 LOW-DIMENSION PROJECT PERFORMANCE
+Finally in Figure 4 we show the performance using low-rank projection. We believe that in reality
+customers from the same cluster (e.g., region/job based) would express similar behaviors, thus we
+created another synthetic environment where the customers form 4 clusters with equal size and
+thus have the same demand/transportation cost within each cluster. We can see that as long as the
+dimension goes above 80, our approach can automatically learn the low-dimension structure, and
+achieve much better performance than the baseline SDDP-mean. Given that the original decision
+problem is in 310-dimensional space, we expect having 310/4 dimensions would be enough, where
+the experimental results verified our hypothesis. We also show the low-dimension projection results
+for the problems with full-rank structure in Appendix E.1.
+
+
+-----
+
+ACKNOWLEDGMENTS
+
+The authors would like to thank Sherry Yang, Bethany Wang, Ben Sprecher and others from Cloud
+AI optimization, and the anonymous reviewers for their valuable feedbacks.
+
+REFERENCES
+
+Isac Arnekvist, Danica Kragic, and Johannes A Stork. Vpe: Variational policy embedding for transfer
+reinforcement learning. In 2019 International Conference on Robotics and Automation (ICRA), pp.
+36–42. IEEE, 2019.
+
+Daniel Avila, Anthony Papavasiliou, and Nils Lohndorf. Batch learning in stochastic dual dynamic¨
+programming. submitted, 2021.
+
+Bharathan Balaji, Jordan Bell-Masterson, Enes Bilgin, Andreas Damianou, Pablo Moreno Garcia,
+Arpit Jain, Runfei Luo, Alvaro Maggiar, Balakrishnan Narayanaswamy, and Chun Ye. Orl:
+Reinforcement learning benchmarks for online stochastic optimization problems. arXiv preprint
+_arXiv:1911.10641, 2019._
+
+G. Balazs, A. Gy´ orgy, and Cs. Szepesv¨ ari. Near-optimal max-affine estimators for convex regression.´
+In AISTATS, pp. 56–64, 2015.
+
+Gah-Yi Ban and Cynthia Rudin. The big data newsvendor: Practical insights from machine learning.
+_Operations Research, 67(1):90–108, 2019._
+
+Hanxi Bao, Zhiqiang Zhou, Georgios Kotsalis, Guanghui Lan, and Zhaohui Tong. Lignin valorization
+process control under feedstock uncertainty through a dynamic stochastic programming approach.
+_Reaction Chemistry & Engineering, 4(10):1740–1747, 2019._
+
+Souvik Barat, Harshad Khadilkar, Hardik Meisheri, Vinay Kulkarni, Vinita Baniwal, Prashant Kumar,
+and Monika Gajrani. Actor based simulation for closed loop control of supply chain using
+reinforcement learning. In Proceedings of the 18th International Conference on Autonomous
+_Agents and MultiAgent Systems, pp. 1802–1804, 2019._
+
+Gilles Bareilles, Yassine Laguel, Dmitry Grishchenko, Franck Iutzeler, and Jer´ ome Malick. Random-ˆ
+ized progressive hedging methods for multi-stage stochastic programming. Annals of Operations
+_Research, 295(2):535–560, 2020._
+
+Richard Bellman. Dynamic Programming. Princeton University Press, Princeton, NJ, USA, 1 edition,
+1957.
+
+Dimitri P Bertsekas. Dynamic Programming and Optimal Control, Two Volume Set. Athena Scientific,
+2001.
+
+Dimitris Bertsimas and Nathan Kallus. From predictive to prescriptive analytics. Management
+_Science, 66(3):1025–1044, 2020._
+
+J. Birge. The value of the stochastic solution in stochastic linear programs with fixed recourse.
+_Mathematical Programming, 24:314–325, 1982._
+
+John R Birge. Decomposition and partitioning methods for multistage stochastic linear programs.
+_Operations research, 33(5):989–1007, 1985._
+
+John R Birge and Francois Louveaux. Introduction to stochastic programming. Springer Science &
+Business Media, 2011.
+
+Binghong Chen, Bo Dai, Qinjie Lin, Guo Ye, Han Liu, and Le Song. Learning to plan in high
+dimensions via neural exploration-exploitation trees. In International Conference on Learning
+_Representations, 2019._
+
+George B Dantzig and Gerd Infanger. Multi-stage stochastic linear programs for portfolio optimization.
+_Annals of Operations Research, 45(1):59–76, 1993._
+
+
+-----
+
+Boris Defourny, Damien Ernst, and Louis Wehenkel. Multistage stochastic programming: A scenario
+tree based approach to planning under uncertainty. In Decision theory models for applications in
+_artificial intelligence: concepts and solutions, pp. 97–143. IGI Global, 2012._
+
+Rasool Fakoor, Pratik Chaudhari, Stefano Soatto, and Alexander J Smola. Meta-q-learning. arXiv
+_preprint arXiv:1910.00125, 2019._
+
+Christian F¨ullner and Steffen Rebennack. Stochastic dual dynamic programming - a review. 2021.
+
+Stephen C Graves and Sean P Willems. Strategic inventory placement in supply chains: Nonstationary
+demand. Manufacturing & service operations management, 10(2):278–287, 2008.
+
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. Soft actor-critic: Off-policy
+maximum entropy deep reinforcement learning with a stochastic actor. In International Conference
+_on Machine Learning, pp. 1861–1870. PMLR, 2018._
+
+Karol Hausman, Jost Tobias Springenberg, Ziyu Wang, Nicolas Heess, and Martin Riedmiller.
+Learning an embedding space for transferable robot skills. In International Conference on
+_Learning Representations, 2018._
+
+Pascal Van Hentenryck and Russell Bent. Online stochastic combinatorial optimization. The MIT
+Press, 2006.
+
+Ronald Hochreiter and Georg Ch Pflug. Financial scenario generation for stochastic multi-stage
+decision processes as facility location problems. Annals of Operations Research, 152(1):257–272,
+2007.
+
+Kjetil Høyland, Michal Kaut, and Stein W Wallace. A heuristic for moment-matching scenario
+generation. Computational optimization and applications, 24(2):169–185, 2003.
+
+Kai Huang and Shabbir Ahmed. The value of multistage stochastic programming in capacity planning
+under uncertainty. Operations Research, 57(4):893–904, 2009.
+
+Christian D Hubbs, Hector D Perez, Owais Sarwar, Nikolaos V Sahinidis, Ignacio E Grossmann,
+and John M Wassick. Or-gym: A reinforcement learning library for operations research problem.
+_arXiv preprint arXiv:2008.06319, 2020._
+
+Elias B Khalil, Hanjun Dai, Yuyu Zhang, Bistra Dilkina, and Le Song. Learning combinatorial
+optimization algorithms over graphs. In NIPS, 2017.
+
+K. Kim, M. O. Franz, and B. Scholkopf. Iterative kernel principal component analysis for image¨
+modeling. IEEE Transactions on Pattern Analysis and Machine Intelligence, 27(9):1351–1366,
+2005.
+
+Guanghui Lan. Complexity of stochastic dual dynamic programming. Mathematical Programming,
+pp. 1–38, 2020.
+
+Guanghui Lan and Zhiqiang Zhou. Dynamic stochastic approximation for multi-stage stochastic
+optimization. Mathematical Programming, pp. 1–46, 2020.
+
+Lin Lan, Zhenguo Li, Xiaohong Guan, and Pinghui Wang. Meta reinforcement learning with task
+embedding and shared policy. arXiv preprint arXiv:1905.06527, 2019.
+
+Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa,
+David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. In ICLR,
+2016.
+
+RE Mahony, U Helmke, and JB Moore. Gradient algorithms for principal component analysis. The
+_ANZIAM Journal, 37(4):430–450, 1996._
+
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Alex Graves, Ioannis Antonoglou, Daan
+Wierstra, and Martin Riedmiller. Playing atari with deep reinforcement learning. arXiv preprint
+_arXiv:1312.5602, 2013._
+
+
+-----
+
+Mila Nambiar, David Simchi-Levi, and He Wang. Dynamic inventory allocation with demand
+learning for seasonal goods. Production and Operations Management, 30(3):750–765, 2021.
+
+Jorge Nocedal and Stephen Wright. Numerical optimization. Springer Science & Business Media,
+2006.
+
+Afshin Oroojlooyjadid, Lawrence V Snyder, and Martin Taka´c. Applying deep learning to theˇ
+newsvendor problem. IISE Transactions, 52(4):444–463, 2020.
+
+Afshin Oroojlooyjadid, MohammadReza Nazari, Lawrence V Snyder, and Martin Taka´c. A deep q-ˇ
+network for the beer game: Deep reinforcement learning for inventory optimization. Manufacturing
+_& Service Operations Management, 2021._
+
+Mario V. F. Pereira and Leontina M. V. G. Pinto. Multi-stage stochastic optimization applied to
+energy planning. Mathematical Programming, 52(2):359–375, 1991.
+
+Gabriel Peyre, Marco Cuturi, et al. Computational optimal transport: With applications to data´
+science. Foundations and Trends® in Machine Learning, 11(5-6):355–607, 2019.
+
+Svetlozar T Rachev and Werner Romisch. Quantitative stability in stochastic programming: The¨
+method of probability metrics. Mathematics of Operations Research, 27(4):792–818, 2002.
+
+Roberta Raileanu, Max Goldstein, Arthur Szlam, and Rob Fergus. Fast adaptation to new environments via policy-dynamics value functions. In International Conference on Machine Learning, pp.
+7920–7931. PMLR, 2020.
+
+Kate Rakelly, Aurick Zhou, Chelsea Finn, Sergey Levine, and Deirdre Quillen. Efficient off-policy
+meta-reinforcement learning via probabilistic context variables. In International conference on
+_machine learning, pp. 5331–5340. PMLR, 2019._
+
+R Tyrrell Rockafellar and Roger J-B Wets. Scenarios and policy aggregation in optimization under
+uncertainty. Mathematics of operations research, 16(1):119–147, 1991.
+
+T. D. Sanger. Optimal unsupervised learning in a single-layer linear feedforward network. Neural
+_Networks, 2:459–473, 1989._
+
+John Schulman. Optimizing expectations: From deep reinforcement learning to stochastic computa_tion graphs. PhD thesis, UC Berkeley, 2016._
+
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy
+optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+
+Alexander Shapiro. On complexity of multistage stochastic programs. Operations Research Letters,
+34(1):1–8, 2006.
+
+Alexander Shapiro and Arkadi Nemirovski. On complexity of stochastic programming problems. In
+_Continuous optimization, pp. 111–146. Springer, 2005._
+
+Alexander Shapiro, Darinka Dentcheva, and Andrzej Ruszczynski.´ _Lectures on stochastic program-_
+_ming: modeling and theory. SIAM, 2014._
+
+Richard S Sutton and Andrew G Barto. Reinforcement learning: An introduction. MIT press, 2018.
+
+Emanuel Todorov, Tom Erez, and Yuval Tassa. Mujoco: A physics engine for model-based control.
+In 2012 IEEE/RSJ International Conference on Intelligent Robots and Systems, pp. 5026–5033.
+IEEE, 2012.
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz
+Kaiser, and Illia Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762, 2017.
+
+Bo Xie, Yingyu Liang, and Le Song. Scale up nonlinear component analysis with doubly stochastic
+gradients. CoRR, abs/1504.03655, 2015.
+
+
+-----
+
+# Appendix
+
+A MORE RELATED WORK
+
+To scale up the MSSO solvers, a variety of hand-designed approximation schemes have been
+investigated. One natural approach is restricting the size of the scenario tree using either a scenariowise or state-wise simplification. For example, as a scenario-wise approach, the expected value
+of perfect information (EVPI, (Birge, 1982; Hentenryck & Bent, 2006)) has been investigated for
+optimizing decision sequences within a scenario, which are then heuristically combined to form a
+full solution. Bareilles et al. (2020) instantiates EVPI by considering randomly selected scenarios
+in a progressive hedging algorithm (Rockafellar & Wets, 1991) with consensus combination. For
+a stage-wise approach, a two-stage model can be used as a surrogate, leveraging a bound on the
+approximation gap (Huang & Ahmed, 2009). All of these approximations rely on a fixed prior design
+for the reduction mechanism, and cannot adapt to a particular distribution of problem instances.
+Consequently, we do not expect such methods to be competitive with learning approaches that can
+adapt the approximation strategy to a given problem distribution.
+
+**Difference to Learning from Cuts in Avila et al. (2021):** the Batch Learning-SDDP (BL-SDDP)
+is released recently, where machine learning technique is also used for accelerating MSSO solver.
+However, this work is significant different from the proposed ν-SDDP:
+
+-  Firstly and most importantly, the setting and target of these works are orthogonal: the BL-SDDP
+speeds up the SDDP for a particular given MSSO problem via parallel computation; while ν-SDDP
+works for the meta-learning setting that learns from a dataset composed by plenty of MSSO
+problems sampled from a distribution, and the learning target is to generalize to new MSSO
+instances from the same distribution well;
+
+-  The technique contribution in BL-SDDP and ν-SDDP are different. Specifically, BL-SDDP exploits
+existing off-policy RL tricks for accelerating the SDDP Q-update; while we proposed two key
+techniques for quick initialization i), with predicted convex functions; ii), dimension reduction
+techniques, to generalize different MSSOs and alleviate curse-of-dimension issues in SDDP, which
+has not been explored in BL-SDDP.
+
+Despite being orthogonal, we think that the BL-SDDP can be used in our framework to provide
+better supervision for our cut function prediction, and serve as an alternative for fine-tuning after
+_ν-SDDP-fast._
+
+One potential drawback of our ν-SDDP is that, when the test instance distributions deviate a lot from
+what has been trained on, the neural initialization may predict cutting planes that are far away from the
+good ones, which may slow down the convergence of SDDP learning. Characterizing in-distribution
+v.s. out-of-distribution generalization and building the confidence measure is an important future
+work of current approach.
+
+B PRACTICAL PROBLEM INSTANTIATION
+
+In this section, we reformulate the inventory control and portfolio management as multi-stage
+stochastic decision problems.
+
+B.1 INVENTORY CONTROL
+
+Let S, V, C be the number of suppliers, inventories, and customers, respectively. We denote the
+parameters of the inventory control optimization as:
+
+
+
+-  procurement price matrix: pt ∈ R[SV][ ×][1];
+
+-  sales price matrix: qt ∈ R[V C][×][1];
+
+-  unit holding cost vector: ht ∈ R[V][ ×][1];
+
+-  demand vector: dt ∈ R[C][×][1];
+
+
+-----
+
+-  supplier capacity vector: ut ∈ R[S][×][1];
+
+-  inventory capacity vector: vt ∈ R[V][ ×][1];
+
+-  initial inventory vector w0 ∈ R[V][ ×][1].
+
+The decision variables of the inventory control optimization are denoted as:
+
+-  sales variable:at the beginning of stage yt ∈ R[V C] t[×]; [1], indicating the amount of sales from inventories to customers
+
+-  procurement variable:of stage t after sales; **zt ∈** R[SV][ ×][1], indicating the amount of procurement at the beginning
+
+-  inventory variable:after procurement. **wt ∈** R[V][ ×][1], indicating the inventory level at the beginning of stage t
+
+We denote the decision variables as
+_xt = [yt, zt, wt],_
+the state as
+_ξt = [pt, qt, ht, dt, ut, vt, w0]._
+
+The goal of inventory management is to maximize the net profit for each stage, i.e.,
+
+_c[⊤]t_ _[x][t]_ [:=][ p][⊤]t **[z][t]** [+][ h][⊤]t **[w][t]** _t_ **[y][t][,]**
+
+_[−]_ **[q][⊤]**
+and subject to the constraints of 1) supplier capacity; 2) inventory capacity; 3) customer demand, i.e.,
+
+
+**yt[v]** [⩽] **[d][t]** (demand bound constraints), (12)
+_v=1_
+
+X
+
+_V_
+
+**z[v]t** [⩽] **[u][t]** (supplier capacity constraints) (13)
+_v=1_
+
+X
+
+**wt ⩽** **vt** (inventory capacity constraints) (14)
+
+_C_
+
+_c=1_ **yt[c]** _[−]_ **[w][t][−][1]** [⩽] [0] (sales bounded by inventory) (15)
+
+X
+
+
+_χt (xt_ 1, ξt) = **yt, zt, wt**
+_−_
+
+
+
+**z[s]t**
+_s=1_ _[−]_
+
+X
+
+
+**yt[c]** [+][ w][t][−][1] [=][ w][t] (inventory transition) (16)
+_c=1_
+
+X
+
+
+**zt, yt, wt, ⩾** 0 (non-negativity constraints) _._ (17)
+
+
+To sum up, the optimization problem can be defined recursively as follows:
+
+min _c[⊤]1_ _[x]1_ [+][ E]ξ2 min + EξT min _, (18)_
+_x1_ _x2_ _[c][2][ (][ξ][2][)][⊤]_ _[x][2][ (][ξ][2][) +][ E][ξ][3]_ _· · ·_ _xT_ _[c][T][ (][ξ][T][ )][⊤]_ _[x][T][ (][ξ][T][ )]_ _· · ·_
+
+    
+
+s.t. _xt_ _χt(xt_ 1, ξt), _t =_ 1, . . ., T _._ (19)
+_∈_ _−_ _∀_ _{_ _}_
+
+In fact, the inventory control problem (18) is simplified the multi-stage stochastic decision problem (3)
+by considering state independent transition.
+
+
+B.2 PORTFOLIO MANAGEMENT
+
+Let I be the number of assets, e.g., stocks, being managed. We denote the parameters of the portfolio
+optimization are:
+
+-  ask (price to pay for buying) open price vector pt ∈ R[I][×][1];
+
+-  bid (price to pay for sales) open price vector qt ∈ R[I][×][1];
+
+-  initial amount of investment vector w0 ∈ R[I][×][1];
+
+-  initial amount of cash r0 ∈ R+.
+
+
+-----
+
+The decision variables of the portfolio optimization are:
+
+-  sales vector yt ∈ R[I][×][1], indicating the amount of sales of asset i at the beginning of stage t.
+
+-  purchase vectort; **zt ∈** R[I][×][1], indicating the amount of procurement at the beginning of stage
+
+-  holding vectorpurchase and sales; wt ∈ R[I][×][1], indicating the amount of assets at the beginning of stage t after
+
+-  cash scalar rt, indicating the amount of cash at the beginning of stage t.
+
+We denote the decision variables as
+_xt = [yt, zt, wt, rt],_
+and the state as
+_ξt = [pt, qt] ._
+The goal of portfolio optimization is to maximize the net profit i.e.,
+
+_c[⊤]t_ _[x][t]_ [:=][ p][⊤]t **[z][t]** _t_ **[y][t][,]**
+
+_[−]_ **[q][⊤]**
+subject to the constraints of initial investment and the market prices, i.e.,
+
+
+
+**[y][t][ −]** **[w][t][−][1][ ⩽]** [0] (individual stock sales constraints) (20)
+
+**p[⊤]t** **[z][t]** _[−]_ _[r][t][−][1]_ [⩽] [0] (stock purchase constraints) (21)
+**yt** **zt + wt** _rt_ 1 = 0 (22)
+_−_ _−_ _−_
+(individual stock position transition)
+
+**q[⊤]t** **[y][t]** _t_ **[z][t]** [+][ r][t][−][1] [= 0] (23)
+
+_[−]_ **[p][⊤]** _[−]_ _[r][t]_
+
+(cash position transition) _._
+
+
+
+_χt (xt_ 1, ξt) := **yt, zt, wt, rt**
+_−_
+
+
+
+With the ct and χt (xt 1, ξt) defined above, we initiate the multi-stage stochastic decision problem (3)
+_−_
+for portfolio management.
+
+C DETAILS ON STOCHASTIC DUAL DYNAMIC PROGRAMMING
+
+We have introduced the SDDP in Section 2. In this section, we provide the derivation of the updates
+in forward and backward pass,
+
+-  Forward pass, updating the action according to (5) based on the current estimation of the value
+function at each stage via (4). Specifically, for i-th iteration of t-stage with sample ξt[j][, we solve the]
+optimization
+
+_⊤_
+_xt ∈_ _xt∈argminχt(xt−1,ξt[j][)]_ _ct_ ξt[j] _xt + Vt[i]+1_ [(][x][t][)][.] (24)
+
+In fact, the V -function is a convex piece-wise function. Specifically, for i-th iteration of t-stage, we
+have
+
+_Vt[i]+1_ [(][x][t][) = max] _βt[k]+1_ _⊤_ _xt + αtk+1_ _,_
+_k⩽i_
+
+Then, we can rewrite the optimization (24) into standard linear programming,n   o _i.e.,_
+
+_⊤_
+min _ct_ _ξt[j]_ _xt + θt+1_ (25)
+_xt,θt+1_
+ 
+
+s.t. _At_ _ξt[j]_ _xt = bt_ _ξt[j]_ _−_ _Bt−1_ _ξt[j]_ _xt−1,_ (26)
+
+_−_ βt[k]+1 _⊤_ _xt + θt+1 ⩾_ _αtk+1[,][ ∀][k][ = 1]_ _[, . . ., i,]_ (27)
+
+_xt ⩾ _ 0,  (28)
+
+
+-----
+
+-  Backward pass, updating the estimation of the value function via the dual of (25), i.e., for i-th
+iteration of t-stage with sample ξt[j][, we calculate]
+
+
+_i_
+
+_⊤_
+
+maxωt,ρt _bt_ _ξt[j]_ _−_ _Bt−1_ _ξt[j]_ _ωt +_ _ρ[k]t_ _[α][k]t+1[,]_ (29)
+
+_k=1_
+
+     X
+
+_i_
+
+s.t. _At_ _ξt[j]_ _⊤_ _ωt −_ _k=1_ _ρ[k]t_ _βt[k]+1_ _⊤_ ⩽ _ct_ _ξt[j]_ _,_ (30)
+  X     
+
+_−1 ⩽_ _ρ[⊤]t_ **[1][ ⩽]** [1][.] (31)
+
+Then, we have the
+_Vt[i][+1]_ (xt 1) = max _Vt[i]_ [(][x][t][−][1][)][, v]t[i][+1] (xt 1) _,_ (32)
+_−_ _−_
+which is still convex piece-wise linear function, with
+
+
+_vt[i][+1]_ (xt−1) := _βt[i][+1]_ _⊤_ _xt−1 + αti+1,_ (33)
+
+where
+
+_m_   
+
+_βt[i][+1]_ _⊤_ := 1m _−Bt−1_ _ξt[j]_ _⊤_ _ωt_ _ξt[j]_ _,_
+   Xj=1     []
+
+_m_ _i_
+
+_⊤_
+
+_αt[i][+1]_ := m[1] _bt_ _ξt[j]_ _ωt_ _ξt[j]_ + _αt[k]+1_ _ξt[j]_ _ρ[k]t_ _ξt[j]_ _,_
+
+_j=1_ " _k=1_
+
+X     X    [#]
+
+with (ωt (ξt), ρt (ξt)) as the optimal dual solution with realization ξt.
+
+
+In fact, although we split the forward and backward pass, in our implementation, we exploit the
+primal-dual method for LP, which provides both optimal primal and dual variables, saving the
+computation cost.
+
+Note that SDDP can be interpreted as a form of TD-learning using a non-parametric piecewise linear
+model for the V -function. It exploits the property induced by the parametrization of value functions,
+leading to the update w.r.t. V -function via adding dual component by exploiting the piecewise linear
+structure in a closed-form functional update. That is, TD-learning (Sutton & Barto, 2018; Bertsekas,
+2001) essentially conducts stochastic approximate dynamic programming based on the Bellman
+recursion (Bellman, 1957).
+
+D NEURAL NETWORK AND LEARNING SYSTEM DESIGN
+
+**Neural network design:** In Figure 5 we present the design of the neural network that tries to
+approximate the V -function. The neural network takes two components as input, namely the feature
+vector that represents the problem configuration, and the integer that represents the current stage
+of the multi-stage solving process. The stage index is converted into ‘time-encoding‘, which is a
+128-dimensional learnable vector. We use the parameters of distributions as the feature of φ (P (ξ))
+for simplicity. The characteristic function or kernel embedding of distribution can be also used here.
+The feature vector will also be projected to the same dimension and added together with the time
+encoding to form as the input to the MLP. The output of MLP is a matrix of size k × (N + 1),
+where k is the number of linear pieces, N is the number of variable (and we also need one additional
+dimension for intercept). The result is a piecewise linear function that specifies a convex lowerbound.
+We show an illustration of 2D case on the right part of the Figure 5.
+
+This neural network architecture is expected to adapt to different problem configurations and time
+steps, so as to have the generalization and transferability ability across different problem configurations.
+
+**Remark (Stochastic gradient computation):** Aside from Gψ, unbiased gradient estimates for
+all other variables in the loss (9) can be recovered straightforwardly. However, Gψ requires special
+treatment since we would like it to satisfy the constraints G[⊤]ψ _[G][ψ][ =][ I][p][. Penalty method is one of the]_
+
+2
+choices, which switches the constraints to a penalty in objective, i.e., η _G[⊤]ψ_ _[G][ψ][ −]_ _[I][p]_
+
+2[. However,]
+the solution satisfies the constraints, only if η →∞ (Nocedal & Wright, 2006, Chapter 17). We
+
+
+-----
+
+|Problem Context { } Linear Projection|Col2|
+|---|---|
+
+
+Problem Context
+
+{         }
+
+Linear Projection
+
+MLP
+
+_V (x)_
+
+Step Index
+
+Time Position
+Encoding _x_
+
+
+Figure 5: Hypernet style parameterization of neural V -function.
+
+|Task params|V-func params|
+|---|---|
+
+
+|SDDP Forward Training Examples Training Tasks pass Task V-func Trajectory Sampling V-functions params params Task instance Task V-func Backward params params Task instance pass ... ... SDDP Validation Examples Sampling Validation Tasks Task V-func SDDP params params Task instance ... Task ... 𝞶-SDDP Inference 𝞶-SDDP Training Test Tasks Forward pass Task instance ... Neural Neural V-Functions V-Functions|Col2|Col3|Col4|Col5|Col6|Col7|
+|---|---|---|---|---|---|---|
+|Task Sampling|||||||
+||𝞶-SDDP Inference Forward pass Neural V-Functions|||𝞶-SDDP Training Neural V-Functions|||
+|||Forward pass|||||
+|||Neural V-Functions|||Neural V-Functions||
+||||||||
+
+
+
+Figure 6: Illustration of the overall system design.
+
+derive the gradient over the Stiefel manifold (Mahony et al., 1996), which ensures the orthonormal
+constraints,
+gradGψ _ℓ_ = _I_ _G[⊤]ψ_ _[G][ψ]_ ΞG[⊤]ψ _[,]_ (34)
+_−_
+
+with Ξ := _t_ _ni=1_ _mj_ _[x]tj[i][∗]_ _x[i]tj[∗]_ _⊤. Note that this gradient can be estimated stochastically since _  Ξ
+
+can be recognized as an expectation over samples.
+
+The gradients on Stiefel manifold[P] P P    _G|G[⊤]G = I_ can be found in Mahony et al. (1996). We derive
+the gradient (34) via Lagrangian for self-completeness, following Xie et al. (2015).
+
+
+
+Consider the Lagrangian as
+
+_L (Gψ, Λ) =_ _ℓ_ (W ; z) + tr _G[⊤]ψ_ _[G][ψ]_ Λ _,_
+
+_zX∈Dn_    _[−]_ _[I]_ 
+
+where the Λ is the Lagrangian multiplier. Then, the gradient of the Lagrangian w.r.t. Gψ is
+
+_∇Gψ_ _L = 2ΞG[⊤]ψ_ [+][ G]ψ[⊤] Λ + Λ[⊤][] _._ (35)
+With the optimality condition
+ 
+
+_G[⊤]ψ_ _[G][ψ][ −]_ _[I][ = 0]_
+
+_Gψ,ΛL = 0_ 2GψΞG[⊤]ψ [=] Λ + Λ[⊤][] _._ (36)
+_∇_ _⇒_ (2ΞG[⊤]ψ [+][ G]ψ[⊤] Λ + Λ[⊤][] = 0 _⇒−_
+
+ 
+
+Plug (36) into the gradient (35), we have the optimality condition, 
+_I_ _G[⊤]ψ_ _[G][ψ]_ ΞG[⊤]ψ = 0. (37)
+_−_
+  gradGψ
+| {z }
+
+To better numerical isolation of the individual eigenvectors, we can exploit Gram-Schmidt process
+into the gradient estimator (34), which leads to the generalized Hebbian rule (Sanger, 1989; Kim
+et al., 2005; Xie et al., 2015),
+grad^Gψ _ℓ_ = _I −LT_ _G[⊤]ψ_ _[G][ψ]_ ΞG[⊤]ψ [= Ξ][G]ψ[⊤] _[−LT]_ _G[⊤]ψ_ _[G][ψ]_ ΞG[⊤]ψ _[.]_ (38)
+
+The ( ) extracts the lower triangular part of a matrix, setting the upper triangular part and diagonal       
+_LT_ _·_
+to zero, therefore, is mimicking the Gram-Schmidt process to subtracts the contributions from each
+
+
+-----
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+10 1 10
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||SDDP- SDDP- SDDP-|2 4 8||
+|||SDDP- SDDP-|16 32||
+||SDDP- -SDD|SDDP- -SDD|mean P-fast||
+||||||
+||||||
+
+
+Time (s)
+
+
+10 1 10[0]
+
+|Col1|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||SDDP-2 SDDP-4 SDDP-8||
+||||SDDP-16 SDDP-32||
+||||SDDP-mean -SDDP-fast||
+||||||
+||||||
+
+
+Time (s)
+
+
+
+1.75
+
+1.50
+
+1.25
+
+1.00
+
+0.75
+
+0.50
+
+0.25
+
+0.00
+
+
+1.4
+
+1.2
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+1.4
+
+1.2
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+|Col1|SDDP-2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|||SDDP-4 SDDP-8|||
+|||SDDP-16|||
+|||SDDP-32 SDDP-mea|n||
+||-SDDP-fa||st||
+||||||
+||||||
+
+|n (µd)|Sml-|Col3|-Sht-join|Col5|
+|---|---|---|---|---|
+||SDDP-2||||
+|||SDDP-4 SDDP-8|||
+|||SDDP-1|6||
+|||SDDP-3 SDDP-m|2 ean||
+||-SDDP||-fast||
+||||||
+||||||
+
+|d & σd|d)|Col3|Col4|Col5|
+|---|---|---|---|---|
+||||||
+|||SDD SDD SDD|P-2 P-4 P-8||
+|||SDD|P-16||
+|||SDD SDD|P-32 P-mean||
+||-SD||DP-fast||
+||||||
+||||||
+
+
+10[0] 10[1]
+
+SDDP-2
+SDDP-4
+SDDP-8
+SDDP-16
+SDDP-32
+SDDP-mean
+
+-SDDP-fast
+
+Time (s)
+
+
+10[0] 10[1]
+
+SDDP-2
+SDDP-4
+SDDP-8
+SDDP-16
+SDDP-32
+SDDP-mean
+
+-SDDP-fast
+
+Time (s)
+
+
+10[0] 10[1]
+
+SDDP-2
+SDDP-4
+SDDP-8
+SDDP-16
+SDDP-32
+SDDP-mean
+
+-SDDP-fast
+
+Time (s)
+
+
+Mid-Lng-mean (µd) Mid-Lng-joint (µd & σd) Mid-Lng-joint (µd & σd & µc)
+
+
+Figure 7: Time-solution trade-off.
+
+other eigenvectors to achieve orthonormality. Sanger (1989) shows that the updates with (38) will
+converges to the first p eigenvectors of Ξ.
+
+
+**System design:** Next we present the entire system end-to-end in Figure 6.
+
+-  Task sampling: the task sampling component draws the tasks from the same meta distribution. Note
+that each task is a specification of the distribution (e.g., the center of Gaussian distribution), where
+the specification follows the same meta distribution.
+
+
+
+-  We split the task instances into train, validation and test splits:
+
+**– Train: We solve each task instance using SDDP. During the solving of SDDP we need to**
+perform multiple rounds of forward pass and backward pass to update the cutting planes
+(V -functions), as well as sampling trajectories for monte-carlo approximation. The learned
+neural V -function will be used as initialization. After SDDP solving converges, we collect the
+corresponding task instance specification (parameters) and the resulting cutting planes at each
+stage to serve as the training supervision for our neural network module.
+
+**– Validation: We do the same thing for validation tasks, and during training of neural network**
+we will dump the models that have the best validation loss.
+
+**– Test: In the test stage, we also solve the SDDP until convergence as groundtruth, which is only**
+used for evaluating the quality of different algorithms. For our neural network approach, we
+can generate the convex lower-bound using the trained neural nework, conditioning on each
+pair of (test task instance specification, stage index). With the predicted V -functions, we can
+run the forward pass only once to retrieve the solution at each stage. Finally we can evaluate
+the quality of the obtained solution with respect to the optimal ones obtained by SDDP.
+
+
+E MORE EXPERIMENTS
+
+E.1 INVENTORY OPTIMIZATION
+
+
+E.1.1 ADDITIONAL RESULTS ON ν-SDDP
+
+We first show the full results of time-solution quality trade-off in Figure 7, and how ν-SDDP-accurate
+improves from ν-SDDP-fast with better trade-off than SDDP solver iterations in Figure 8. We can
+see the conclution holds for all the settings, where our proposed ν-SDDP achieves better trade-off.
+
+Then we also show the ablation results of using different number of predicted cutting planes in
+Figure 9. We can see in all settings, generally the more the cutting planes the better the results. This
+suggests that in higher dimensional case it might be harder to obtain high quality cutting planes, and
+
+
+-----
+
+10[2]
+
+10[1]
+
+
+10[2]
+
+10[1]
+
+
+10[2]
+
+10[1]
+
+
+6 8 10 12 14
+
+|Col1|Col2|Col3|Col4|Col5|Col6|DDP-accu DDP-fast DP|rate|
+|---|---|---|---|---|---|---|---|
+|||||||||
+|||||||||
+
+
+-SDDP-accurate
+-SDDP-fast
+
+SDDP
+
+Time (s)
+
+
+0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5
+
+|Col1|Col2|Col3|Col4|Col5|Col6|DDP-accu DDP-fast P|rate|
+|---|---|---|---|---|---|---|---|
+|||||||||
+|||||||||
+
+
+-SDDP-accurate
+-SDDP-fast
+
+SDDP
+
+Time (s)
+
+
+0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0
+
+|Col1|Col2|Col3|Col4|Col5|Col6|-SDDP- -SDDP- SDDP|accurate fast|
+|---|---|---|---|---|---|---|---|
+|||||||||
+|||||||||
+
+
+-SDDP-accurate
+-SDDP-fast
+
+SDDP
+
+Time (s)
+
+
+Mid-Lng-mean (µd) Mid-Lng-joint (µd & σd) Mid-Lng-joint (µd & σd & µc)
+
+Figure 8: Time-solution trade-off when ν-SDDP-accurate improves the solution from ν-SDDP-fast
+further.
+
+
+1000
+
+800
+
+600
+
+400
+
+200
+
+
+1000
+
+800
+
+600
+
+400
+
+200
+
+
+10 20 30 40 50
+
+# generated cutting planes
+
+
+10 20 30 40 50
+
+# generated cutting planes
+
+
+Sml-Sht-mean (µd) Sml-Sht-joint (µd & σd)
+
+
+140
+
+120
+
+100
+
+80
+
+60
+
+40
+
+20
+
+
+20 40 60 80 100
+
+# generated cutting planes
+
+
+20 40 60 80 100
+
+# generated cutting planes
+
+
+20 40 60 80 100
+
+# generated cutting planes
+
+
+Mid-Lng-mean (µd) Mid-Lng-joint (µd & σd) Mid-Lng-joint (µd & σd & µc)
+
+
+Figure 9: Ablation: number of generated cutting planes.
+
+due to the convex-lowerbound nature of the V -function, having a bad cutting plane could possibly
+hurt the overall quality. How to prune and prioritize the cutting planes will be an important direction
+for future works.
+
+We provide the full ablation results of doing low-dimensional projection for solving SDDP in
+Figure 10. The trend generally agrees with our expectation that, there is a trade-off of the lowdimensionality that would balance the quality of LP solving and the difficulty of neural network
+learning.
+
+**Longer horizon: we further experiment with the Mid-Lng-joint (µd&σd&µc) by varying T in**
+_{10, 20, 30, 40, 50}. See Table 4 for more information._
+
+
+Table 4: Average error ratio of ν-SDDP-fast on Mid-Lng-joint (µd&σd&µc) setting with varying T .
+
+Horizon length 10 20 30 40 50
+
+Average error ratio 3.29% 3.47% 3.53% 2.65% 0.82%
+
+
+E.1.2 ADDITIONAL RESULTS ON MODEL-FREE RL ALGORITHMS
+
+We implemented the inventory control problem as an environment in the Tensorflow TF-Agents
+library and used the implementation of DQN (Mnih et al., 2013)[1], DDPG (Lillicrap et al., 2016),
+PPO (Schulman et al., 2017) and SAC (Haarnoja et al., 2018) from the TF-Agent to evaluate the
+performance of these four model-free RL algorithms. Note that the TF-Agent environment follows a
+
+
+1We provided a simple extension of DQN to support multi-dimensional actions.
+
+
+-----
+
+17
+
+16
+
+15
+
+14
+
+13
+
+12
+
+11
+
+10
+
+9
+
+280 285 290 295 300 305 310
+
+Dimension of generated cutting planes
+
+
+3.2
+
+3.0
+
+2.8
+
+2.6
+
+2.4
+
+2.2
+
+2.0
+
+280 285 290 295 300 305 310
+
+Dimension of generated cutting planes
+
+
+6.4
+
+6.2
+
+6.0
+
+5.8
+
+5.6
+
+5.4
+
+280 285 290 295 300 305 310
+
+Dimension of generated cutting planes
+
+
+Mid-Lng-mean (µd) Mid-Lng-joint (µd & σd) Mid-Lng-joint (µd & σd & µc)
+
+Figure 10: Low-dim projection results when the underlying problem does not have a low-rank
+structure.
+
+
+**Task** **Parameter Domain** **DQN** **DDPG** **PPO** **SAC**
+
+demand mean (µd) 1157.86 ± 452.50% 28.62 ± 8.69 % 2849.931 ± 829.91% 38.42 ± 17.78%
+
+Sml-Sht joint (µd & σd) 3609.62 ± 912.54% 100.00 ± 0.00 % 3273.71 ± 953.13% 33.08 ± 8.05%
+
+
+demand mean (µd) 5414.15 ± 1476.21% 100.00 ± 0.00% 5411.16 ± 1474.19% 17.81 ± 10.26%
+
+joint (µd & σd) 5739.68 ± 1584.63% 100.00 ± 0.00% 5734.75± 1582.68 % 50.19 ± 5.57%
+
+joint (µd & σd & µc) 6382.87 ± 2553.527% 100.00 ± 0.00% 6377.93 ±2550.03 % 135.78 ± 17.12%
+
+Table 6: Average Error Ratio of Objective Value.
+
+
+MDP formulation. When adapting to the inventory control problem, the states of the environment
+are the levels of the inventories and the actions are the amount of procurement and sales. As a
+comparison, the states and actions in the MDP formulation collectively form the decision varialbles
+in the MSSO formulation and their relationship – inventory level transition, is captured as a linear
+constraint. Following Schulman (2016), we included the timestep into state in these RL algorithms to
+have non-stationary policies for finite-horizon problems. In the experiments, input parameters for
+each problem domain and instances are normalized for model training for policy gradient algorithms
+and the results are scaled back for reporting.
+
+We report the average error ratio of these four RL algorithms in Table. 6 along with the average
+variance in Table. 7. Note that the SAC performance is also reported in the main text in Table. 2 and
+Table. 3. The model used in the evaluation is selected based on the best mean return over the 50
+trajectories from the validation environment, based on which the hyperparameters are also tuned. We
+report the selected hyperparameters for each algorithm in Table. 5. We use MLP with 3 layers as the
+_Q-network for DQN, as the actor network and the critic/value network for SAC, PPO and DDPG. All_
+networks have the same learning rate and with a dropout parameter as 0.001.
+
+Table 5: Hyperparameter Selections.
+
+
+|Algorithm|Hyperparameters|
+|---|---|
+|SAC|learning rate(0.01), num MLP units (50), target update period (5), target update tau (0.5)|
+|PPO|learning rate(0.001), num MLP units (50), target update period (5), target update tau (0.5)|
+|DQN|learning rate(0.01), num MLP units (100), target update period (5), target update tau (0.5)|
+|DDPG|learning rate(0.001), num MLP units (50), ou stddev (0.2), ou damping (0.15)|
+
+
+We see that SAC performs the best among the four algorithms in terms of solution quality. All the
+algorithms can not scale to Mid-Long setting. DDPG, for example, produces a trivial policy of no
+action in most of setups (thus has an error ratio of 100). The policies learned by DQN and PPO are
+even worse, producing negative returns[2].
+
+To understand the behavior of each RL algorithm, we plotted the convergence of the average mean
+returns in Figure. 11 for the Sml-Sht task. In each plot, we show four runs of the respective algorithm
+under the selected hparameter. We could see that though SAC converges the slowest, it is able to
+
+2Negative returns are caused by over-procurement in the early stages and the leftover inventory at the last
+stage.
+
+
+-----
+
+**Task** **Parameter Domain** **DQN** **DDPG** **PPO** **SAC**
+
+demand mean (µd) 46.32 ± 85.90 0.34 ± 0.22 119.08 ±112.00 3.90± 8.39
+
+Sml-Sht joint (µd & σd) 86.097 ± 100.81 0.00 ± 0.00 169.08 ± 147.24 1.183± 4.251
+
+
+demand mean (µd) 1334.30 ± 270.00 0.00 ± 0.00 339.97 ± 620.01 1.98± 2.65
+
+joint (µd & σd) 1983.71 ± 1874.61 0.00 ± 0.00 461.27 ± 1323.24 205.51 ± 150.90
+
+joint (µd & σd & µc) 1983.74 ± 1874.65 0.00 ± 0.00 462.74 ± 1332.30 563.19 ± 114.03
+
+Table 7: Objective Value Variance.
+
+
+SAC PPO DQN DDPG
+
+
+Figure 11: Average mean return (values are normalized with optimal mean value as 1.736 ).
+
+achieve the best return. For all algorithms, their performance is very sensitive to initialization. DDPG,
+for example, has three runs with 0 return, while one run with a return of 1.2. For PPO and DQN, the
+average mean returns are both negative .
+
+We further check the performance of these algorithms in the validation environment based on the
+same problem instance (i.e., the same problem parameters) as in SDDP-mean, where the model is
+trained and selected. We expect this would give the performance upper bound for these algorithms.
+Again similar results are observed. The best return mean over the validation environment is −38.51
+for PPO, 0.95 for DQN, 1.31 for SAC and 1.41 for DDPG, while the SDDP optimal return value
+is 1.736. It is also worth noting that DDPG shows the strongest sensitivity to initialization and its
+performance drops quickly when the problem domain scales up.
+
+
+E.2 PORTFOLIO OPTIMIZATION
+
+We use the daily opening prices from selected Nasdaq stocks in our case study. This implies that
+the asset allocation and rebalancing in our portfolio optimization is performed once at each stock
+market opening day. We first learn a probabilistic forecasting model from the historical prices ranging
+from 2015-1-1 to 2020-01-01. Then the forecasted trajectories are sampled from the model for the
+stochastic optimization. Since the ask price is always slightly higher than the bid price, at most one
+of the buying or selling operation will be performed for each stock, but not both, on a given day.
+
+
+E.2.1 STOCK PRICE FORECAST
+
+
+The original model for portfolio management in Appendix B.2 is too restrict. We generalize the
+model with autoregressive process (AR) of order o with independent noise is used to model and
+predict the stock price:
+
+_o_
+
+**pt =** (φipt _i + ϵ[r]i_ [) +][ ϵ][o]
+
+_−_
+_i=1_
+
+X
+
+where φi is the autoregressive coefficient and ϵ[r] _i_ (0, σi[2][)][ is a white noise of order][ i][.][ ϵ][o][ ∼]
+_N_ (0, σo[2][)][ is a white noise of the observation. Each noise term is] ∼N _[ ϵ][ assumed to be independent. It is]_
+easy to check that the MSSO formulation for portfolio management is still valid by replacing the
+expectation for ϵ, and setting the concatenate state [p[t]t[−][o], qt], where p[t]t[−][o] := [pt _i][o]i=0[.]_
+_−_
+
+We use variational inference to fit the model. A variational loss function (i.e., the negative evidence
+lower bound (ELBO)) is minimized to fit the approximate posterior distributions for the above
+parameters. Then we use the posterior samples as inputs for forecasting. In our study, we have studied
+the forecasting performance with different length of history, different orders of the AR process and
+different groups of stocks. Figure. 12 shows the ELBO loss convergence behavior under different
+setups. As we can see, AR models with lower orders converge faster and smoother.
+
+
+-----
+
+(a) 5 Stocks with AR order = 2 (b) 5 Stocks with AR order = 5 (c) 8 Stock Clusters with AR order = 5
+
+Figure 12: Evidence lower bound (ELBO) loss curve.
+
+AR order = 2 AR order = 5
+
+Figure 13: Probablistic Forecast of 5 Stocks with Different AR Orders.
+
+We further compare the forecasting performance with different AR orders. Figure. 13 plots a sideby-side comparison of the forecasted mean trajectory with a confidence interval of two standard
+deviations (95%) for 5 randomly selected stocks (with tickers GOOG, COKE, LOW, JPM, BBBY)
+with AR order of 2 and 5 from 2016-12-27 for 5 trading days. As we could see, a higher AR order (5)
+provides more time-variation in forecast and closer match to the ground truth.
+
+In addition, we cluster the stocks based on their price time series (i.e., each stock is represented by
+a T -dimensional vector in the clustering algorithm, where T is the number of days in the study).
+We randomly selected 1000 stocks from Nasdaq which are active from 2019-1-1 to 2020-1-1 and
+performed k-means clustering to form 8 clusters of stocks. We take the cluster center time series as
+the training input. Figure. 12(c) shows the ELBO loss convergence of an AR process of order 5 based
+on these 8 cluster center time series. As we see, the stock cluster time series converge smoother and
+faster compared with the individual stocks as the aggregated stock series are less fluctuated. The
+forecasting trajectories of these 8 stock clusters starting from 2019-03-14 are plotted in Figure. 14.
+
+E.2.2 SOLUTION QUALITY COMPARISON
+
+Table 8: Portfolio optimization with synthetic standard deviation of stock price.
+
+|Col1|SDDP-mean ν-SDDP-zeroshot|
+|---|---|
+|5 stocks (STD scaled by 0.01)|290.05 ± 221.92 % 1.72 ± 4.39 %|
+|5 stocks (STD scaled by 0.001)|271.65 ± 221.13 % 1.84 ± 3.67 %|
+|8 clusters (STD scaled by 0.1)|69.18 77.47 % 1.43e−6 4.30e−5% ± ±|
+|8 clusters (STD scaled by 0.01)|65.81 77.33 % 3.25e−6 3.44e−5% ± ±|
+
+
+-----
+
+Figure 14: Probablistic Forecast of 8 Stock Clusters.
+
+With an AR forecast model of order o, the problem context of a protfolio optimizaton instance is then
+captured by the joint distribution of the historical stock prices over a window of o days. We learn
+this distribution using kernel density estimation. To sample the scenarios for each stage using the
+AR model during training for both SDDP and ν-SDDP, we randomly select the observations from
+the previous stage to seed the observation sampling in the next stage. Also we approximate the state
+representation by dropping the term of p[t]t[−][o]. With such treatments, we can obtain SDDP results with
+manageable computation cost. We compare the performance of SDDP-optimal, SDDP-mean and
+_ν-SDDP-zeroshot under different forecasting models for a horizon of 5 trading days. First we observe_
+that using the AR model with order 2 as the forecasting model, as suggested by the work (Dantzig
+& Infanger, 1993), produce a very simple forecasting distribution where the mean is monotonic
+over the forecasting horizon. As a result, all the algorithms will lead to a simple “buy and hold”
+policy which make no difference in solution quality. We further increase the AR order gradually
+
+
+-----
+
+from 2 to 5 and find AR order at 5 produces sufficient time variation that better fits the ground truth.
+Second we observe that the variance learned from the real stock data based on variational inference is
+significant. With high variance, both SDDP-optimal and ν-SDDP-zeroshot would achieve the similar
+result, which is obtained by a similar “buy and hold” policy. To make the task more challenging, we
+rescale the standard deviation (STD) of stock price by a factor in Table 8 for both the 5-stock case
+and 1000-stock case with 8 clusters situations. For the cluster case, the ν-SDDP-zeroshot can achieve
+almost the same performance as the SDDP-optimal.
+
+E.3 COMPUTATION RESOURCE
+
+For the SDDP algorithms we run using multi-core CPUs, where the LP solving can be parallelized at
+each stage. For RL based approaches and our ν-SDDP, we train using a single V100 GPU for each
+hparameter configuration for at most 1 day or till convergence.
+
+
+-----
+

@@ -1,0 +1,1420 @@
+# HYBRID MEMOISED WAKE-SLEEP: APPROXIMATE IN## FERENCE AT THE DISCRETE-CONTINUOUS INTERFACE
+
+**Tuan Anh Le[1]** **Katherine M. Collins[1]** **Luke Hewitt[1]** **Kevin Ellis[2]**
+
+**N. Siddharth[3]** **Samuel Gershman[4]** **Joshua B. Tenenbaum[1]**
+
+ABSTRACT
+
+Modeling complex phenomena typically involves the use of both discrete and
+continuous variables. Such a setting applies across a wide range of problems,
+from identifying trends in time-series data to performing effective compositional
+scene understanding in images. Here, we propose Hybrid Memoised Wake-Sleep
+(HMWS), an algorithm for effective inference in such hybrid discrete-continuous
+models. Prior approaches to learning suffer as they need to perform repeated
+expensive inner-loop discrete inference. We build on a recent approach, Memoised
+Wake-Sleep (MWS), which alleviates part of the problem by memoising discrete
+variables, and extend it to allow for a principled and effective way to handle
+continuous variables by learning a separate recognition model used for importancesampling based approximate inference and marginalization. We evaluate HMWS
+in the GP-kernel learning and 3D scene understanding domains, and show that it
+outperforms current state-of-the-art inference methods.
+
+1 INTRODUCTION
+
+We naturally understand the world around us in terms of discrete symbols. When looking at a scene,
+we automatically parse what is where, and understand the relationships between objects in the scene.
+We understand that there is a book and a table, and that the book is on the table. Such symbolic
+representations are often necessary for planning, communication and abstract reasoning. They allow
+the specification of goals like “book on shelf” or preconditions like the fact that “book in hand”
+must come before “move hand to shelf”, both of which are necessary for high-level planning. In
+communication, we’re forced to describe such plans, among many other things we say, in discrete
+words. And further, abstract reasoning requires creating new symbols by composing old ones which
+allows us to generalize to completely new situations. A “tower” structure made out of books is still
+understood as a “tower” when built out of Jenga blocks. How do we represent and learn models that
+support such symbolic reasoning while supporting efficient inference?
+
+We focus on a particular class of hybrid generative models pθ(zd, zc, x)
+of observed data x with discrete latent variables zd, continuous latent
+variables zc and learnable parameters θ with a graphical model structure
+shown in Figure 1. In particular, the discrete latent variables zd represent **_zc_**
+an underlying structure present in the data, while the remaining continuous
+latent variables zc represent non-structural quantities. For example, in the
+context of compositional scene understanding, zd can represent a scene **_x_**
+graph comprising object identities and the relationships between them, like
+
+**_zd_**
+
+**_zc_**
+
+**_x_**
+
+“a small green pyramid is on top of a yellow cube; a blue doughnut leans Figure 1: Hybrid generative
+on the yellow cube; the large pyramid is next to the yellow cube” while zc model pθ(zd, zc, x).
+represents the continuous poses of these objects. Here, we assume that object identities are discrete,
+symbolic variables indexing into a set of learnable primitives, parameterized by a subset of the
+generative model parameters θ. The idea is to make these primitives learn to represent concrete
+objects like “yellow cube” or “large green pyramid” from data in an unsupervised fashion.
+
+Algorithms suitable for learning such models are based on variational inference or wake-sleep.
+However, these algorithms are either inefficient or inapplicable to general settings. First, stochastic
+variational inference methods that optimize the evidence lower bound (ELBO) using the reparameterization trick (Kingma & Welling, 2014; Rezende & Mohamed, 2015) are not applicable to discrete
+
+1MIT, 2Cornell University, 3University of Edinburgh & The Alan Turing Institute, 4Harvard University
+
+
+-----
+
+kernel: WN(0.49) + SE(0.49, 0.50) SE(0.50, 0.51) + PerL(0.50, 1.00, 0.50) PerXL(0.49, 1.50, 0.50) + WN(0.49)
+
+(a) Trends in time-series: Learning Gaussian process (GP) kernel to fit data (blue). Extrapolation (orange) shown
+with inferred kernel expression (below).
+
+
+Block(“Blue”, Pos(-1.2, 1.0))
+
+‘ON’ Block(“Red”, Pos(-1.1,
+1.0))
+
+‘ON’ Block(“Blue”, Pos(-1.0,
+1.0))
+
+‘ON’ Gnd(Pos(0, 1))
+
+Block(“Red”, Pos(0.8, 0.0))
+
+‘ON’ Gnd(Pos(1, 0)),
+
+Block(“Green”, Pos(-1.1, 0.0))
+
+‘ON’ Gnd(Pos(1, 1))
+
+
+Block(“Green”, Pos(1.0, 1.0))
+
+‘ON’ Gnd(Pos(0, 0)),
+
+Block(“Red”, Pos(-1.4, 0.0))
+
+‘ON’ Block(“Red”, Pos(-1.6,
+0.0))
+
+‘ON’ Block(“Blue”, Pos(-1.8,
+0.0))
+
+‘ON’ Gnd(Pos(1, 1))
+
+
+(b) Compositional scene understanding over primitives, attributes, and spatial arrangements.
+
+Figure 2: Examples highlighting the hybrid discrete-continuous nature of data. Colours indicate samples from
+discrete (violet) and continuous (cyan) random variables respectively.
+
+latent variable models. The REINFORCE gradient estimator (Williams, 1992), on the other hand, has
+high variance and continuous relaxations of discrete variables (Jang et al., 2017; Maddison et al.,
+2017) don’t naturally apply to stochastic control flow models (Le et al., 2019). Second, wake-sleep
+methods (Hinton et al., 1995; Dayan et al., 1995) like reweighted wake-sleep (RWS) (Bornschein &
+Bengio, 2015; Le et al., 2019) require inferring discrete latent variables at every learning iteration,
+without saving previously performed inferences. Memoised wake-sleep (MWS) (Hewitt et al., 2020)
+addresses this issue, but is only applicable to purely discrete latent variable models.
+
+We propose hybrid memoised wake-sleep (HMWS)—a method for learning and amortized inference
+in probabilistic generative models with hybrid discrete-continuous latent variables. HMWS combines
+the strengths of MWS in memoising the discrete latent variables and RWS in handling continuous
+latent variables. The core idea in HMWS is to memoise discrete latent variables zd and learn a
+separate recognition model which is used for importance-sampling based approximate inference and
+marginalization of the continuous latent variables zc.
+
+We empirically compare HMWS with state-of-the-art (i) stochastic variational inference methods
+that use control variates to reduce the REINFORCE gradient variance, VIMCO (Mnih & Rezende,
+2016), and (ii) a wake-sleep extension, RWS. We show that HMWS outperforms these baselines in two
+domains: structured time series and compositional 3D scene understanding, respectively.
+
+2 BACKGROUND
+
+Our goal is to learn the parameters θ of a generative model pθ(z, x) of latent variables z and data x,
+and parameters φ of a recognition model qφ(z _x) which acts as an approximation to the posterior_
+_|_
+_pθ(z_ _x). This can be achieved by maximizing the evidence lower bound_
+_|_
+
+ELBO (x, pθ(z, x), qφ(z _x)) = log pθ(x)_ KL(qφ(z _x)_ _pθ(z_ _x))_ (1)
+_|_ _−_ _|_ _||_ _|_
+which maximizes the evidence log pθ(x) while minimizing the Kullback-Leibler (KL) divergence,
+thereby encouraging the recognition model to approximate the posterior.
+
+If the latent variables are discrete, a standard way to estimate the gradients of the ELBO with respect
+to the recognition model parameters involves using the REINFORCE (or score function) gradient
+estimator (Williams, 1992; Schulman et al., 2015)
+
+_φELBO (x, pθ(z, x), qφ(z_ _x))_ log _[p][θ][(][z, x][)]_ (2)
+_∇_ _|_ _≈_ _qφ(z_ _x)_ _qφ(z_ _x)_
+
+_|_ _[· ∇][φ][ log][ q][φ][(][z][|][x][) +][ ∇][φ][ log][ p][θ][(][z, x]|_ [)]
+
+
+-----
+
+**Memory**
+
+{zd[m][}]m[M]=1 for every training data x
+
+− ∇θlog pθ(x) **Sleep: Replay** ∇ϕKL(∇ϕpKL(θ(zc |pzθd[m]([,]z[ x]d |[)]x[||]) ||[q][ϕ]q[(][z]ϕ[c]([|]zd[z]d[m]| _x[,][ x]))[))]_
+
+**Generative model** **Sleep: Fantasy** **Recognition model**
+
+_pθ(zd, zc, x)_ 𝔼pθ(z,x)[ −∇ϕlog qϕ(z | _x)]_ _qϕ(zd_ | _x)qϕ(zc_ | _zd, x)_
+
+Figure 3: Learning phases of Hybrid Memoised wake-sleep. The memory stores a set of discrete latents for each
+training data point x. The Wake phase updates the memory using samples from the recognition model. The
+**Sleep: Replay phase updates the generative model and the recognition model using the memory. The Sleep:**
+Fantasy phase updates the recognition model using samples from the generative model.
+
+where z _qφ(z_ _x). However, the first term is often high-variance which makes learning inefficient._
+_∼_ _|_
+This issue can be addressed by (i) introducing control variates (Mnih & Gregor, 2014; Mnih &
+Rezende, 2016; Tucker et al., 2017; Grathwohl et al., 2018) which reduce gradient variance, (ii)
+continuous-relaxation of discrete latent variables to allow differentiation (Jang et al., 2017; Maddison
+et al., 2017), or (iii) introducing a separate “wake-sleep” objective for learning the recognition
+model that is trained in different steps and sidesteps the need to differentiate through discrete latent
+variables (Hinton et al., 1995; Dayan et al., 1995; Bornschein & Bengio, 2015; Le et al., 2019).
+
+2.1 MEMOISED WAKE-SLEEP
+
+Both ELBO-based and wake-sleep based approaches to learning require re-solving the inference task
+by sampling from the recognition model qφ(z _x) at every iteration. This repeated sampling can be_
+_|_
+wasteful, especially when only a few latent configurations explain the data well. Memoised wakesleep (MWS) (Hewitt et al., 2020) extends wake-sleep by introducing a memory—a set of M unique
+discrete latent variables {zd[m][}]m[M]=1 [for each data point]M _[ x][ which induces a variational distribution]_
+
+
+_ωmδzd[m][(][z][d][)][,]_ (3)
+_m=1_
+
+X
+
+
+_qMEM(zd_ _x) =_
+_|_
+
+
+consisting of a weighted set of delta masses δzd[m] [centered on the memory elements (see also]
+Saeedi et al. (2017)). This variational distribution is proven to improve the evidence lower bound
+ELBO(x, pθ(zd, x), qMEM(zd _x)) (see Sec. 3 of (Hewitt et al., 2020)) by a memory-update phase_
+_|_
+comprising (i) the proposal of N new values _z[′][n]d_ _[}][N]n=1_
+from the union of the old memory elements and newly proposed values { _[∼]_ _[q][φ][(][z][d][|][x][)][, (ii) retaining the best] {zd[m][}]m[M]=1_ _[∪{][z][′]d[n][}][N]n[ M]=1[ values][scored]_
+by pθ(zd, x), and (iii) setting the weights to ωm = pθ(zd[m][, x][)][/][ P]i[M]=1 _[p][θ][(][z]d[i]_ _[, x][)][.]_
+
+MWS, however, only works on models with purely discrete latent variables. If we try to use the same
+approach for hybrid discrete-continuous latent variable models, all proposed continuous values are
+will be unique and the posterior approximation will collapse onto the MAP estimate.
+
+2.2 IMPORTANCE SAMPLING BASED APPROXIMATE INFERENCE AND MARGINALIZATION
+
+
+In our proposed method, we will rely on importance sampling (IS) to perform approximate inference
+and marginalization. In general, given an unnormalized density γ(z), and its corresponding normalizing constant Z = _γ(z) dz and normalized density π(z) = γ(z)/Z, we want to estimate Z and the_
+expectation of an arbitrary function f, Eπ(z)[f (z)]. To do this, we sample K values _zk_ _k=1_ [from a]
+R _{_ _}[K]_
+proposal distribution ρ(z), and weight each sample by wk = _[γ]ρ([(]z[z]k[k])[)]_ [, leading to the estimators]
+
+
+_Z_
+_≈_ _K[1]_
+
+
+_wk =: Z,[ˆ]_ Eπ(z)[f (z)] ≈
+_k=1_
+
+X
+
+
+_w¯kf_ (zk) =: I,[ˆ] (4)
+
+_k=1_
+
+X
+
+
+where ¯wk = wk/(KZ[ˆ]) is the normalized weight. The estimator _Z[ˆ] is often used to estimate marginal_
+distributions, for example p(x), with γ(z) being the joint distribution p(z, x). It is unbiased and
+its variance decreases linearly with K. The estimator _I[ˆ] is often used to estimate the posterior_
+expectation of gradients, for example the “wake-φ” gradient of RWS (Bornschein & Bengio, 2015;
+Le et al., 2019), Epθ(z _x)[_ _φ log qφ(z_ _x)] with γ(z) = pθ(z, x), π(z) = pθ(z_ _x) and f_ (z) =
+_|_ _−∇_ _|_ _|_
+_−∇φ log qφ(z|x). This estimator is asymptotically unbiased and its asymptotic variance decreases_
+linearly with K (Owen, 2013, Eq. 9.8) which means increasing K improves the estimator.
+
+
+-----
+
+3 HYBRID MEMOISED WAKE-SLEEP
+
+We propose hybrid memoised wake-sleep (HMWS) which extends memoised wake-sleep (MWS) to
+address the issue of memoization of continuous latent variables. In HMWS, we learn a generative
+model pθ(zd, zc, x) of hybrid discrete (zd) and continuous (zc) latent variables, and a recognition
+model qφ(zd, zc _x) which factorizes into a discrete recognition model qφ(zd_ _x) and a continuous_
+_|_ _|_
+recognition model qφ(zc _zd, x). Like MWS, HMWS maintains a memory of M discrete latent variables_
+_|_
+_{sleep: replayzd[m][}]m[M]=1_ [per data point] phase, we use the memoized discrete latents to train both the generative model and the[ x][ which is updated in the][ wake][ phase of every learning iteration. In the]
+recognition model. In the sleep: fantasy phase, we optionally train the recognition model on data
+generated from the generative model as well. We summarize these learning phases in Fig. 3, the
+full algorithm in Alg. 1, and describe each learning phase in detail below. For notational clarity, we
+present the algorithm for a single training data point x.
+
+3.1 WAKE
+
+Given a set of M memory elements _zd[m]_ _m=1[, we define the memory-induced variational posterior]_
+_{_ _[}][M]_
+_qMEM(zd|x) =_ _m=1_ _[ω][m][δ][z]d[m]_ [(][z][d][)][ similarly as in][ MWS][ (eq.][ (3)][). If we knew how to evaluate]
+_pθ(zd[m][, x][)][, the wake-phase for updating the memory of][ HMWS][ would be identical to][ MWS][. Here, we]_
+use an IS-based estimator of this quantity based on K samples from the continuous recognition model
+
+[P][M]
+
+
+_K_
+
+_d_ _[, z]c[mk], x)_
+_wmk,_ _wmk =_ _[p][θ][(][z][m]_ _zc[mk]_ _qφ(zc_ _zd[m][, x][)][.]_ (5)
+_k=1_ _qφ(zc[mk]|zd[m][, x][)][,]_ _∼_ _|_
+
+X
+
+
+_pˆθ(zd[m][, x][) = 1]_
+
+_K_
+
+
+The IS weights _wmk_ _k=1[}]m[M]=1_ [are used for marginalizing][ z][c] [here but they will later be reused for]
+_{{_ _}[K]_
+estimating expected gradients by approximating the continuous posterior pθ(zc|zd[m][, x][)][. Given the]
+estimation of pθ(zd[m][, x][)][, the weights][ {][ω][m][}]m[M]=1 [of the memory-induced posterior][ q][MEM][(][z][d][|][x][)][ are]
+
+_pˆθ(zd[m][, x][)]_ _K1_ _Kk=1_ _[w][mk]_ _Kk=1_ _[w][mk]_
+_ωm =_ _Mi=1_ _p[ˆ]θ(zd[i]_ _[, x][)]_ = _Mi=1PK1_ _Kj=1_ _[w][ij]_ = PMi=1 _Kj=1_ _[w][ij]_ _._ (6)
+
+The resulting wake-phase memory update is identical to that ofP P P MWSP (Sec. 2.1), except that theP
+evaluation of pθ(zd[m][, x][)][ and][ ω][m][ is done by][ (5)][ and][ (6)][ instead. For large][ K][, these estimators are]
+more accurate, and if exact, guaranteed to improve ELBO(x, pθ(zd, x), qMEM(zd _x)) like in MWS._
+_|_
+
+3.2 SLEEP: REPLAY
+
+In this phase, we use the memoized discrete latent variableslearn the generative model pθ(zd, zc, x), and the discrete and continuous recognition models {zd[m][}]m[M]=1 [(“replay from the memory”) to] qφ(zd _x)_
+_|_
+and qφ(zc _zd, x). We now derive the gradient estimators used for learning each of these distributions_
+_|_
+in turn and summarize how they are used within HMWS in the “Sleep: Replay” part of Alg. 1.
+
+**Algorithm 1 Hybrid Memoised Wake-Sleep (a single learning iteration)**
+**Input: Generative model pθ(zd, zc, x), recognition model qφ(zd|x)qφ(zc|zd, x), data point x, memory elements**
+_zd[m]_ _m=1[, replay factor][ λ][ ∈]_ [[0][,][ 1]][, # of importance samples][ K][, # of proposals][ N] [.]
+**Output:{** _[}][M]_ Gradient estimators for updating θ and φ: gθ and gφ; updated memory elements {zd[m][}]m[M]=1[.]
+
+1: Propose _z[′][n]d_ _[}][N]n=1_ _φ[(][z]d[|][x][)]_ _▷_ **Wake**
+_{_ _[∼]_ _[q]_
+
+2: Select _zd[i]_ _[}]i[L]=1_ _d_ _m=1_ _d_ _[}][N]n=1[)][ where][ L][ ≤]_ _[M][ +][ N]_
+
+3: Sample4: Compute { { {{zc[ik]w[}]k[K]ik=1[←]}k[K][∼]=1[unique(][q][}][φ]i[L]=1[(][z][c][,][ {][|][{][z]p[ˆ][z]d[i]θ[, x][m](z[}][)]d[i][M][ for][, x][)][ i][}][∪{][ = 1]i[L]=1[z][(eq. (5)), and][′][, . . ., L][n] _[ {][ω][i][}]i[L]=1_ [(eq. (6))]
+
+5: Select {zd[m][,][ {][z]c[mk]}k[K]=1[,][ {][w][mk][}][K]k=1[, ω][m][}]m[M]=1 _←_ best M values from {zd[i] _[}]i[L]=1[,][ {{][z]c[ik][}]k[K]=1[}]i[L]=1[,]_
+_{{wik}k[K]=1[}]i[L]=1_ [and][ {][ω][i][}]i[L]=1 [according to][ {]p[ˆ]θ(zd[i] _[, x][)][}]i[L]=1_
+
+6: Compute generative model gradient gθ ← _gθ({wmk, zc[mk]}m[M,K]=1,k=1[)][ (eq. (7))]_ _▷_ **Sleep: Replay**
+
+7: Compute gd,[φ] REPLAY _[←]_ _[g]d,[φ]_ REPLAY[(][{][z]d[m][, ω][m][}]m[M]=1[)][ (eq. (9))]
+
+9: Compute8: Compute g gc,FANTASY[φ][φ] REPLAY _[←]_ _[g]c,[φ]KREPLAYKk=1[(][{][w]mk[, z]c[mk]}m[M,K]=1,k=1[)][ (eq. (10))]_ _▷_ **Sleep: Fantasy**
+
+_[←−]_ [1] _[∇][φ][ log][ q][φ][(][z][k][|][x][k][)][ from][ z][k][, x][k][ ∼]_ _[p][θ][(][z, x][)]_
+
+10: Aggregate recognition model gradientP _gφ ←_ _λ(gd,[φ]_ REPLAY [+][ g]c,[φ] REPLAY[) + (1][ −] _[λ][)][g]FANTASY[φ]_
+
+11: Return: gθ, gφ, _zd[m]_ _m=1[.]_
+_{_ _[}][M]_
+
+
+-----
+
+**Learning the generative model.** We want to minimize the negative evidence − log pθ(x). We
+express its gradient using Fisher’s identity _θ log pθ(x) = Epθ(z_ _x) [_ _θ log pθ(z, x)] which we_
+_∇_ _|_ _∇_
+estimate using a combination of the memory-based approximation of pθ(zd _x) and the IS-based_
+_|_
+approximation of pθ(zc|x). The resulting estimator reuses the samples zc[mk] and weights wmk from
+the wake phase (see Appendix A for derivation):
+
+
+_−∇θ log pθ(x) ≈−_ _vmk∇θ log pθ(zd[m][, z]c[mk], x) =: gθ({wmk, zc[mk]}m[M,K]=1,k=1[)][,]_ (7)
+
+_m=1_ _k=1_
+
+X X
+
+_wmk_
+where vmk = _M_ _K_ _._ (8)
+_i=1_ _j=1_ _[w][ij]_
+P P
+
+**Learning the discrete recognition model.** We want to minimize KL(pθ(zd|x)||qφ(zd|x)) whose
+gradient can be estimated using a memory-based approximation of pθ(zd _x) (eq. (3))_
+_|_
+
+_φKL(pθ(zd_ _x)_ _qφ(zd_ _x)) = Epθ(zd_ _x) [_ _φ log qφ(zd_ _x)]_
+_∇_ _|_ _||_ _|_ _|_ _−∇_ _|_
+
+
+_m=1_ _ωm∇φ log qφ(zd[m][|][x][) =:][ g]d,[φ]_ REPLAY[(][{][z]d[m][, ω][m][}]m[M]=1[)][,] (9)
+
+X
+
+
+_≈−_
+
+
+where memory elements {zd[m][}]m[M]=1 [and weights][ {][ω][m][}]m[M]=1 [are reused from the wake phase (6).]
+
+**Learning the continuous recognition model.** We want to minimize the average of
+KL(pθ(zc|zd[m][, x][)][||][q][φ][(][z][c][|][z]d[m][, x][))][ over the memory elements][ z]d[m][. The gradient of this][ KL][ is esti-]
+mated by an IS-based estimation of pθ(zc|zd[m][, x][)]
+
+
+_M_
+
+_φKL(pθ(zc_ _zd[m][, x][)][||][q][φ][(][z][c][|][z]d[m][, x][)) = 1]_
+_∇_ _|_ _M_
+_m=1_
+
+X
+
+
+Epθ(zc|zd[m][,x][)][ [][−∇][φ][ log][ q][φ][(][z][c][|][z]d[m][, x][)]]
+_m=1_
+
+X
+
+
+_≈−_ _M[1]_
+
+
+_w¯mk_ _φ log qφ(zc[mk]_ _zd[m][, x][) =:][ g]c,[φ]_ REPLAY[(][{][w]mk[, z]c[mk] _m=1,k=1[)][,]_ (10)
+
+_≈−_ _M[1]_ _∇_ _|_ _}[M,K]_
+
+_m=1_ _k=1_
+
+X X
+
+where ¯wmk = wmk/ _i=1_ _[w][mi][. Both weights and samples][ z]c[mk]_ are reused from the wake phase (5).
+
+3.3 SLEEP: FANTASY
+
+[P][K]
+
+This phase is identical to “sleep” in the original wake-sleep algorithm (Hinton et al., 1995; Dayan
+et al., 1995) which minimizes the Monte Carlo estimation of Epθ(zd,zc,x)[−∇φ log qφ(zd, zc|x)],
+equivalent to training the recognition model on samples from the generative model.
+
+Together, the gradient estimators in the Wake and the Sleep: Replay and the Sleep: Fantasy phases are
+used to learn the generative model, the recognition model and the memory. We additionally introduce
+a model-dependent replay factor λ ∈ [0, 1] which modulates the relative importance of the Sleep:
+_Replay versus the Sleep: Fantasy gradients for the recognition model. This is similar to modulating_
+between the “wake-” and “sleep-” updates of the recognition model in RWS (Bornschein & Bengio,
+2015). We provide a high level overview of HMWS in Fig. 3 and its full description in Alg. 1.
+
+**Factorization of the recognition model.** The memory-induced variational posterior qMEM(zd|x)
+is a weighted sum of delta masses onpθ(zd _x, zc) as it would require a continuous index space {zd[m][}]m[M]=1_ [which cannot model the conditional posterior] zc. We therefore use qMEM(zd _x) to_
+_|_ _|_
+approximate pθ(zd _x) and qφ(zc_ _zd, x) to approximate pθ(zc_ _zd, x), which allows capturing all_
+_|_ _|_ _|_
+dependencies in the posterior pθ(zc, zd _x). Relaxing the restriction on the factorization of qφ(zc, zd_ _x)_
+_|_ _|_
+is possible, but, we won’t be able to model any dependencies of discrete latent variables on preceding
+continuous latent variables.
+
+4 EXPERIMENTS
+
+In our experiments, we compare HMWS on hybrid generative models against state-of-the-art wakesleep-based RWS and variational inference based VIMCO. To ensure a fair comparison, we match
+the number of likelihood evaluations – typically the most time-consuming part of training – across
+
+
+_m=1_
+
+
+-----
+
+45200
+
+45400
+
+45600
+
+x
+
+
+45800
+
+46000
+
+
+45400
+
+45600
+
+45800
+
+46000
+
+46200
+
+
+Iteration 5000
+
+
+Iteration 5000
+
+
+HMWS
+RWS
+VIMCO
+
+
+HMWS
+RWS
+VIMCO
+
+
+35
+
+HMWS
+
+30 RWSVIMCO
+
+25
+
+) (logxp 2015
+
+10
+
+5
+
+0
+
+0 Iteration 10000
+
+
+Figure 4: Hybrid memoised wake-sleep (HMWS) learns faster than the baselines: reweighted wake-sleep (RWS)
+and VIMCO based on the marginal likelihood, in both the time series model (left), and the scene understanding
+models with learning shape and color (middle) and learning shape only (right). HMWS also learns better scene
+understanding models. The gradient estimator of VIMCO was too noisy and failed to learn the time series model.
+(Median with the shaded interquartile ranges over 20 runs is shown.)
+
+all models: O(K(N + M )) for HMWS, and O(S) for RWS and VIMCO where S is the number of
+particles for RWS and VIMCO. HMWS has a fixed memory cost of O(M ) per data point which can
+be prohibitive for large datasets. However in practice, HMWS is faster and more memory-efficient
+than the other algorithms as the total number of likelihood evaluations is typically smaller than the
+upper bound of K(N + M ) (see App. C). For training, we use the Adam optimizer with default
+hyperparameters. We judge the generative-model quality using an Stest = 100 sample importance
+weighted autoencoder (IWAE) estimation of the log marginal likelihood log pθ(x). We also tried the
+variational-inference based REINFORCE but found that it underperforms VIMCO.
+
+We focus on generative models in which (i) there are interpretable, learnable symbols, (ii) the
+discrete latent variables represent the composition of these symbols and (iii) the continuous latent
+variables represent the non-structural quantitites. While our algorithm is suitable for any hybrid
+generative model, we believe that this particular class of neuro-symbolic models is the most naturally
+interpretable, which opens up ways to connect to language and symbolic planning.
+
+4.1 STRUCTURED TIME SERIES
+
+
+that inference in this grammar can produce highly interpretable and generalisable descriptions of the
+
+Prior pθ(zd, zc) Likelihood p(x | _zd, zc)_ Data x Recognition model qϕ(zd, zc | _x)_
+
+Kernel expression LSTM (p) Construct kernel - Kernel expression LSTM (q)
+
+Signal
+
+~ _k = Cσ2 × Perp,ℓ2 + WNσ2_ embedderLSTM ~
+
+“C ⨉ Per + WN”
+
+“C ⨉ Per + WN” Compute covariance matrix
+
+Kernel expression LSTM embedder (q)
+
+Kernel expression LSTM embedder (p) 풩(x; 0,Σ)
+
+~
+
+- 
+Kernel parameters LSTM (q)
+
+Kernel parameters LSTM (p)
+
+- Concatenate and feed to LSTM input
+
+~
+
+~ ~ Sample autoregressively from LSTM
+
+LSTM hidden state at the last step [σ[2],,p ℓ[2],σ[2]]
+
+[σ[2],,p ℓ[2],σ[2]]
+
+Figure 5: The generative model of structured time series data consists of (i) a prior that uses LSTMs to first
+sample the discrete Gaussian process (GP) kernel expression and then the continuous kernel parameters, and
+(ii) a likelihood which constructs the final GP kernel expression. The recognition model (on gray background)
+mirrors the architecture of the prior but additionally conditions on an LSTM embedding of data.
+
+We first apply HMWS to the task of finding explainable models for time-series data. We draw
+inspiration from (Duvenaud et al., 2013), who frame this problem as GP kernel learning (Rasmussen
+& Williams, 2006). They describe a grammar for building kernels compositionally, and demonstrate
+
+structure in a time series. We follow a similar approach, but depart by learning a set of GP kernels
+jointly for each in time series in a dataset, rather than individually.
+
+For our model, we define the following simple grammar over kernels
+_k →_ _k + k | k × k | WN | SE | PER | C,_ where (11)
+
+-  WN is the White Noise kernel, WNσ2 (x1, x2) = σ[2]Ix1=x2,
+
+
+-----
+
+variables (σ[2], l, etc.). To represent the structure of the kernel as zd, we use a symbolic kernel ‘ex
+Per + SE Per + WN WN Per Per WN + SE
+
+Figure 6: Learning to model structured time series data with Gaussian processes (GPs) by first inferring the kernel
+expression (shown as text in the top-left corner) and the kernel parameters. The blue curve is the 128-dimensional
+observed signal, and the orange curve is a GP extrapolation based on the inferred kernel. We show the mean
+(dark orange), the ±2 standard deviation range (shaded) and one sample (light orange).
+
+- SE is the Squared Exponential kernel, SEσ2,l2 (x1, x2) = σ[2] exp( (x1 _x2)[2]/2l[2]),_
+_−_ _−_
+
+- PER is a Periodic kernel, PERσ2,p,l2 (x1, x2) = σ[2] exp( 2 sin[2](π _x1_ _x2_ _/p)/l[2]),_
+_−_ _|_ _−_ _|_
+
+- C is a Constant, Cσ2 (x1, x2) = σ[2].
+
+We wish to learn a prior distribution over both the symbolic structure of a kernel and its continuous
+
+[2]
+
+pression’: a string over the characters (, ), +, _, WN, SE, PER1, . . ., PER4, C_ . We provide multiple
+_{_ _×_ _}_
+character types PERi for periodic kernels, corresponding to a learnable coarse-graining of period
+(short to long). We then define an LSTM prior pθ(zd) over these kernel expressions, alongside a
+conditional LSTM prior pθ(zc _zd) over continuous kernel parameters. The likelihood is the marginal_
+_|_
+GP likelihood—a multivariate Gaussian whose covariance matrix is constructed by evaluating the
+composite kernel on a fixed set of points. Finally, the recognition model qφ(zd, zc _x) mirrors the_
+_|_
+architecture of the prior except that all the LSTMs additionally take as input an LSTM embedding of
+the observed signal x. The architecture is summarized in Fig. 5 and described in full in App. B.1.
+
+We construct a synthetic dataset of 100 timeseries of fixed length of 128 drawn from a probabilistic
+context free grammar which is constructed by assigning production probabilities to our kernel
+grammar in (11). In Fig. 4 (left), we show that HMWS learns faster than RWS in this domain in terms
+of the log evidence log pθ(x). We also trained with VIMCO but due to the high variance of gradients,
+they were unable to learn the model well.
+
+Examples of latent programs discovered by our model are displayed in Fig. 6. For each signal, we
+infer the latent kernel expression zd by taking the highest scoring memory element zd[m] [according]
+to the memory-based posterior qMEM(zd _, x) and sample the corresponding kernel parameters from_
+_|_
+the continuous recognition model qφ(zc _zd, x). We show the composite kernel as well as the GP_
+_|_
+posterior predictive distribution. These programs describe meaningful compositional structure in the
+time series data, and can also be used to make highly plausible extrapolations.
+
+4.2 COMPOSITIONAL SCENE UNDERSTANDING
+
+Prior p(zd, zc) Likelihood pθ(x | _zd, zc)_ Data x Recognition model qϕ(zd, zc | _x)_
+
+|for cell in range(num_cells): num_blocks = sample(Categorical( logits= )) for block in range(num_blocks): primitive_id = sample(Categori logits= )) raw_location = sample(Normal( loc=,scale=exp( ) )) Learnable primitives θ 0 1 2 3|range(num_cells): = sample(Categorical( in range(num_blocks): e_id = sample(Categori = tion = sample(Normal(,scale=exp( )|Compute spatial locations cal( 4 Render|for cell in range(num_cells) num_blocks = sample(Catego logits=NN1[cell]( ) )) for block in range(num_blo primitive_id = sample(Ca logits=NN2[cell, block )) raw_location = sample(No loc=NN3[cell, block]( scale=exp(NN4[cell, bl )) CNN|for cell in range(num_cells) num_blocks = sample(Catego logits=NN1[cell]( ) )) for block in range(num_blo primitive_id = sample(Ca logits=NN2[cell, block )) raw_location = sample(No loc=NN3[cell, block]( scale=exp(NN4[cell, bl ))|
+|---|---|---|---|---|
+
+
+),
+
+0
+
+1
+
+2
+
+3
+
+4
+
+
+Figure 7: Generative model of compositional scenes. The prior places a stochastic number of blocks into each
+cell, where cells form an imaginary grid on the ground plane. For each cell, a stack of blocks is built by both: i)
+sampling blocks from a learnable set of primitives and ii) sampling their relative location to the object below (i.e.,
+either the ground or the most recently stacked block). The likelihood uses a differentiable renderer to produce
+an image. The recognition model (on gray background) mirrors the structure of the prior, but parametrizes
+distributions as learnable functions (NN1–NN4) of a CNN-based embedding of the image.
+
+Next, we investigate the ability of HMWS to parse images of simple scenes in terms of stacks of toy
+blocks. Here, towers can be built from a large consortium of blocks, where blocks are drawn from a
+fixed set of block types. We aim to learn the parameters of the different block types – namely, their
+size and optionally their color – and jointly infer a scene parse describing which kinds of blocks live
+
+
+-----
+
+where in each world. Such a symbolic representation of scenes increases interpretability, and has
+connections to language and symbolic planning.
+
+Our generative and recognition models are illustrated in Fig. 7 (for the full description of the model,
+see App. B.2). We divide the ground plane into an N × N (N = 2) grid of square cells and initialize
+a set of P = 5 learnable block types, which we refer to as the base set of “primitives” with which
+the model builds scenes. We parameterize each block type by its size and color. Within each cell,
+we sample the number of blocks in a tower uniformly, from zero to a maximum number of blocks
+_Bmax = 3. For each position in the tower, we sample an integer ∈_ [0, Bmax], which we use to index
+into our set of learnable primitives, and for each such primitive, we also sample its continuous
+position. The (raw) position of the first block in a tower is sampled from a standard Gaussian and
+is constrained to lie in a subset of the corresponding cell, using an affine transformation over a
+sigmoid-transformed value. A similar process is used to sample the positions of subsequent blocks,
+but now, new blocks are constrained to lie in a subset of the top surface of the blocks below.
+
+Given the absolute spatial locations and identities of all blocks, we render a scene using the PyTorch3D
+differentiable renderer (Ravi et al., 2020), which permits taking gradients of the generative model
+probability pθ(zd, zc, x) with respect to the learnable block types θ. All training scenes are rendered
+from a fixed camera position (a front view); camera position is not explicitly fed into the model. We
+use an independent Gaussian likelihood with a fixed standard deviation factorized over all pixels –
+similar to using an L2 loss. The discrete latent variables, zd, comprise both the number of blocks and
+block type indices, while the continuous latent variables, zc, represent the raw block locations.
+
+The recognition model qφ(zd, zc _x) follows a similar structure to that of the prior p(zd, zc), as shown_
+_|_
+inside the gray box of Fig. 7. However, the logits of the categorical distributions for qφ(zd _x), as well_
+_|_
+as the mean and (log) standard deviation of the Gaussian distributions for qφ(zc _zd, x), are obtained_
+_|_
+by mapping a convolutional neural network (CNN)-based embedding of the image x through small
+neural networks NN1–NN4; in our case, these are linear layers.
+
+We train two models: one which infers scene parses from colored blocks and another which reasons
+over unicolor blocks. In both settings, the model must perform a non-trivial task of inferring a scene
+parse from an exponential space of P _[B][max][·][N][ 2]_ possible scene parses. Moreover, scenes are replete
+with uncertainty: towers in the front of the grid often occlude those in the back. Likewise, in the
+second setting, there is additional uncertainty arising from blocks having the same color. For each
+model, we generate and train on a dataset of 10k scenes. Both models are trained using HMWS with
+_K = 5, M = 5, N = 5, and using comparison algorithms with S = K(N + M_ ) = 50.
+
+In Fig. 4 (middle and right), we show that in this domain, HMWS learns faster and better models
+than RWS ad VIMCO, scored according to the log evidence log pθ(x). We directly compare the
+wall-clock time taken by HMWS compared to RWS in Table 1, highlighting the comparative efficiency
+of our algorithm. Further, we uncovered two local minima in our domain; we find that a higher
+portion of HMWS find the superior minima compared to RWS. In Fig. 8, we show posterior samples
+from our model. Samples are obtained by taking the highest probability scene parses based on the
+memory-based posterior approximation qMEM(zd _x). These samples illustrate that HMWS-trained_
+_|_
+models can capture interesting uncertainties over occluded block towers and recover the underlying
+building blocks of the scenes. For instance, in the colored block domain, we see that the model
+properly discovers and builds with red, blue, and green cubes of similar sizes to the data.
+
+5 RELATED WORK
+
+Our work builds on wake-sleep algorithms (Hinton et al., 1995) and other approaches that jointly train
+generative/recognition models, particularly modern versions such variational autoencoders (Kingma
+& Welling, 2014) and reweighted wake-sleep (Bornschein & Bengio, 2015). While variational
+autoencoders (VAEs) have been employed for object-based scene understanding (e.g. Eslami et al.
+(2016); Greff et al. (2019)), they attempt to circumvent the issues raised by gradient estimation with
+discrete latent variables, either by using continuous relaxation (Maddison et al., 2017) or limited use
+of control variates (Mnih & Rezende, 2016). The wake-sleep family of algorithms avoids the need
+for such modification and is better suited to models that involve stochastic branching (see Le et al.
+(2019) for a discussion), and is thus our primary focus here.
+
+
+-----
+
+Inferring scene parse with color
+
+Posterior Samples
+
+Observations
+
+
+Inferring scene parse without color
+
+Posterior Samples
+
+Observations
+
+
+Figure 8: Samples from the posterior when inferring scene parses with color (left) and scene parses without
+color diversity (right). Conditioned on a single observation of the front view of a scene (left column), HMWS
+infers a posterior over blocks that make up the scene. Three samples from the posterior are shown per scene,
+sorted by log probability under the model; e.g., the first sample is most probable under HMWS. Sampled scenes
+are rendered from three different camera angles; position of the camera is depicted in the figure insets. We
+emphasize that the model has never seen the 3/4-views. The sampled scenes highlight that we are able to handle
+occlusion, capturing a distribution over possible worlds that are largely consistent with the observation.
+
+Our most closely related work is Memoised Wake-sleep, which we build directly on top of and
+extend to handle both discrete and continuous latents. A contemporary of Memoised Wake-sleep,
+DreamCoder (Ellis et al., 2021), is a closely related program synthesis algorithm following a similar
+wake-sleep architecture. Like MWS, it lacks principled handling of latent continuous parameters;
+performing inner-loop gradient descent and heuristically penalizing parameters via the Bayesian
+Information Criterion (MacKay, 2002). Other instances of wake-sleep models include those that
+perform likelihood-free inference (Brehmer et al., 2020), or develop more complex training schemes
+for amortization (Wenliang et al., 2020).
+
+Broadly, our goal of inferring compositionally structured, mixed discrete-continuous objects has
+strongest parallels in the program synthesis literature. One family of approaches (e.g. HOUDINI (Valkov et al., 2018) and NEAR (Shah et al., 2020)), perform an outer-loop search over discrete
+structures and an inner-loop optimization over continuous parameters. Others jointly reason over
+continuous and discrete parameters via exact symbolic methods (e.g. Evans et al. (2021)) or by
+relaxing the discrete space to allow gradient-guided optimization to run on the whole problem (e.g.
+DeepProbLog (Manhaeve et al., 2018)). None of these however, learn-to-learn by amortizing the cost
+of inference, with recent attempts needing quantized continuous parameters (Ganin et al., 2021). What
+our work contributes to this space is a generic and principled way of applying amortized inference to
+hybrid discrete-continuous problems. This gets the speed of a neural recognition model–which is
+valuable for program synthesis–but with Bayesian handling of uncertainty and continuous parameters,
+rather than relying on heuristic quantization or expensive inner loops.
+
+6 DISCUSSION
+
+
+Inference in hybrid generative models is important for building interpretable models that generalize.
+However, such a task is difficult due to the need to perform inference in large, discrete spaces. Unlike
+deep generative models in which the generative model is less constrained, learning in symbolic
+models is prone to getting stuck in local optima. While compared to existing algorithms, HMWS
+improves learning and inference in these models, it does not fully solve the problem. In particular, our
+algorithm struggles with models in which the continuous latent variables require non-trivial inference,
+as the quality of continuous inference is directly linked with the quality of the gradient estimators in
+HMWS. This challenge can potentially be addressed with better gradient estimators. We additionally
+plan to extend our algorithm to more complex, realistic neuro-symbolic models; for instance, those
+with more non-cuboidal primitive topologies.
+
+
+-----
+
+REFERENCES
+
+Jörg Bornschein and Yoshua Bengio. Reweighted wake-sleep. In International Conference on
+_Learning Representations, 2015._
+
+Johann Brehmer, Gilles Louppe, Juan Pavez, and Kyle Cranmer. Mining gold from implicit models
+to improve likelihood-free inference. Proceedings of the National Academy of Sciences, 117(10):
+5242–5249, 2020.
+
+Peter Dayan, Geoffrey E Hinton, Radford M Neal, and Richard S Zemel. The Helmholtz machine.
+_Neural computation, 7(5):889–904, 1995._
+
+David Duvenaud, James Lloyd, Roger Grosse, Joshua Tenenbaum, and Ghahramani Zoubin. Structure
+discovery in nonparametric regression through compositional kernel search. In International
+_Conference on Machine Learning, 2013._
+
+Kevin Ellis, Catherine Wong, Maxwell Nye, Mathias Sablé-Meyer, Lucas Morales, Luke Hewitt, Luc
+Cary, Armando Solar-Lezama, and Joshua B Tenenbaum. Dreamcoder: Bootstrapping inductive
+program synthesis with wake-sleep library learning. In Proceedings of the 42nd ACM SIGPLAN
+_International Conference on Programming Language Design and Implementation, pp. 835–850,_
+2021.
+
+SM Eslami, Nicolas Heess, Theophane Weber, Yuval Tassa, David Szepesvari, Geoffrey E Hinton,
+et al. Attend, infer, repeat: Fast scene understanding with generative models. Advances in Neural
+_Information Processing Systems, 2016._
+
+Richard Evans, Matko Bošnjak, Lars Buesing, Kevin Ellis, David Pfau, Pushmeet Kohli, and Marek
+Sergot. Making sense of raw input. Artificial Intelligence, 299:103521, 2021.
+
+Yaroslav Ganin, Sergey Bartunov, Yujia Li, Ethan Keller, and Stefano Saliceti. Computer-aided
+design as language. Advances in Neural Information Processing Systems, 34, 2021.
+
+Will Grathwohl, Dami Choi, Yuhuai Wu, Geoff Roeder, and David Duvenaud. Backpropagation
+through the void: Optimizing control variates for black-box gradient estimation. In International
+_Conference on Learning Representations, 2018._
+
+Klaus Greff, Raphaël Lopez Kaufman, Rishabh Kabra, Nick Watters, Christopher Burgess, Daniel
+Zoran, Loic Matthey, Matthew Botvinick, and Alexander Lerchner. Multi-object representation
+learning with iterative variational inference. In International Conference on Machine Learning,
+2019.
+
+Luke Hewitt, Tuan Anh Le, and Joshua Tenenbaum. Learning to learn generative programs with
+memoised wake-sleep. In Uncertainty in Artificial Intelligence, 2020.
+
+Geoffrey E Hinton, Peter Dayan, Brendan J Frey, and Radford M Neal. The “wake-sleep” algorithm
+for unsupervised neural networks. Science, 1995.
+
+Eric Jang, Shixiang Gu, and Ben Poole. Categorical reparameterization with Gumbel-softmax. In
+_International Conference on Learning Representations, 2017._
+
+Diederik P Kingma and Max Welling. Auto-encoding variational Bayes. In International Conference
+_on Learning Representations, 2014._
+
+Tuan Anh Le, Adam R. Kosiorek, N. Siddharth, Yee Whye Teh, and Frank Wood. Revisiting
+reweighted wake-sleep for models with stochastic control flow. In Uncertainty in Artificial
+_Intelligence, 2019._
+
+David J. C. MacKay. Information Theory, Inference & Learning Algorithms. Cambridge University
+Press, USA, 2002. ISBN 0521642981.
+
+C Maddison, A Mnih, and Y Teh. The Concrete distribution: A continuous relaxation of discrete
+random variables. In International Conference on Learning Representations, 2017.
+
+
+-----
+
+Robin Manhaeve, Sebastijan Dumancic, Angelika Kimmig, Thomas Demeester, and Luc De Raedt.
+Deepproblog: Neural probabilistic logic programming. Advances in Neural Information Processing
+_Systems, 2018._
+
+Andriy Mnih and Karol Gregor. Neural variational inference and learning in belief networks. In
+_International Conference on Machine Learning, 2014._
+
+Andriy Mnih and Danilo Rezende. Variational inference for Monte Carlo objectives. In International
+_Conference on Machine Learning, 2016._
+
+Art B Owen. Monte Carlo theory, methods and examples. 2013.
+
+Carl Edward Rasmussen and Christopher K. I. Williams. Gaussian processes for machine learning.
+Adaptive computation and machine learning. MIT Press, 2006. ISBN 026218253X.
+
+Nikhila Ravi, Jeremy Reizenstein, David Novotny, Taylor Gordon, Wan-Yen Lo, Justin Johnson, and
+Georgia Gkioxari. Accelerating 3d deep learning with pytorch3d. arXiv:2007.08501, 2020.
+
+Danilo Rezende and Shakir Mohamed. Variational inference with normalizing flows. In International
+_Conference on Machine Learning, pp. 1530–1538. PMLR, 2015._
+
+Ardavan Saeedi, Tejas D Kulkarni, Vikash K Mansinghka, and Samuel J Gershman. Variational
+particle approximations. The Journal of Machine Learning Research, 18(1):2328–2356, 2017.
+
+John Schulman, Nicolas Heess, Theophane Weber, and Pieter Abbeel. Gradient estimation using
+stochastic computation graphs. In Advances in Neural Information Processing Systems, 2015.
+
+Ameesh Shah, Eric Zhan, Jennifer Sun, Abhinav Verma, Yisong Yue, and Swarat Chaudhuri. Learning differentiable programs with admissible neural heuristics. Advances in neural information
+_processing systems, 2020._
+
+George Tucker, Andriy Mnih, Chris J Maddison, John Lawson, and Jascha Sohl-Dickstein. REBAR:
+Low-variance, unbiased gradient estimates for discrete latent variable models. In Advances in
+_Neural Information Processing Systems, 2017._
+
+Lazar Valkov, Dipak Chaudhari, Akash Srivastava, Charles Sutton, and Swarat Chaudhuri. Houdini:
+Lifelong learning as program synthesis. Advances in Neural Information Processing Systems,
+2018.
+
+Li Wenliang, Theodore Moskovitz, Heishiro Kanagawa, and Maneesh Sahani. Amortised learning by
+wake-sleep. In International Conference on Machine Learning, 2020.
+
+Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement
+learning. Machine learning, 8(3-4):229–256, 1992.
+
+
+-----
+
+A DERIVATION OF THE GRADIENT ESTIMATOR FOR LEARNING THE
+GENERATIVE MODEL
+
+Here, we derive the gradient estimator for learning the generative model given in (7).
+
+We assume that the memory-induced variational posterior approximates the discrete posterior
+
+_pθ(zd_ _x)_ _qMEM(zd_ _x)_ (12)
+_|_ _≈_ _|_
+
+_M_
+
+= _ωmδzd[m][(][z][d][)]_ (13)
+
+_m=1_
+
+X
+
+and that the continuous posterior expectation Epθ(zc|zd[m][,x][)][[][f] [(][z][c][)]][ for each][ m][ is approximated using a]
+set of weighted samples (zc[mk], ¯wmk)[K]k=1
+
+
+Epθ(zc|zd[m][,x][)][[][f] [(][z][c][)]][ ≈]
+
+where ¯wmk = _Kwmk_
+Pi=1 _[w][mi][ .]_
+
+First, we make use of the Fisher’s identity
+
+
+_w¯mkf_ (zc[mk]), (14)
+_k=1_
+
+X
+
+
+_θ log pθ(x) = Epθ(z_ _x) [_ _θ log pθ(x)]_ (Integrand is not a function of z) (15)
+_∇_ _|_ _∇_
+
+= Epθ(z _x) [_ _θ log pθ(x) +_ _θ log pθ(z_ _x)]_ (Second term vanishes) (16)
+_|_ _∇_ _∇_ _|_
+
+= Epθ(z _x) [_ _θ log pθ(z, x)]_ (Product rule of probability) (17)
+_|_ _∇_
+
+and we continue by using the approximations in (12)–(14)
+
+= Epθ(zc _zd,x)_ Epθ(zd _x) [_ _θ log pθ(z, x)]_ (Factorize the posterior) (18)
+_|_ _|_ _∇_
+
+Epθ(zc _zd,x)_ EqMEM(zd _x) [_ _θ log pθ(z, x)]_ (Use (12)) (19)
+_≈_ _|_ _|_ _∇_
+
+_M_
+
+ 
+
+= Epθ(zc|zd[m][,x][)] "m=1 _ωm∇θ log pθ(zd[m][, z][c][, x][)]#_ (Use (13)) (20)
+
+X
+
+_K_ _M_
+
+_≈_ _k=1_ _w¯mk_ _m=1_ _ωm∇θ log pθ(zd[m][, z]c[mk], x)!_ (Use (14)) (21)
+
+X X
+
+
+_vmk∇θ log pθ(zd[m][, z]c[mk], x),_ (Combine sums) (22)
+_k=1_
+
+X
+
+
+_m=1_
+
+
+where
+
+_vmk = ¯wmkωm_ (23)
+
+_wmk_ _Ki=1_ _[w][mi]_
+= _K_ _M_ _K_ (24)
+
+_·_
+_i=1_ _[w][mi]_ _iP=1_ _j=1_ _[w][ij]_
+
+_wmk_
+= PM _K_ P _._ P (25)
+_i=1_ _j=1_ _[w][ij]_
+P P
+
+B MODEL ARCHITECTURE AND PARAMETER SETTINGS
+
+
+B.1 STRUCTURED TIME SERIES
+
+Fixed parameters
+
+-  Vocabulary = WN, SE, PER1, . . ., PER4, C, _, +, (, )_
+_V_ _{_ _×_ _}_
+
+-  Vocabulary size vocabulary_size = |V| = 11
+
+-  Kernel parameters K = {σWN[2] _[,][ (][σ]SE[2]_ _[, ℓ][2]SE[)][,][ (][σ]PER[2]_ 1 _[, p][PER]1_ _[, ℓ][2]PER1_ [)][, . . .,][ (][σ]PER[2] 4 _[, p][PER]4_ _[, ℓ][2]PER4_ [)][, σ]C[2][}]
+
+
+-----
+
+-  Kernel parameters size kernel_params_size = |K| = 16
+
+-  Hidden size hidden_size = 128
+
+-  Observation embedding size obs_embedding_size = 128
+
+Generative model pθ(zd, zc, x)
+
+-  Kernel expression LSTM (p)
+(input size = vocabulary_size, hidden size = hidden_size)
+
+**– This module defines a distribution over the kernel expression pθ(zd).**
+**– At each time step t, the input is a one-hot encoding of the previous symbol in V (or a**
+zero vector for the first time step)
+
+**– At each time step t, extract logit probabilities for each element in V or the end-of-**
+sequence symbol EOS from the hidden state using a “Kernel expression extractor
+(p)” (Linear(hidden_size, vocabulary_size + 1)). This defines the
+conditional distribution pθ(zd[t] _[|][z]d[1:][t][−][1])._
+
+**– The full prior over kernel expression is an autoregressive distribution** _t_ _[p][θ][(][z]d[t]_ _[|][z]d[1:][t][−][1])_
+
+whose length is determined by EOS.
+
+-  Kernel expression LSTM embedder (p) [Q]
+(same as kernel expression LSTM (p))
+
+**– The module summarizes the kernel expression zd into an embedding vector e ∈**
+R[hidden_size]
+
+**– We re-use the kernel expression LSTM (p) above and use the last hidden LSTM state**
+to be the summary embedding vector.
+
+
+
+-  Kernel parameters LSTM (p)
+(input size = kernel_params_size + hidden_size, hidden size = hidden_size)
+
+
+**– This module define a distribution over kernel parameters pθ(zc|zd).**
+**– At each timestep t, the input is a concatenation of the previous kernel parameters**
+_zc[t][−][1]_ R[kernel_params_size] (or zero vector for t = 1) and the embedding vector
+_∈_
+_e ∈_ R[hidden_size].
+
+**– At each timestep t, extract mean and standard deviations for each kernel param-**
+eter in K using a “Kernel parameters extractor (p)” Linear(hidden_size,
+2 * kernel_params_size). This defines the conditional distribution
+_pθ(zc[t][|][z]c[1:][t][−][1], zd)._
+
+Recognition model qφ(zd, zc _x)_
+_|_
+
+-  Signal LSTM embedder
+(input size = 1, hidden size = obs_embedding_dim = hidden_size)
+
+**– This module summarizes the signal x into an embedding vector ex** _∈_
+R[obs_embedding_dim].
+
+**– The embedding vector is taken to be the last hidden state of an LSTM where x is fed as**
+the input sequence.
+
+-  Kernel expression LSTM (q)
+(input size = obs_embedding_dim + vocabulary_size, hidden size =
+hidden_size)
+
+
+**– This module defines a distribution over kernel expression qφ(zd|x).**
+**– At each time step t, the input is a concatentation of the one-hot encoding of the previous**
+symbol in (or a zero vector for the first time step) and ex.
+_V_
+
+**– At each time step t, extract logit probabilities for each element in V or the end-of-**
+sequence symbol EOS from the hidden state using a “Kernel expression extractor
+(q)” (Linear(hidden_size, vocabulary_size + 1)). This defines the
+conditional distribution qφ(zd[t] _[|][z]d[1:][t][−][1], x)._
+
+**– The full distribution over kernel expression is an autoregressive distribution**
+
+_t_ _[q][φ][(][z]d[t]_ _[|][z]d[1:][t][−][1], x) whose length is determined by EOS._
+
+Q
+
+
+-----
+
+-  Kernel expression LSTM embedder (q)
+(input size = vocabulary_size, hidden size = hidden_size)
+
+
+**– This module summarizes the kernel expressionR[hidden_size].** _zd into an embedding vector ezd ∈_
+
+**– The embedding vector ezd is taken to be the last hidden state of an LSTM where zd is**
+fed as the input sequence.
+
+-  Kernel parameters LSTM (q)
+(input size = obs_embedding_dim + kernel_params_size + hidden_size,
+hidden size = hidden_size)
+
+**– This module defines a distribution over kernel parameters qφ(zc|zd, x).**
+**– At each timestep t, the input is a concatenation of the previous kernel parameters**
+_zc[t][−][1]_ R[kernel_params_size] (or zero vector for t = 1), the embedding vector ezd
+R[hidden_size]∈ and the signal embedding vector ex ∈ R[obs_embedding_size]. _∈_
+
+**– At each timestep t, extract mean and standard deviations for each kernel param-**
+eter in K using a “Kernel parameters extractor (q)” Linear(hidden_size,
+2 * kernel_params_size). This defines the conditional distribution
+_qφ(zc[t][|][z]c[1:][t][−][1], zd, x)._
+
+B.2 COMPOSITIONAL SCENE UNDERSTANDING
+
+Fixed parameters
+
+-  Number of allowed primitives to learn P = 5
+
+-  Maximum number of blocks per cell Bmax = 3
+
+-  Number of cells in the x-plane = number of cells in the z-plane = N = 2
+
+-  Image resolution I = [3, 128, 128]
+
+-  Observation embedding size obs_embedding_size = 676
+
+Recognition model qφ(zd, zc _x). Components are detailed to match those shown in Fig. 7._
+_|_
+
+-  CNN-based embedding of the image
+
+**– Conv2d(in_channels=4, out_channels=64, kernel_size=3,**
+padding=2)
+
+**– ReLU**
+**– MaxPool(kernel_size=3, stride=2)**
+**– Conv2d(64, 128, 3, 1)**
+**– ReLU**
+**– MaxPool(3, 2)**
+**– Conv2d(128, 128, 3, 0)**
+**– ReLU-Conv2d(128, 4, 3, 0)**
+**– ReLU**
+**– MaxPool(2, 2)**
+**– Flatten**
+_Note, the dimensionality of the output is obs_embedding_size (in this case, = 676)_
+
+-  Neural network for the distribution over blocks (NN1)
+
+Linear(obs_embedding_size, N [2] -  (1 + Bmax))
+
+-  Neural network for the distribution over primitives (NN2)
+
+Linear(obs_embedding_size, N [2] -  Bmax * P)
+
+
+-----
+
+-  Neural network that outputs the mean for the raw primitive locations (NN3)
+
+Linear(obs_embedding_size, N [2] -  Bmax)
+
+-  Neural network that outputs the standard deviation for the raw primitive locations (NN4)
+
+Linear(obs_embedding_size, N [2] -  Bmax)
+
+C COMPARATIVE EFFICIENCY: WALL-CLOCK TIME AND GPU MEMORY
+CONSUMPTION
+
+We comprehensively investigate the comparative wall-clock time and GPU memory consumption
+of HMWS and RWS by comparing the algorithms over a range of matched number of likelihood
+evaluations. Here, we focus on the scene understanding domain, specifically the model wherein
+scene parses are inferred with color. We find that HMWS consistently results in more time- and
+memory-efficient inference, as seen in Tables 1 and 2. The reason for this is that while we match
+HMWS’s K(N + M ) with RWS’s S likelihood evaluations,
+
+-  The actual number of likelihood evaluations of HMWS is K · L which is typically smaller
+than K(N + M ) because we only take L ≤ _N + M unique memory elements (step 2 of_
+Algorithm 1).
+
+-  The loss terms in lines 7–9 of Algorithm 1 all contain only K · M < K · L ≤ _K(N + M_ )
+log probability terms {log pθ(zd[m][, z]c[mk], x)}m[M,K]=1,k=1[,][ {][log][ q][φ][(][z]c[mk]|zd[m][, x][)][}]m[M,K]=1,k=1 [and][ M]
+termscheaper than for {log qφ(zd[m] RWS[|][x][)][}] which hasm[M]=1 [which means differentiating these loss terms is proportionately] K(N + M ) log probability terms.
+
+-  We draw only N samples from qφ(zd _x) and K_ _L samples from qφ(zc_ _zd, x) in HMWS in_
+_|_ _·_ _|_
+comparison to K · (N + M ) in RWS.
+
+_S or K(M + N_ ) HMWS RWS
+
+8 67 min 82 min
+18 136 min 196 min
+32 186 min 327 min
+50 390 min 582 min
+72 499 min N/A
+
+Table 1: Wall-clock comparison (time to 5000 iterations). HMWS is faster in terms of absolute time to reach a
+fixed number of iterations regardless of the setting of the number of likelihood evaluations. Note that HMWS is
+even able to run with higher number of samples (e.g, K(M + N ) = 72), unlike RWS - which fails to run due to
+computationally prohibitive memory requirements.
+
+_S or K(M + N_ ) HMWS RWS
+
+8 2277 MB 3467 MB
+18 4645 MB 7646 MB
+32 8028 MB 13556 MB
+50 12485 MB 21155 MB
+72 17963 MB N/A
+
+Table 2: Comparison of GPU memory consumption. HMWS is more memory-efficient than RWS over a
+range of hyperparameter settings. Note that HMWS is even able to run with higher number of samples (e.g,
+_K ∗_ (M + N ) = 72), unlike RWS - which fails to run due to computationally prohibitive memory requirements.
+
+
+-----
+
+D ABLATION EXPERIMENTS
+
+D.1 “INTERPOLATING” BETWEEN HMWS AND RWS
+
+We “interpolate” between RWS and HMWS to better understand which components of HMWS are
+responsible for the performance increase. In particular, we train two more variants of the algorithm,
+
+-  “HMWS-” which trains all the components the same way as HMWS except the continuous
+recognition model qφ(zc _zd, x) which is trained using the RWS loss. This method has a_
+_|_
+memory.
+
+-  “RWS+” which trains all components the same way as RWS except the continuous recognition
+model qφ(zc _zd, x) which is trained using the HMWS loss in (10)._
+_|_
+
+The learning curves for the time series model in Figure 9 indicate that the memory is primarily
+responsible for the performance increase since HMWS- almost identically matches the performance of
+HMWS. Including the loss in (10) in RWS training helps learning but alone doesn’t achieve HMWS’s
+performance.
+
+35
+
+30
+
+25
+
+)x 20
+(logp 15
+
+10 HMWS
+
+RWS
+VIMCO
+
+5 HMWS
+RWS+
+
+0
+
+0 Iteration 10000
+
+
+Figure 9: Augmenting the learning curves of HMWS, RWS, VIMCO on the time series domain in Figure 4 (left)
+by HMWS- and RWS+ highlights the importance of HMWS’s memory.
+D.2 SENSITIVITY TO THE DIFFICULTY OF CONTINUOUS INFERENCE
+
+Since both the marginalization and inference of the continuous latent variable zc is approximated
+using importance sampling, we expect the performance of HMWS to suffer as the inference task gets
+more difficult. We empirically confirm this and that RWS and VIMCO suffer equally if not worse
+(Fig. 10) by arbitrarily adjusting the difficulty of continuous inference by changing the range of the
+period pPERi of periodic kernels (see App. B.1).
+
+HMWS
+
+30 RWS
+
+VIMCO
+
+20
+
+10
+
+0
+
+log p(x)
+
+10
+
+20
+
+30
+
+0.025 0.050 0.075 0.100 0.125 0.150 0.175 0.200
+
+Range of continuous latent variable
+
+
+Figure 10: Increasing the difficulty of the continuous inference task results in worse performance in HMWS.
+Baseline algorithms RWS and VIMCO suffer equally or even more.
+
+D.3 COMPARING HMWS AND RWS FOR DIFFERENT COMPUTE BUDGETS
+
+We compare HMWS and RWS for a number of different compute budgets (see Fig 11). Here, we
+keep K ∗ (M + N ) = S to match the number of likelihood evaluations of HMWS and RWS, and
+
+
+-----
+
+keep K = M = N for simplicity. We run a sweep for HMWS with K = M = N in {2, 3, 4, 5, 6}
+and a corresponding sweep for RWS with S in {8, 18, 32, 50, 72}. We find that HMWS consistently
+overperforms RWS.
+
+TIMESERIES SCENE UNDERSTANDING
+
+45200
+
+30
+
+45300
+
+20
+
+45400
+
+log p(x) 10 log p(x)
+
+45500
+
+0
+
+45600 HMWS
+
+RWS
+
+10
+
+10 20 30 40 50 60 70 10 20 30 40 50 60 70
+
+Number of likelihood evaluations Number of likelihood evaluations
+
+(K(M + N) for HMWS, S for RWS) (K(M + N) for HMWS, S for RWS)
+
+
+Figure 11: Comparing HMWS and RWS for other compute budgets. Increasing the overall compute by increasing
+_K and keeping K = M = N improves performance while HMWS consistently outperforms RWS with equivalent_
+compute. Note that RWS didn’t run for S = 72 due to memory constraints.
+E USING VIMCO FOR HYBRID GENERATIVE MODELS
+
+We initially treated the continuous latent variables the same way as the discrete variables. In the
+reported results, we used reparameterized sampling of the continuous latent variables for training
+VIMCO which decreases the variance of the estimator of the continuous recognition model gradients.
+However, this didn’t seem to improve the performance significantly.
+
+Since applying VIMCO to hybrid discrete-continuous latent variable settings is not common in the
+literature, we include a sketch of the derivation of the gradient estimator that we use for completeness.
+
+First, letof all the discrete and continuous randomness. We also drop the dependence on data Qφ(zd[1:][K]) = _k=1_ _[q][φ][(][z]d[k][)][ and][ Q][φ][(][z]c[1:][K]|zd[1:][K]) =_ _k=1_ _[q][φ][(][z]c[k][|][z]d[k][)][ be the distributions] x to reduce_
+notational clutter. Thus, the gradient we’d like to estimate is
+
+[Q][K] [Q][K]
+
+_∇φEQφ(zd1:K_ )Qφ(zc[1:][K] _|zd[1:][K]_ )[[][f] [(][θ, φ, z]d[1:][K], zc[1:][K])], (26)
+
+where f is the term inside of the IWAE objective f (...) = log _K[1]_ _Kk=1_ _qpφθ((zzdd[k][k][,z][,z]cc[k][k][,x][|][x][)][)]_ [.]
+
+Next, we apply reparameterized sampling of the continuous variablesP _zc[1:][K]_ . This involves choosing a
+simple, parameterless random variable ϵ ∼ _s(ϵ) and a reparameterization function zc = r(ϵ, zd, φ)_
+such that its output has exactly the same distribution sampling from the original recognition network
+_zc_ _qφ(zc_ _zd). Hence, we can rewrite the gradient we’d like to estimate as_
+_∼_ _|_
+
+_φEQφ(zd1:K_ )S(ϵ[1:][K] ) _f_ (θ, φ, zd[1:][K], _r(ϵ[k], zd[k][, φ][)][}]k[K]=1[)]_ _,_ (27)
+_∇_ _{_
+
+where f takes in reparameterized samples of the continuous latent variables instead of  _zc[1:][K]._
+
+Now, we follow a similar chain of reasoning to the one for deriving a score-function gradient estimator
+
+_φEQφ(zd1:K_ )S(ϵ[1:][K] ) _f_ (θ, φ, zd[1:][K], _r(ϵ[k], zd[k][, φ][)][}][K]k=1[)]_ (28)
+_∇_ _{_
+ 
+
+= _φ(Qφ(zd[1:][K])S(ϵ[1:][K]))_ _f_ (...) + Qφ(zd[1:][K])S(ϵ[1:][K]) _φf_ (...) dzd[1:][K] dϵ[1:][K] (29)
+_∇_ _∇_
+Z  
+
+= _Qφ(zd[1:][K])S(ϵ[1:][K])(_ _φ log Qφ(zd[1:][K]))f_ (...) + Qφ(zd[1:][K])S(ϵ[1:][K]) _φf_ (...) dzd[1:][K] dϵ[1:][K] (30)
+_∇_ _∇_
+Z
+
+
+= E _φ log Qφ(zd[1:][K])f_ (...) + _φf_ (...) _._ (31)
+_∇_ _∇_
+
+The VIMCO control variate is applied to the first term _φ log Qφ(zd[1:][K])f_ (...). Importantly, this term
+_∇_
+does not contain the density of the continuous variables Qφ(zc[1:][K] _zd[1:][K]). Hence, this term only_
+_|_
+provides gradients for learning the discrete recognition network unlike if we treated the continuous
+latent variables the same as the discrete latent variables (in which case a score-function gradient
+would be used for learning the continuous recognition network as well). The gradient for learning the
+continuous recognition network instead comes from the second term _φf_ (...).
+_∇_
+
+
+-----
+

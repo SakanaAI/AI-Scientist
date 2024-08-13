@@ -1,0 +1,1025 @@
+# COMPLETE VERIFICATION VIA MULTI-NEURON RELAXATION GUIDED BRANCH-AND-BOUND
+
+**Claudio Ferrari, Mark Niklas Müller, Nikola Jovanovi´c, Martin Vechev**
+Department of Computer Science, ETH Zurich, Switzerland
+```
+ {claudio.ferrari, mark.mueller, nikola.jovanovic, martin.vechev}@inf.ethz.ch
+
+```
+ABSTRACT
+
+State-of-the-art neural network verifiers are fundamentally based on one of two
+paradigms: either encoding the whole verification problem via tight multi-neuron
+convex relaxations or applying a Branch-and-Bound (BaB) procedure leveraging
+imprecise but fast bounding methods on a large number of easier subproblems.
+The former can capture complex multi-neuron dependencies but sacrifices completeness due to the inherent limitations of convex relaxations. The latter enables complete verification but becomes increasingly ineffective on larger and
+more challenging networks. In this work, we present a novel complete verifier
+which combines the strengths of both paradigms: it leverages multi-neuron relaxations to drastically reduce the number of subproblems generated during the
+BaB process and an efficient GPU-based dual optimizer to solve the remaining
+ones. An extensive evaluation demonstrates that our verifier achieves a new stateof-the-art on both established benchmarks as well as networks with significantly
+higher accuracy than previously considered. The latter result (up to 28% certification gains) indicates meaningful progress towards creating verifiers that can
+handle practically relevant networks.
+
+1 INTRODUCTION
+
+Recent years have witnessed substantial interest in methods for certifying properties of neural networks, ranging from stochastic approaches (Cohen et al., 2019) which construct a robust model from
+an underlying base classifier to deterministic ones (Gehr et al., 2018; Katz et al., 2017; Xu et al.,
+2020) that analyze a given network as is (the focus of our work).
+
+**Key Challenge: Scalable and Precise Non-Linearity Handling** Deterministic verification methods can be categorized as complete or incomplete. Recent incomplete verification methods based
+on propagating and refining a single convex region (Müller et al., 2022; Dathathri et al., 2020; Tjandraatmadja et al., 2020) are limited in precision due to fundamental constraints imposed by convex
+relaxations. Traditional complete verification approaches based on SMT solvers (Ehlers, 2017) or
+a single mixed-integer linear programming encoding of a property (Tjeng et al., 2019; Katz et al.,
+2017) suffer from worst-case exponential complexity and are often unable to compute sound bounds
+in reasonable time-frames. To address this issue, a Branch-and-Bound approach (Bunel et al., 2020)
+has been popularized recently: anytime-valid bounds are computed by recursively splitting the problem domain into easier subproblems and deriving bounds on each of these via cheap and less precise
+methods (Xu et al., 2021; Wang et al., 2021; Palma et al., 2021; Henriksen & Lomuscio, 2021).
+This approach has proven effective on (smaller) networks where there are relatively few unstable
+activations and splitting a problem simplifies it substantially. However, for larger networks or those
+not regularized to be amenable to certification this strategy becomes increasingly ineffective as the
+larger number of unstable activations makes individual splits less effective, which is exacerbated by
+the relatively loose underlying bounding methods.
+
+**This Work: Branch-and-Bound guided by Multi-Neuron Constraints** In this work, we propose
+a novel certification method and verifier, called Multi-Neuron Constraint Guided BaB (MN-BAB),
+which aims to combine the best of both worlds: it leverages the tight multi-neuron constraints proposed by Müller et al. (2022) within a BaB framework to yield an efficient GPU-based dual method.
+
+
+-----
+
+The key insight is that the significantly increased precision of the underlying bounding method
+substantially reduces the number of domain splits (carrying exponential cost) required to certify a
+property. This improvement is especially pronounced for larger and less regularized networks where
+additional splits of the problem domain yield diminishing returns. We release all code and scripts to
+[reproduce our experiments at https://github.com/eth-sri/mn-bab.](https://github.com/eth-sri/mn-bab)
+
+**Main Contributions:**
+
+-  We present a novel verification framework, MN-BAB, which leverages tight multi-neuron
+constraints and a GPU-based dual solver in a BaB approach.
+
+-  We develop a novel branching heuristic, ACS, based on information obtained from analyzing our multi-neuron constraints.
+
+-  We propose a new class of branching heuristics, CAB, applicable to all BaB-based verifiers, that correct the expected bound improvement of a branching decision for the incurred
+computational cost.
+
+-  Our extensive empirical evaluation demonstrates that we improve on the state of the art in
+terms of certified accuracy by as much as 28% on challenging networks.
+
+2 BACKGROUND
+
+In this section, we review the necessary background for our method (discussed next).
+
+2.1 NEURAL NETWORK VERIFICATION
+
+The neural network verification problem can be defined as follows: given a network f : X →Y, an
+input region D ⊆X, and a linear property P ⊆Y over the output neurons y ∈Y, prove f (x) ∈P,
+**_x_** . We instantiate this problem with the challenging ℓ -norm bounded perturbations and set
+_∀_ _∈D_ _∞_
+to the ℓ ball around an input point x0 of radius ϵ: _ϵ(x0) =_ **_x_** **_x_** **_x0_** _ϵ_ .
+_D_ _∞_ _D_ _{_ _∈X | ||_ _−_ _||∞_ _≤_ _}_
+
+For ease of presentation, we consider neural networks of L fully-connected layers with ReLU activation functions (we note that MN-BAB can handle a wide range of layers including convolutional,
+residual, batch-normalization, and average-pooling layers). We focus on ReLU networks as the BaB
+framework only yields complete verifiers for piecewise linear activation functions but remark that
+our approach is applicable to a wide class of activations including ReLU, Sigmoid, Tanh, MaxPool,
+and others. We denote the number of neurons in the i[th] layer as di and the corresponding weights and
+biases as W [(][i][)] _∈_ R[d][i][×][d][i][−][1] and b[(][i][)] _∈_ R[d][i] for i ∈{1, ..., L}. Further, the neural network is defined
+as f (x) := ˆz[(][L][)](x) where ˆz[(][i][)](x) := W [(][i][)]z[(][i][−][1)](x) + b[(][i][)] and z[(][i][)](x) := max(0, ˆz[(][i][)](x)). For
+readability, we omit the dependency of intermediate activations on x.
+
+Since we can encode any linear property over output neurons into an additional affine layer, we can
+simplify the general formulation f (x) ∈P to f (x) > 0. The property can now be verified by
+proving that a lower bound to the following optimization problem is greater 0:
+
+
+min _f_ (x) = ˆz[(][L][)]
+**_x∈Dϵ(x0)_**
+
+_s.t._ **_zˆ[(][i][)]_** = W [(][i][)]z[(][i][−][1)] + b[(][i][)]
+
+**_z[(][i][)]_** = max(0, ˆz[(][i][)])
+
+
+(1)
+
+
+A method is called sound if every property it proves actually holds (no false positives). A method is
+called complete if it can prove every property that actually holds (no false negatives).
+
+2.2 BRANCH-AND-BOUND FOR VERIFICATION
+
+Bunel et al. (2020) successfully applied the Branch-and-Bound (BaB) approach (lan, 1960) to neural
+network verification. It consists of a bounding method that computes sound upper and lower bounds
+on the optimization objective of Eq. (1) and a branching method that recursively splits the problem
+into subproblems with added constraints, allowing for increasingly tighter bounds. If an upper bound
+(primal solution) < 0 is found, this represents a counterexample and allows to terminate the procedure. If a lower bound > 0 is obtained, the property is verified on the corresponding (sub-)domain.
+
+
+-----
+
+If a lower bound > 0 is derived on all subdomains, the property is verified. An ideal splitting procedure minimizes the total time required for bounding, which is often well approximated by the
+number of considered subproblems. A simple approach is to split the input domain, however, this is
+inefficient for high-dimensional input spaces. Splitting a ReLU activation node into its positive and
+negative phases has been shown to be far more efficient (Bunel et al., 2020) and ultimately yields a
+complete verifier (Wang et al., 2021). Hence, we focus solely on ReLU branching strategies.
+
+_y_
+
+2.3 LINEAR CONSTRAINTS
+
+
+_y = max(0, x)_
+
+_x_
+
+
+The key challenge in neural network verification Eq. (1)
+is handling the non-linear activations. Stable ReLUs, i.e.,
+those which we can show to be always active (zˆ ≥ 0) or inactive (zˆ ≤ 0), can be replaced by linear functions. Unstable ReLUs, i.e., those that can be either active or inactive
+depending on the exact x ∈D, have to be approximated
+using a convex relaxation of their input-output set. We
+build on the convex relaxation introduced in DEEPPOLY
+(Singh et al., 2019b) and shown in Fig. 1. Its key property
+is the single linear upper and lower bound, which allows
+for efficient bound computation.
+
+2.4 MULTI-NEURON CONSTRAINTS
+
+All convex relaxations that consider ReLU neurons individually are fundamentally limited in their precision
+by the so-called (single-neuron) convex relaxation barrier
+(Salman et al., 2019). It can be overcome by considering
+multiple neurons jointly (Singh et al., 2019a; Tjandraatmadja et al., 2020; Müller et al., 2022; Palma et al., 2021),
+thereby capturing interactions between these neurons and
+obtaining tighter bounds, illustrated in Fig. 2. We leverage
+the multi-neuron constraints from Müller et al. (2022), expressed as a conjunction of linear constraints over the joint
+input and output space of a ReLU layer.
+
+
+
+|uxu −x (x −l x) lx|Col2|Col3|Col4|
+|---|---|---|---|
+|||y ≥αx|u|
+
+
+Figure 1: Illustration of the DEEPPOLY relaxation of a ReLU activation
+_y = max(x, 0) given the neuron-wise_
+bounds x [lx, ux] and parametrized
+_∈_
+by α ∈ [0, 1].
+
+
+2-neuron single-neuron
+
+_x2_ _x2_
+
+|y2|Col2|
+|---|---|
+
+
+2
+
+_x_
+
+_y2_
+
+2-neuron
+
+_x2_
+
+_x1_
+
+_y2_
+
+
+Figure 2: Comparison of multineuron and single-neuron constraints
+projected into y2-x1-x2-space. Reproduced from Müller et al. (2022).
+
+
+2.5 CONSTRAINED OPTIMIZATION VIA LAGRANGE MULTIPLIERS
+
+To express constraints as part of the optimization problem, we use the technique of Lagrange multipliers. Given a constrained minimization problem minx f (x), s.t. g(x) ≤ **0, we can bound the**
+objective function with:
+min
+**_x_** _[f]_ [(][x][)][ ≥] [min]x [max]λ **0** _[f]_ [(][x][) +][ λg][(][x][)]
+_≥_
+
+_gIf a constraint is satisfied, i.e.,(x)j > 0, increasing λj allows the objective to grow unboundedly, shifting the minimum over g(x)j ≤_ 0, λj = 0 maximizes the (inner) objective, else, i.e., x
+until the constraint is satisfied. Hence, if λj > 0 after optimization, the constraint is active, i.e., it is
+actively enforced and currently satisfied with equality.
+
+3 A MULTI-NEURON RELAXATION BASED BAB FRAMEWORK
+
+In this section, we describe the two key components of MN-BAB: (i) an efficient bounding method
+leveraging multi-neuron constraints, as well as constrained optimization via lagrange multipliers
+(§3.1), and (ii) a branching method tailored to it (§3.2).
+
+3.1 EFFICIENT MULTI-NEURON BOUNDING
+
+We build on the approach of Singh et al. (2019b), extended by Wang et al. (2021) of deriving a
+lower bound f as a function of the network inputs and a set of optimizable parameters. Crucially,
+we tighten these relatively loose bounds significantly by enforcing precise multi-neuron constraints
+
+
+-----
+
+via Lagrange multipliers. To enable this, we develop a method capable of integrating any linear
+constraint over arbitrary neurons anywhere in the network into the optimization objective. At a high
+level, we derive linear upper and lower bounds of the form z[(][i][)][ ≶]
+_−_ **_[az][(][i][−][1)][ +][ c][ for every layer’s out-]_**
+put in terms of its inputs z[(][i][−][1)]. Then, starting with a linear expression in the last layer’s outputs
+**_z[(][L][)]_** which we aim to bound, we use the linear bounds derived above, to replace z[(][L][)] with symbolic
+bounds depending only on the previous layer’s values z[(][L][−][1)]. We proceed in this manner recursively until we obtain an expression only in terms of the networks inputs. Below, we describe this
+backsubstitution process for ReLU and affine layers.
+
+**Affine Layer** Assume any affine layer ˆz[(][i][)] = W[(][i][)]z[(][i][−][1)] + **b[(][i][)]** and a lower bound f = ˆa[(][i][)]zˆ[(][i][)] +
+_cˆ[(][i][)]_ with respect to its outputs. We then substitute the affine expression for ˆz[(][i][)] to obtain:
+
+_f = ˆa[(][i][)]W[(][i][)]_ **_z[(][i][−][1)]_** + ˆa[(][i][)]b[(][i][)] + ˆc[(][i][)] = a[(][i][−][1)]z[(][i][−][1)] + c[(][i][−][1)] (2)
+
+**_a[(][i][−][1)]_** _c[(][i][−][1)]_
+| {z } | {z }
+
+**ReLU Layer** Let f = a[(][i][)]z[(][i][)] + c[(][i][)] be a lower bound with respect to the output of a ReLU
+layer z[(][i][)] = max(0, ˆz[(][i][)]) and l[(][i][)] and u[(][i][)] bounds on its input s.t. l[(][i][)] _≤_ **_zˆ[(][i][)]_** _≤_ **u[(][i][)], obtained by**
+recursively applying this bounding procedure or using a cheaper but less precise bounding method
+(Singh et al., 2018; Gowal et al., 2018). The backsubstitution through a ReLU layer now consists
+of three distinct steps: 1) enforcing multi-neuron constraints, 2) enforcing single-neuron constraints
+to replace the dependence on z[(][i][)] by ˆz[(][i][)], and 3) enforcing split constraints, which we describe in
+detail below.
+
+**Enforcing Multi-Neuron Constraints We compute multi-neuron constraints as described in Müller**
+et al. (2022), although our approach is applicable to any linear constraints in the input-output space
+of ReLU activations, written as:
+
+**_z[(][i][)]_**
+
+**_P_** [(][i][)] **_Pˆ_** [(][i][)] **p[(][i][)][]** **_zˆ[(][i][)]_** 0. (3)
+_−_   _≤_
+
+1
+
+
+
+ 
+
+where ˆz[(][i][)] are the pre- and z[(][i][)] the post-activation values and P [(][i][)], **_P[ˆ]_** [(][i][)], and −p[(][i][)] the constraint
+parameters. We enforce these constraints using Lagrange multipliers (see §2.5), yielding sound
+lower bounds for all γ[(][i][)] _∈_ (R[≥][0])ei, where ei denotes the number of multi-neuron constraints in
+layer i.
+
+**_a[(][i][)]z[(][i][)]_** + c[(][i][)] max **_P_** [(][i][)]zˆ[(][i][)] **p[(][i][)])**
+_≥_ **_γ_** [(][i][)] 0 **_[a][(][i][)][z][(][i][)][ +][ c][(][i][)][ +][ γ][(][i][)][⊤][(][P][ (][i][)][z][(][i][)][ + ˆ]_** _−_
+_≥_
+
+= max **_z[(][i][)]_** + γ[(][i][)][⊤]P[ˆ] [(][i][)]zˆ[(][i][)] + γ[(][i][)][⊤]( **p[(][i][)]) + c[(][i][)]**
+**_γ_** [(][i][)] 0 [(][a][(][i][)][ +][ γ][(][i][)][⊤][P][ (][i][)][)] _−_
+_≥_
+**_a[′][(][i][)]_** _c[′][(][i][)]_
+
+Note that this approach can be easily extended to linear constraints over any activations in arbitrary| {z } | {z }
+layers if applied in the last affine layer at the very beginning of the backsubstitution process.
+
+**Enforcing Single-Neuron Constraints We now apply the single-neuron DEEPPOLY relaxation with**
+parametrized slopes α collected in D (see below):
+
+
+max max
+**_γ_** [(][i][)]≥0 **_[a][′][(][i][)][z][(][i][)][ +][ c][′][(][i][)][ ≥]_** 0≤α[(][i][)]≤1
+**_γ_** [(][i][)]≥0
+
+= max
+0≤α[(][i][)]≤1
+**_γ_** [(][i][)]≥0
+
+
+**_a[′][(][i][)](D[(][i][)]zˆ[(][i][)]_** + b[(][i][)]) + c[′][(][i][)]
+
+
+= max **_a[′][(][i][)]D[(][i][)]_** **_zˆ[(][i][)]_** + a[′][(][i][)]b[(][i][)] + c[′][(][i][)]
+0≤γα[(][i][)][(][i]≥[)]≤0 1 **_a[′′][(][i][)]_** _c[′′][(][i][)]_
+
+The intercept vector b and the diagonal slope matrix| D{z are defined as:} | {z }
+
+
+1 if lj 0 or node j is positively split
+_≥_
+0 if uj 0 or node j is negatively split
+_≤_
+_αj_ if lj < 0 < uj and aj 0
+_uj_ _≥_
+
+_uj_ _−lj_ if lj < 0 < uj and aj < 0
+
+
+_Dj,j =_
+
+
+-----
+
+_uj_ _lj_ if lj < 0 < uj and aj < 0
+
+_−_ _[u][j]−[l][j]_
+
+0 otherwise
+
+
+_bj =_
+
+
+Where we drop the layer index i for readability and αj is the lower bound slope parameter illustrated
+in Fig. 1. Note how, depending on whether the sensitivity a[(]j[i][)] of f w.r.t. zj[(][i][)] has positive or negative
+
+sign, we substitute zj[(][i][)] for its lower or upper bound, respectively.
+
+**Enforcing Split Constraints We encode split constraints of the form ˆzj[(][i][)]** 0 or ˆzj[(][i][)] 0 using the
+_≥_ _≤_
+diagonal split matrix S as follows, again dropping the layer index i:
+
+
+1 positive split: ˆzj 0
+_−_ _≥_
+1 negative split: ˆzj < 0
+0 no split
+
+
+_Sj,j =_
+
+
+**_S[(][i][)]zˆ[(][i][)]_** _≤_ 0
+
+We again enforce these constraints using Lagrange multipliers:
+
+
+0≤γmaxα[(][i][)][(][i]≥[)]≤0 1 **_a[′′][(][i][)]zˆ[(][i][)]_** + c[′′][(][i][)] _≥_ 0≤βmaxα[(][i][)][(][i]≥[)]≤0 1 (a[′′][(][i][)] +a β[′′′][(][(][i][i][)][)][⊤]S[(][i][)]) **_zˆ[(][i][)]_** + cc[′′′][′′][(][(][i][i][)][)]
+
+**_γ_** [(][i][)]≥0 | {z } |{z}
+
+Putting everything together, the backsubstitution operation through a ReLU layer is:
+
+
+**_a[′′][(][i][)]zˆ[(][i][)]_** + c[′′][(][i][)] _≥_ 0≤maxα[(][i][)]≤1
+**_β[(][i][)]≥0_**
+**_γ_** [(][i][)]≥0
+
+
+max
+0≤α[(][i][)]≤1
+**_γ_** [(][i][)]≥0
+
+
+min max ((a[(][i][)] + γ[(][i][)][⊤]P [(][i][)])D[(][i][)] + β[(][i][)][⊤]S[(][i][)] + γ[(][i][)][⊤]P[ˆ] [(][i][)])
+_x∈D_ **_[a][(][i][)][z][(][i][)][ +][ c][(][i][)][ ≥]_** [min]x∈D 0≤α[(][i][)]≤1
+**_β[(][i][)]≥0_** **_aˆ_** [(][i][)]
+**_γ_** [(][i][)]≥0 | {z }
+
++ (a[(][i][)] + γ[(][i][)][⊤]P [(][i][)])[′]b[(][i][)] + γ[(][i][)][⊤](−p[(][i][)]) + c[(][i][)]
+_cˆ[(][i][)]_
+
+Full backsubstitution through all layers leads to an optimizable lower bound on| {z _f_ : }
+
+
+**_zˆ[(][i][)]_**
+
+
+(4)
+
+
+**_a[(0)]x + c[(0)]_** max
+_≥_ 0 **_α_** 1
+_≤00≤≤βγ≤_
+
+
+min
+**_x_** **_[a][(0)][x][ +][ c][(0)]_**
+_∈D_
+
+
+min
+**_x_** _[f]_ [(][x][)][ ≥] **_x[min]_** 0[max]α 1
+_∈D_ _∈D_ _≤00≤≤βγ≤_
+
+
+where the second inequality holds due to weak duality. We denote all αj[(][i][)] from every layer of the
+backsubstitution process with α and define β and γ analogously. The inner minimization over x
+has a closed form solution if is an lp-ball of radius ϵ around x0, given by Hölder’s inequality:
+_D_
+
+max min **_a[(0)]x0_** **_a[(0)][⊤]_** _q ϵ + c[(0)]_ (5)
+0≤00≤≤αβγ≤1 **_x∈D_** **_[a][(0)][x][ +][ c][(0)][ ≥]_** 0[max]≤00≤≤αβγ≤1 _−||_ _||_
+
+where q is defined s.t. _p[1]_ [+][ 1]q [= 1][. Since these bounds are sound for any][ 0][ ≤] **_[α][ ≤]_** [1][, and][ β][,][ γ][ ≥] [0][,]
+
+we tighten them by using (projected) gradient ascent to optimize these parameters.
+
+We compute all intermediate bounds using the same bounding procedure, leading to two full parameter sets for every neuron in the network. To reduce memory requirements, we share parameter sets
+between all neurons in the same layer, but keep separate sets for upper and lower bounds.
+
+**Upper Bounding the Minimum Objective** Showing an upper bound on the minimum optimization objective precluding verification (f < 0) allows us to terminate the BaB process early. Propagating any input x ∈D through the network yields a valid upper bound, hence, we use the input
+that minimizes Eq. (5):
+
+
+(x0)i + ϵ if a[(0)]i _< 0_
+(x0)i _ϵ_ if a[(0)]i 0 _[.]_
+_−_ _≥_
+
+
+_xi =_
+
+
+-----
+
+3.2 MULTI-NEURON CONSTRAINT GUIDED BRANCHING
+
+Generally, the BaB approach is based on recursively splitting an optimization problem into easier
+subproblems to derive increasingly tighter bounds. However, the benefit of different splits can vary
+widely, making an effective branching heuristic which chooses splits that minimize the total number
+of required subproblems a key component of any BaB framework (Bunel et al., 2020). Typically, a
+score is assigned based on the expected bound improvement and the most promising split is chosen.
+Consequently, the better this score captures the actual bound improvement, the better the resulting
+decision. Both the commonly used BABSR (Bunel et al., 2020) and the more recent FSB (De Palma
+et al., 2021) approximate improvements under a DEEPPOLY style backsubstitution procedure. As
+neither considers the impact of multi-neuron constraints, the scores they compute might not be
+suitable proxies for the bound improvements obtained with our method. To overcome this issue,
+we propose a novel branching heuristic, Active Constraint Score Branching (ACS), considering
+multi-neuron constraints. Further, we introduce a branching heuristic framework which corrects the
+expected bound improvement with the potentially significantly varying expected computational cost.
+
+**Active Constraint Score Branching** The value of a Lagrange parameter γ provides valuable information about the constraint it enforces. Concretely, γ > 0 indicates that a constraint is active,
+i.e., the optimal solution fulfills it with equality. Further, for a constraint g(x) 0, a larger ∂xγg(x)
+_≤_
+indicates a larger sensitivity of the final bound to violations of this constraint. We compute this
+sensitivity for our multi-neuron constraints with respect to both ReLU outputs and inputs as γ[⊤]P
+and γ[⊤]P[ˆ], respectively, where P and **_P[ˆ] are the multi-neuron constraint parameters. We then define_**
+our branching score for a neuron j in layer i as the sum over all sensitivities with respect to its input
+or output:
+_si,j = |γ[(][i][)][⊤]P_ [(][i][)]|j + |γ[(][i][)][⊤]P[ˆ] [(][i][)]|j, (6)
+
+Intuitively, splitting the node with the highest cumulative sensitivity makes its encoding exact and
+effectively tightens all of these high sensitivity constraints. We can efficiently compute those scores
+without an additional backsubstitution pass.
+
+**Cost Adjusted Branching** Any complete method will decide every property eventually. Hence,
+its runtime is a key performance metric. Existing branching heuristics ignore this aspect and only
+consider the expected improvement in bound-tightness, but not the sometimes considerable differences in computational cost. We propose Cost Adjusted Branching (CAB), scaling the expected
+bound improvement (approximated with the branching score) with the inverse of the cost expected
+for the split, and then picking the branching decision yielding the highest expected bound improvement per cost. The true cost of a split consists of the direct cost of the next branching step and the
+change of cumulative cost for all consecutive steps. We find a local approximation considering just
+the former component, similar to only considering the one-step bound improvement, to be a good
+proxy. We approximate this direct cost by the number of floating-point operations required to compute the new bounds, refer to App. B for a more detailed description. Note that any approximation
+of the expected cost can be used to instantiate CAB.
+
+**Enforcing Splits** Once the ReLU node to split on has been determined, two subproblems are
+generated. One where a non-negative ˆz ≥ 0 and one where non-positive ˆz ≤ 0 pre-activation value
+has to be enforced. This is accomplished by setting the corresponding entries in the split matrix
+**_S, used during the bounding process, to −1 and 1, respectively. As the intermediate bounds for all_**
+layers up to and including the one that was split remain unchanged, we do not recompute them.
+
+3.3 SOUNDNESS AND COMPLETENESS
+
+The soundness of the BaB approach follows directly from the soundness of the underlying bounding
+method discussed in Section 3.1. To show completeness, it is sufficient to consider the limit case
+where all ReLU nodes are split and the network becomes linear, making DEEPPOLY relaxations
+exact. To also obtain exact bounds, all split constraints have to be enforced. This can be done by
+computing optimal β for the now convex optimization problem (Wang et al., 2021). It follows that
+a property holds if and only if the exact bounds thus obtained are positive on all subproblems. We
+conclude that MN-BAB is a complete verifier.
+
+
+-----
+
+Table 1: Natural accuracy [%] (Acc.), verified accuracy [%] (Ver.) and its empirical upper bound
+
+[%] and average runtime [s] of the first 1000 images of the test set.
+
+MN-BAB (ours) MN-BAB (ours)
+Dataset Model Acc. _ϵ_ ERAN OVAL _β-CROWN_ BABSR +CAB ACS +CAB Upper
+Bound
+
+Ver. Time Ver. Time Ver. Time Ver. Time Ver. Time
+
+MNIST `ConvSmall` 98.0 0.12 **73.2** 38.4 69.8 26.2 71.6[†] 46 71.0 21.3 70.3 26.2 73.2
+
+`ConvBigConvSuper` 92.997.7 0.300.18 **78.60.5** 142.06.0 _−−_ _−−_ 77.7−[†] 78− 78.319.2 20.886.2 17.677.2 90.946.2 37.378.6
+
+CIFAR10 `ConvSmall` 63.0 2/255 47.2 54.4 46.2 17.7 46.3[†] 18 46.1 16.4 45.8 18.0 48.1
+
+`ConvBig` 63.1 2/255 48.2 128.1 50.6 42.0 50.3[†] 55 49.4 49.5 **51.5** **37.0** 55.0
+
+`ResNet6-A` _[‡]_ 84.0 1/255 45.0 114.6 -  -  52.0 263.4 48.0 202.7 **55.0** **170.7** 75.0
+
+`ResNet6-B` _[‡]_ 79.0 1/255 66.0 48.6 -  -  **67.0** 105.7 65.0 51.1 **67.0** **37.8** 71.0
+
+`ResNet8-A` _[‡]_ 83.0 1/255 11.0 362.5 -  -  18.0 497.3 19.0 390.7 **23.0** 371.0 70.0
+
+_†first 100 samples of the test set. • We report numbers from Wang et al. (2021). OVAL does not support ResNet architectures. −_ Errors prevent reporting reliable numbers. _[‡]_ Due to long runtimes, we evaluated only on the
+
+4 EXPERIMENTAL EVALUATION
+
+We now present an extensive evaluation of our method. First, and perhaps surprisingly, we find that
+existing MILP-based verification tools (Singh et al., 2019c; Müller et al., 2022) are more effective in
+verifying robustness on many established benchmark networks than what is considered state-of-theart. This highlights that next-generation verifiers should focus on and be benchmarked using less
+regularized and more accurate networks. We take a step in this direction by proposing and comparing
+on such networks, before analyzing the effectiveness of the different components of MN-BAB in an
+extensive ablation study.
+
+**Experimental Setup** We implement a GPU-based version of MN-BAB in PyTorch (Paszke et al.,
+2019) and evaluate all benchmarks using a single NVIDIA RTX 2080Ti, 64 GB of memory, and
+16 CPU cores. We attempt to falsify every property with an adversarial attack, before beginning
+certification. For every subproblem, we first lower-bound the objective using DEEPPOLY and then
+compute refined bounds using the method described in §3.
+
+**Benchmarks** We benchmark MN-BAB on a wide range of networks (see Table 3 in App. A) on
+the MNIST (Deng, 2012) and CIFAR10 datasets (Krizhevsky et al., 2009). We also consider three
+new residual networks, ResNet6-A, ResNet6-B, and ResNet8-A. ResNet6-A and ResNet6-B have the
+same architecture but differ in regularization strength while ResNet8-A has an additional residual
+block. All three were trained with adversarial training (Madry et al., 2018) using PGD, the GAMA
+loss (Sriramanan et al., 2020) and MixUp data augmentation (Zhang et al., 2021). ResNet6-A and
+```
+ResNet8-A were trained using 8-steps and ϵ = 4/255, whereas 20-steps and ϵ = 8/255 were used
+
+```
+for ResNet6-B.We compare against β-CROWN (Wang et al., 2021), a BaB-based state-of-the-art
+complete verifier, OVAL (Palma et al., 2021; De Palma et al., 2021; Bunel et al., 2020), a BaB framework based on a different class of multi-neuron constraints, and ERAN Singh et al. (2019c); Müller
+et al. (2022) combining the incomplete verifier PRIMA, whose tight multi-neuron constraints we
+leverage in our method, and a (partial) MILP encoding.
+
+**Comparison to State-of-the-Art Methods** In Table 1, we compare the verified accuracy and runtime of MN-BAB with that of state-of-the-art tools ERAN, β-CROWN, and OVAL. Perhaps surprisingly, we find that both MNIST and the smallest CIFAR10 benchmark network established over
+the last years (Singh et al., 2019b) can be verified completely or almost completely in less than 50s
+per sample using ERAN, making them less relevant as benchmarks for new verification tools. On
+these networks, all three BaB methods (including ours) are outperformed to a similar degree, with
+the reservation that we could not evaluate OVAL on MNIST ConvBig due to runtime errors. On
+the remaining unsolved networks where complete verification via a MILP encoding does not scale,
+MN-BAB consistently obtains the highest certified accuracy and for all but one also the lowest runtime. On ConvSuper we were not able to find configurations for OVAL and β-CROWN that did not
+run out of memory. Comparing the BaB methods, we observe an overall trend that more precise
+but also expensive underlying bounding methods are most effective on larger networks, where additional splits are less efficient, and complex inter-neuron interactions can be captured by the precise
+multi-neuron constraints. On these networks, the more complex interactions also lead to more active
+Multi-Neuron Constraints (MNCs) and hence more informative ACS scores.
+
+
+-----
+
+10[4]
+
+10[2]
+
+10[1]
+
+
+ResNet6-B
+
+|bproblem count ratio|Col2|
+|---|---|
+|mean||
+|mean||
+|ResNet6-A||
+
+
+10[0]
+
+0.0 0.5 1.0
+
+Quantile
+
+Figure 3: Ratio of subproblems required per property
+without and with MNCs.
+
+
+Figure 4: Ratio of subprob
+Subproblem count ratio
+10[3]
+
+mean
+
+10[2]
+
+mean
+
+10[1]
+
+10[0] ResNet6-A
+
+ResNet6-B
+
+0.0 0.5 1.0
+
+Quantile
+
+lems required per property
+with BABSR and ACS.
+
+
+Figure 5: Effect of Cost Ad
+Time [s] ACS+CAB
+
+300 ResNet6-A
+
+ResNet6-B
+
+150
+
+0
+
+0 150 300 450
+
+Time [s] ACS
+
+justed Branching on mean
+verification time with ACS.
+
+
+**Ablation Study** To analyze the indi- Table 2: Verified accuracy [%] (Ver.) and avg. runtime
+vidual components of MN-BaB, we con- [s] on the first 100 images of the test set for ϵ = 1/255).
+sider the weakly and heavily regular- Upper Branching MN-BAB
+ized ResNet6-A and ResNet6-B, respec- Model Acc. Bound Method MNCs
+
+Ver Time
+
+tively, with identical architecture. Concretely, we show the effect different `ResNet6-A` 84 75 No BranchingNo Branching yesno 3039 13.20.4
+bounding procedures and branching ap- BABSR no 42 247.1
+proaches have in the two settings in Ta- BABSR +CAB no 46 219.3
+
+FSB yes 45 239.7
+
+ble 2. As verified accuracy and mean run- BABSR yes 47 212.8
+time are very coarse performance metrics, BABSR +CAB yes 48 202.7
+we also analyze the ratio of runtimes and ACS yes 51 186.4
+
+ACS +CAB yes **55** 170.7
+
+number of subproblems required for ver
+`ResNet6-B` 79 71 No Branching no 58 0.7
+
+ification on a per-property level, filtering No Branching yes 61 4.1
+out those where both methods verify be- BABSR no 61 78.3
+fore any branching occurred (Figs. 3–5). BABSR +CAB no 63 64.9
+
+FSB yes 64 67.0
+
+Overall, we observe that the number of BABSR yes 63 65.5
+visited subproblems required for certifica- BABSR +CAB yes 65 51.1
+tion can be reduced by two to three orders ACSACS +CAB yesyes **6765** 37.852.0
+of magnitude by leveraging precise multineuron constraints and then again by another one to two orders of magnitude by our novel branching
+heuristic, ACS. Our cost-adjusted branching yields an additional speed up of around 50%.
+
+
+The trend of MN-BAB succeeding on more challenging net- Time [s] MNC ACS+CAB
+works is confirmed here. Leveraging MNCs enables us to ver- 300 ResNet6-A
+ify 20% more samples while being around 22% faster (see Ta- ResNet6-B
+ble 2) on ResNet6-A while on the more heavily regularized
+`ResNet6-B we only verify 6% more samples. When analyzing` 150
+on a per-property level, shown in Fig. 6, the trend is even more
+pronounced. For easy problems, leveraging MNCs and ACS
+has little impact (points in the lower left-hand corner). How- 0
+ever, it completely dominates on the harder properties where 0 150 300 450
+only using single-neuron constraints and BABSR takes up to Time [s] wo. MNC BaBSR
+33 times longer (points below the diagonal). Figure 6: Per property verification
+
+Time [s] MNC ACS+CAB
+
+300 ResNet6-A
+
+ResNet6-B
+
+150
+
+0
+
+0 150 300 450
+
+Time [s] wo. MNC BaBSR
+
+times using MN-BAB over those
+without MNCs and using BABSR.
+
+**Effectiveness of Multi-Neuron Constraints** In Fig. 3, we
+show the ratio between the number of subproblems required to prove the same lower bound on the
+final objective (either 0, if both methods certify, or the smaller of the two lower bounds at termination) with and without MNCs over the quantile of properties for ResNet6-A (blue) and ResNet6-B
+(orange). We observe that using MNCs reduces the number of subproblems for both networks by
+between two and three orders of magnitude. Despite the higher per bounding-step cost, this leads to
+the use of MNCs increasing the number of verified samples by up to 12% while reducing average
+certification times (see Table 2).
+
+**Effectiveness of ACS Branching** In Fig. 4, we show the ratio between the number of subproblems considered when using BABSR vs. ACS over the quantile of properties. We observe that
+ACS yields significantly fewer subproblems on most (75%) or all properties on ResNet6-A and
+
+
+-----
+
+```
+ResNet6-B, respectively, leading to an additional reduction by between one and two orders of mag
+```
+nitude and showing the effectiveness of our novel ACS branching heuristic. Average verification
+times are reduced by 12% and 21% on ResNet6-A and ResNet6-B, respectively. Note that the relatively small improvements in timings are due to timeouts for both methods yielding equally high
+runtimes which dominate the mean. FSB is consistently outperformed by ACS, certifying 12% less
+samples on ResNet6-A.
+
+**Effectiveness of Cost Adjusted Branching** In Fig. 5, we show the per property verification times
+with ACS + CAB over those with ACS. Using CAB is faster (points below the dashed line) for all
+properties, sometimes significantly so, leading to an average speedup of around 50%. Analyzing
+the results in Table 2, we observe that CAB is particularly effective in combination with the ACS
+scores and multi-neuron constraints, where bounding costs vary more significantly.
+
+5 RELATED WORK
+
+**Neural Network Verification Beyond the Single Neuron Convex Barrier** After the so-called
+(Single Neuron) Convex Barrier has been described by Salman et al. (2019) for incomplete
+relaxation-based methods, a range of approaches has been proposed that consider multiple neurons jointly to obtain tighter relaxations. Singh et al. (2019a) and Müller et al. (2022) derive joint
+constraints over the input-output space of groups of neurons and refine their relaxation using the
+intersection of these constraints. Tjandraatmadja et al. (2020) merge the ReLU and preceding affine
+layer to consider multiple inputs but only one output at a time. While the two approaches are theoretically incomparable, the former yields empirically better results (Müller et al., 2022).
+
+Early complete verification methods relied on off-the-shelf SMT (Katz et al., 2017; Ehlers, 2017)
+or MILP solvers (Dutta et al., 2018; Tjeng et al., 2019). However, these methods do not scale
+beyond small networks. In order to overcome these limitations, Bunel et al. (2020) formulated a
+BaB style framework for complete verification and showed it contains many previous methods as
+special cases. The basic idea is to recursively split the verification problem into easier subproblems
+on which cheap incomplete methods can show robustness. Since then, a range of partially (Xu
+et al., 2021) or fully (Wang et al., 2021; Palma et al., 2021) GPU-based BaB frameworks have been
+proposed. The most closely related, Palma et al. (2021), leverages the multi-neuron constraints from
+Tjandraatmadja et al. (2020) but yields an optimization problem of different structure, as constraints
+only ever include single output neurons.
+
+**Branching** Most ReLU branching methods proposed to date use the bound improvement of the
+two child subproblems as the metric to decide which node to branch on next. Full strong branching
+(Applegate et al., 1995) exhaustively evaluates this for all possible branching decisions. However,
+this is intractable for all but the smallest networks. Lu & Kumar (2020) train a GNN to imitate
+the behavior of full strong branching at a fraction of the cost, but transferability remains an open
+question and collecting training data to imitate is costly. Bunel et al. (2020) proposed an efficiently
+computable heuristic score, locally approximating the bound improvement of a branching decision
+using the method of Wong & Kolter (2018). Henriksen & Lomuscio (2021) refine this approach
+by additionally approximating the indirect effect of the branching decision, however, this requires
+using two different bounding procedures. De Palma et al. (2021) introduced filtered-smart-branching
+(FSB), using BaBSR to select branching candidates and then computing a more accurate heuristic
+score only for the selected candidates. Instead of targeting the largest bound improvement, Kouvaros
+& Lomuscio (2021) aim to minimize the number of unstable neurons by splitting the ReLU node
+with the most other ReLU nodes depending on it.
+
+6 CONCLUSION
+
+We propose the complete neural network verifier MN-BAB. Building on the Branch-and-Bound
+methodology, MN-BAB leverages tight multi-neuron constraints, a novel branching heuristic and an
+efficient dual solver, able to utilize massively parallel hardware accelerators, to enable the verification of particularly challenging networks. Our thorough empirical evaluation shows how MN-BAB
+is particularly effective in verifying challenging networks with high natural accuracy and practical
+relevance, reaching a new state-of-the-art in several settings.
+
+
+-----
+
+7 ETHICS STATEMENT
+
+Most machine learning based systems can be both employed with ethical as well as malicious purposes. Methods such as ours that enable the certification of robustness properties of neural networks
+are a step towards more safe and trustworthy AI systems and can hence amplify any such usage.
+Further, malicious actors might aim to convince regulators that the proposed approach is sufficient
+to show robustness to perturbations encountered during real world application, which could lead to
+insufficient regulation in safety critical domains.
+
+8 REPRODUCIBILITY STATEMENT
+
+We will make all code and trained networks required to reproduce our experiments available during
+the review process as supplementary material and provide instructions on how to run them. Upon
+publication, we will also release them publicly. We explain the basic experimental setup in Section 4
+and provide more details in Section A. All datasets used in the experiments are publicly available.
+Random seeds are fixed where possible and provided in the supplementary material.
+
+
+-----
+
+REFERENCES
+
+An automatic method of solving discrete programming problems. Econometrica, 28(3), 1960. ISSN
+00129682, 14680262.
+
+David Applegate, Robert Bixby, Vašek Chvátal, and William Cook. Finding cuts in the tsp (a
+preliminary report). Technical report, Citeseer, 1995.
+
+Rudy Bunel, P Mudigonda, Ilker Turkaslan, P Torr, Jingyue Lu, and Pushmeet Kohli. Branch and
+bound for piecewise linear neural network verification. Journal of Machine Learning Research,
+21(2020), 2020.
+
+Jeremy M. Cohen, Elan Rosenfeld, and J. Zico Kolter. Certified adversarial robustness via randomized smoothing. In Proc. of ICML, volume 97, 2019.
+
+Sumanth Dathathri, Krishnamurthy Dvijotham, Alexey Kurakin, Aditi Raghunathan, Jonathan Uesato, Rudy Bunel, Shreya Shankar, Jacob Steinhardt, Ian J. Goodfellow, Percy Liang, and
+Pushmeet Kohli. Enabling certification of verification-agnostic networks via memory-efficient
+semidefinite programming. In Advances in Neural Information Processing Systems 33: Annual
+_Conference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12,_
+_2020, virtual, 2020._
+
+Alessandro De Palma, Rudy Bunel, Alban Desmaison, Krishnamurthy Dvijotham, Pushmeet Kohli,
+Philip HS Torr, and M Pawan Kumar. Improved branch and bound for neural network verification
+via lagrangian decomposition. ArXiv preprint, abs/2104.06718, 2021.
+
+Li Deng. The mnist database of handwritten digit images for machine learning research. IEEE
+_Signal Processing Magazine, 29(6), 2012._
+
+Souradeep Dutta, Susmit Jha, Sriram Sankaranarayanan, and Ashish Tiwari. Output range analysis
+for deep feedforward neural networks. In NASA Formal Methods Symposium. Springer, 2018.
+
+Ruediger Ehlers. Formal verification of piece-wise linear feed-forward neural networks. In Interna_tional Symposium on Automated Technology for Verification and Analysis. Springer, 2017._
+
+Timon Gehr, Matthew Mirman, Dana Drachsler-Cohen, Petar Tsankov, Swarat Chaudhuri, and Martin Vechev. Ai2: Safety and robustness certification of neural networks with abstract interpretation. In 2018 IEEE Symposium on Security and Privacy (SP). IEEE, 2018.
+
+Sven Gowal, Krishnamurthy Dvijotham, Robert Stanforth, Rudy Bunel, Chongli Qin, Jonathan Uesato, Relja Arandjelovic, Timothy Mann, and Pushmeet Kohli. On the effectiveness of interval
+bound propagation for training verifiably robust models. ArXiv preprint, abs/1810.12715, 2018.
+
+Patrick Henriksen and Alessio Lomuscio. Deepsplit: An efficient splitting method for neural network verification via indirect effect analysis. In Proceedings of the 30th International Joint Con_ference on Artificial Intelligence (IJCAI21), To appear, 2021._
+
+Guy Katz, Clark Barrett, David L Dill, Kyle Julian, and Mykel J Kochenderfer. Reluplex: An
+efficient smt solver for verifying deep neural networks. In International Conference on Computer
+_Aided Verification. Springer, 2017._
+
+Panagiotis Kouvaros and Alessio Lomuscio. Towards scalable complete verification of relu neural networks via dependency-based branching. In Proceedings of the 30th International Joint
+_Conference on Artificial Intelligence (IJCAI21), To Appear, 2021._
+
+Alex Krizhevsky, Geoffrey Hinton, et al. Learning multiple layers of features from tiny images.
+2009.
+
+Jingyue Lu and M. Pawan Kumar. Neural network branching for neural network verification. In
+_Proc. of ICLR, 2020._
+
+Aleksander Madry, Aleksandar Makelov, Ludwig Schmidt, Dimitris Tsipras, and Adrian Vladu.
+Towards deep learning models resistant to adversarial attacks. In Proc. of ICLR, 2018.
+
+
+-----
+
+Mark Niklas Müller, Gleb Makarchuk, Gagandeep Singh, Markus Püschel, and Martin Vechev.
+Prima: General and precise neural network certification via scalable convex hull approximations.
+_[Proc. ACM Program. Lang., 6(POPL), jan 2022. doi: 10.1145/3498704. URL https://doi.](https://doi.org/10.1145/3498704)_
+```
+ org/10.1145/3498704.
+
+```
+Alessandro De Palma, Harkirat S. Behl, Rudy R. Bunel, Philip H. S. Torr, and M. Pawan Kumar.
+Scaling the convex barrier with active sets. In Proc. of ICLR, 2021.
+
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor
+Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward
+Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner,
+Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style, high-performance
+deep learning library. In Advances in Neural Information Processing Systems 32: Annual Con_ference on Neural Information Processing Systems 2019, NeurIPS 2019, December 8-14, 2019,_
+_Vancouver, BC, Canada, 2019._
+
+Hadi Salman, Greg Yang, Huan Zhang, Cho-Jui Hsieh, and Pengchuan Zhang. A convex relaxation
+barrier to tight robustness verification of neural networks. In Advances in Neural Information
+_Processing Systems 32: Annual Conference on Neural Information Processing Systems 2019,_
+_NeurIPS 2019, December 8-14, 2019, Vancouver, BC, Canada, 2019._
+
+Gagandeep Singh, Timon Gehr, Matthew Mirman, Markus Püschel, and Martin T. Vechev. Fast
+and effective robustness certification. In Advances in Neural Information Processing Systems 31:
+_Annual Conference on Neural Information Processing Systems 2018, NeurIPS 2018, December_
+_3-8, 2018, Montréal, Canada, 2018._
+
+Gagandeep Singh, Rupanshu Ganvir, Markus Püschel, and Martin T. Vechev. Beyond the single neuron convex barrier for neural network certification. In Advances in Neural Information Processing
+_Systems 32: Annual Conference on Neural Information Processing Systems 2019, NeurIPS 2019,_
+_December 8-14, 2019, Vancouver, BC, Canada, 2019a._
+
+Gagandeep Singh, Timon Gehr, Markus Püschel, and Martin Vechev. An abstract domain for certifying neural networks. Proceedings of the ACM on Programming Languages, 3(POPL), 2019b.
+
+Gagandeep Singh, Timon Gehr, Markus Püschel, and Martin T. Vechev. Boosting robustness certification of neural networks. In Proc. of ICLR, 2019c.
+
+Gaurang Sriramanan, Sravanti Addepalli, Arya Baburaj, and Venkatesh Babu R. Guided adversarial
+attack for evaluating and enhancing adversarial defenses. In Advances in Neural Information
+_Processing Systems 33: Annual Conference on Neural Information Processing Systems 2020,_
+_NeurIPS 2020, December 6-12, 2020, virtual, 2020._
+
+Christian Tjandraatmadja, Ross Anderson, Joey Huchette, Will Ma, Krunal Patel, and Juan Pablo
+Vielma. The convex relaxation barrier, revisited: Tightened single-neuron relaxations for neural
+network verification. In Advances in Neural Information Processing Systems 33: Annual Con_ference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020,_
+_virtual, 2020._
+
+Vincent Tjeng, Kai Y. Xiao, and Russ Tedrake. Evaluating robustness of neural networks with mixed
+integer programming. In Proc. of ICLR, 2019.
+
+Shiqi Wang, Huan Zhang, Kaidi Xu, Xue Lin, Suman Jana, Cho-Jui Hsieh, and J Zico Kolter.
+Beta-crown: Efficient bound propagation with per-neuron split constraints for neural network
+robustness verification. In ICML 2021 Workshop on Adversarial Machine Learning, 2021.
+
+Eric Wong and J. Zico Kolter. Provable defenses against adversarial examples via the convex outer
+adversarial polytope. In Proc. of ICML, volume 80, 2018.
+
+Kaidi Xu, Zhouxing Shi, Huan Zhang, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya
+Kailkhura, Xue Lin, and Cho-Jui Hsieh. Automatic perturbation analysis for scalable certified
+robustness and beyond. In Advances in Neural Information Processing Systems 33: Annual Con_ference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020,_
+_virtual, 2020._
+
+
+-----
+
+Kaidi Xu, Huan Zhang, Shiqi Wang, Yihan Wang, Suman Jana, Xue Lin, and Cho-Jui Hsieh. Fast
+and complete: Enabling complete neural network verification with rapid and massively parallel
+incomplete verifiers. In Proc. of ICLR, 2021.
+
+Linjun Zhang, Zhun Deng, Kenji Kawaguchi, Amirata Ghorbani, and James Zou. How does mixup
+help with robustness and generalization? In Proc. of ICLR, 2021.
+
+
+-----
+
+Table 3: Overview of the experimental configuration for every network.
+
+#Activation #Activation
+Dataset Model Training Timeout Batch sizes
+Layers Nodes
+
+MNIST `ConvSmall` NOR 360 [100, 200, 400] 3 3 604
+`ConvBig` DiffAI 2000 [2, 2, 4, 8, 12, 20] 6 34 688
+`ConvSuper` DiffAI 360 [1, 2, 2, 3, 4, 8] 6 88 500
+
+CIFAR10 `ConvSmall` PGD 360 [100, 150, 250] 3 4 852
+`ConvBig` PGD 500 [3, 3, 6, 6, 8, 16] 6 62 464
+`ResNet6-A` PGD 600 [4, 4, 8, 12, 16, 100] 6 10 340
+`ResNet6-B` PGD 600 [4, 8, 32, 64, 128, 256] 6 10 340
+`ResNet8-A` PGD 600 [2, 2, 2, 4, 8, 16, 32, 64] 8 11 364
+
+A EXPERIMENT DETAILS
+
+In Table 3 we show the per-sample timeout and the batch sizes that were used in the experiments.
+The timeouts for the first 4 networks were chosen to approximately match the average runtimes
+reported by Wang et al. (2021), to facilitate comparability.
+
+Since we keep intermediate bounds of neurons before the split layer fixed, as described in Section 3.2, the memory requirements for splitting at different layers can vary. We exploit this fact and
+choose batch sizes for our bounding procedure depending on the layer where the split occurred.
+
+In order to falsify properties more quickly, we run a strong adversarial attack with the following
+parameters before attempting certification: We apply two targeted versions (towards all classes) of
+PGD (Madry et al., 2018) using margin loss (Gowal et al., 2018) and GAMA loss (Sriramanan et al.,
+2020), both with 5 restarts, 50 steps, and 10 step output diversification (?).
+
+A.1 ARCHITECTURES
+
+In this section, we provide an overview of all the architectures evaluated in Section 4. The architectures of the convolutional networks for MNIST and CIFAR10 are detailed in Table 4. The
+architectures of both ResNet6-A and ResNet6-B are given in Table 5
+
+Table 4: Network architectures of the convolutional networks for CIFAR10 and MNIST. All layers
+listed below are followed by an activation layer. The output layer is omitted. ‘CONV c h×w/s/p’
+corresponds to a 2D convolution with c output channels, an h×w kernel size, a stride of s in both
+dimensions, and an all-around zero padding of p.
+```
+                   ConvSmall ConvBig ConvSuper
+
+```
+CCONVONVFC 100 32 4 16 4××4/2/04/2/0 CCCCONVONVONVONV 64 3 64 4 32 4 32 3××××4/2/14/2/13/1/13/1/1 CCCCONVONVONVONV 32 4 64 3 64 4 32 3××××4/1/04/1/03/1/03/1/0
+FC 512 FC 512
+FC 512 FC 512
+
+B SPLIT-COST COMPUTATION FOR CAB
+
+Recall that for CAB, we normalize the branching score obtained with an arbitrary branching heuristic with the (approximate) cost of the corresponding split. The true cost of a split consists of the
+direct cost of the next branching step and the change of cumulative cost for all consecutive steps. As
+a local approximation, we just consider the former component.
+
+We approximate this direct cost by the number of floating-point operations required to compute
+the new bounds. This is computed as the sum of floating-point operations required for bounding
+all intermediate bounds that are recomputed. Our bounding approach only enforces constraints
+
+
+-----
+
+Table 5: Network architecture of the ResNet6 and ResNet8. All layers listed below are followed by a
+ReLU activation layer, except if they are followed by a RESADD layer. The output layer is omitted.
+‘CONV c h×w/s/p’ corresponds to a 2D convolution with c output channels, an h×w kernel size, a
+stride of s in both dimensions, and an all-around zero padding of p.
+```
+                   ResNet6 ResNet8
+
+```
+CONV 32 1C×ONV1/2/0R 16 3ESADDCC×ONVONV3/1/1 32 3 32 3××3/2/13/1/1 CONV 32 1×CONV1/2/0R 16 3ESADD×CCONVONV3/2/1 32 3 32 3××3/2/13/1/1
+CONV 64 1×1/2/0RESADDCCONVONV 64 3 64 3××3/2/13/1/1 CONV 64 1×1/2/0RESADDCCONVONV 64 3 64 3××3/2/13/1/1
+FC 100 CONV 128 1×1/2/0RESADDCCONVONV 128 3 128 3××3/2/13/1/1
+FC 100
+
+on neurons preceding the neurons included in the bounding objective. Hence, we only recompute
+intermediate bounds for layers after the layer where the split occurs, as discussed in §3.2.
+
+To compute the cost of recomputing the lower (or upper) bound of one intermediate node, we add up
+all floating point operations needed to perform the backsubstitution described in §3.1. As backsubstitution is just a series of matrix multiplications, the number of required floating point operations
+can be deduced from the sizes of the multiplied matrices.
+
+Thus if we split on layer k of an L layer network and the cost of backsubstituion from layer i is Ci
+and the number of nodes is di, the final cost of the split is:
+
+_L_
+
+2diCi
+
+_i=k+1_
+
+X
+
+Where the factor 2 comes from the fact that for intermediate bounds we need to recompute both
+lower and upper bounds. The cost Ci of a full backsubstitution from layer i can be computed as the
+sum over the cost of backsubstituting through all preceding layers Ci = _j=0_ _[c][j][, where the cost]_
+for a single layer can be computed as follows:
+
+[P][i][−][1]
+
+-  ReLU layer: cj = dj + pj, where pj is the number of multi-neuron constraints.
+
+-  Linear layer: cj = #Wj, where #Wj is the number of elements in the weight matrix.
+
+-  Conv layer: cj = djkj[2][, where][ k][j][ is the kernel size.]
+
+
+-----
+

@@ -1,0 +1,2014 @@
+# PIPEGCN: EFFICIENT FULL-GRAPH TRAINING
+## OF GRAPH CONVOLUTIONAL NETWORKS WITH
+# PIPELINED FEATURE COMMUNICATION
+
+
+**Cheng Wan**
+Rice University
+chwan@rice.edu
+
+**Anastasios Kyrillidis**
+Rice University
+anastasios@rice.edu
+
+
+**Youjie Li**
+UIUC
+li238@illinois.edu
+
+**Nam Sung Kim**
+UIUC
+nam.sung.kim@gmail.com
+
+ABSTRACT
+
+
+**Cameron R. Wolfe**
+Rice University
+crw13@rice.edu
+
+**Yingyan Lin**
+Rice University
+yl150@rice.edu
+
+
+Graph Convolutional Networks (GCNs) is the state-of-the-art method for learning
+graph-structured data, and training large-scale GCNs requires distributed training
+across multiple accelerators such that each accelerator is able to hold a partitioned
+subgraph. However, distributed GCN training incurs prohibitive overhead of communicating node features and feature gradients among partitions for every GCN
+layer during each training iteration, limiting the achievable training efficiency and
+model scalability. To this end, we propose PipeGCN, a simple yet effective scheme
+that hides the communication overhead by pipelining inter-partition communication with intra-partition computation. It is non-trivial to pipeline for efficient
+GCN training, as communicated node features/gradients will become stale and
+thus can harm the convergence, negating the pipeline benefit. Notably, little is
+known regarding the convergence rate of GCN training with both stale features
+and stale feature gradients. This work not only provides a theoretical convergence
+analysis but also finds the convergence rate of PipeGCN to be close to that of the
+vanilla distributed GCN training without any staleness. Furthermore, we develop a
+smoothing method to further improve PipeGCN’s convergence. Extensive experiments show that PipeGCN can largely boost the training throughput (1.7×∼28.5×)
+while achieving the same accuracy as its vanilla counterpart and existing full-graph
+[training methods. The code is available at https://github.com/RICE-EIC/PipeGCN.](https://github.com/RICE-EIC/PipeGCN)
+
+1 INTRODUCTION
+
+Graph Convolutional Networks (GCNs) (Kipf & Welling, 2016) have gained great popularity recently
+as they demonstrated the state-of-the-art (SOTA) performance in learning graph-structured data
+(Zhang & Chen, 2018; Xu et al., 2018; Ying et al., 2018). Their promising performance is resulting
+from their ability to capture diverse neighborhood connectivity. In particular, a GCN aggregates
+all features from the neighbor node set for a given node, the feature of which is then updated via a
+multi-layer perceptron. Such a two-step process (neighbor aggregation and node update) empowers
+GCNs to better learn graph structures. Despite their promising performance, training GCNs at scale
+is still a challenging problem, as a prohibitive amount of compute and memory resources are required
+to train a real-world large-scale graph, let alone exploring deeper and more advanced models. To
+overcome this challenge, various sampling-based methods have been proposed to reduce the resource
+requirement at a cost of incurring feature approximation errors. A straightforward instance is to
+create mini-batches by sampling neighbors (e.g., GraphSAGE (Hamilton et al., 2017) and VR-GCN
+(Chen et al., 2018)) or to extract subgraphs as training samples (e.g., Cluster-GCN (Chiang et al.,
+2019) and GraphSAINT (Zeng et al., 2020)).
+
+In addition to sampling-based methods, distributed GCN training has emerged as a promising
+alternative, as it enables large full-graph training of GCNs across multiple accelerators such as GPUs.
+
+
+-----
+
+This approach first partitions a giant graph into multiple small subgraps, each of which is able to
+fit into a single GPU, and then train these partitioned subgraphs locally on GPUs together with
+indispensable communication across partitions. Following this direction, several recent works (Ma
+et al., 2019; Jia et al., 2020; Tripathy et al., 2020; Thorpe et al., 2021; Wan et al., 2022) have been
+proposed and verified the great potential of distributed GCN training. P [3] (Gandhi & Iyer, 2021)
+follows another direction that splits the data along the feature dimension and leverages intra-layer
+model parallelism for training, which shows superior performance on small models.
+
+In this work, we propose a new method for distributed GCN training, PipeGCN, which targets
+achieving a full-graph accuracy with boosted training efficiency. Our main contributions are following:
+
+-  We first analyze two efficiency bottlenecks in distributed GCN training: the required significant
+_communication overhead and frequent synchronization, and then propose a simple yet effective_
+technique called PipeGCN to address both aforementioned bottlenecks by pipelining inter-partition
+communication with intra-partition computation to hide the communication overhead.
+
+-  We address the challenge raised by PipeGCN, i.e., the resulting staleness in communicated features
+and feature gradients (neither weights nor weight gradients), by providing a theoretical convergence
+analysis and showing that PipeGCN’s convergence rate is O(T _[−]_ 3[2] ), i.e., close to vanilla distributed
+
+GCN training without staleness. To the best of our knowledge, we are the first to provide a
+_theoretical convergence proof of GCN training with both stale feature and stale feature gradients._
+
+-  We further propose a low-overhead smoothing method to further improve PipeGCN’s convergence
+by reducing the error incurred by the staleness.
+
+-  Extensive empirical and ablation studies consistently validate the advantages of PipeGCN over
+both vanilla distributed GCN training and those SOTA full-graph training methods (e.g., boosting
+_the training throughput by 1.7×∼28.5× while achieving the same or a better accuracy)._
+
+2 BACKGROUND AND RELATED WORKS
+
+**Graph Convolutional Networks. GCNs represent each node in a graph as a feature (embedding)**
+vector and learn the feature vector via a two-step process (neighbor aggregation and then node
+_update) for each layer, which can be mathematically described as:_
+
+_zv[(][ℓ][)]_ = ζ [(][ℓ][)][ n]h[(]u[ℓ][−][1)] _u_ (v) (1)
+_|_ _∈N_
+o
+
+_h[(]v[ℓ][)]_ = φ[(][ℓ][)][ ]zv[(][ℓ][)][, h]v[(][ℓ][−][1)] (2)
+
+where (v) is the neighbor set of node v in the graph, h[(]v[ℓ][)] represents the learned embedding vector
+_N_
+of node v at the ℓ-th layer, zv[(][ℓ][)] is an intermediate aggregated feature calculated by an aggregation
+function ζ [(][ℓ][)], and φ[(][ℓ][)] is the function for updating the feature of node v. The original GCN (Kipf
+& Welling, 2016) uses a weighted average aggregator for ζ [(][ℓ][)] and the update function φ[(][ℓ][)] is a
+single-layer perceptron σ(W [(][ℓ][)]zv[(][ℓ][)][)][ where][ σ][(][·][)][ is a non-linear activation function and][ W][ (][ℓ][)][ is a]
+weight matrix. Another famous GCN instance is GraphSAGE (Hamilton et al., 2017) in which φ[(][ℓ][)] is
+_σ_ _W_ [(][ℓ][)] _· CONCAT_ _zv[(][ℓ][)][, h]v[(][ℓ][−][1)]_ .
+  
+
+**Distributed Training for GCNs. A real-world graph can contain millions of nodes and billions of**
+edges (Hu et al., 2020), for which a feasible training approach is to partition it into small subgraphs
+(to fit into each GPU’s resource), and train them in parallel, during which necessary communication is
+performed to exchange boundary node features and gradients to satisfy GCNs’s neighbor aggregation
+(Equ. 1). Such an approach is called vanilla partition-parallel training and is illustrated in Fig. 1
+(a). Following this approach, several works have been proposed recently. NeuGraph (Ma et al.,
+2019), AliGraph (Zhu et al., 2019), and ROC (Jia et al., 2020) perform such partition-parallel
+training but rely on CPUs for storage for all partitions and repeated swapping of a partial partition
+to GPUs. Inevitably, prohibitive CPU-GPU swaps are incurred, plaguing the achievable training
+efficiency. CAGNET (Tripathy et al., 2020) is different in that it splits each node feature vector into
+tiny sub-vectors which are then broadcasted and computed sequentially, thus requiring redundant
+communication and frequent synchronization. Furthermore, P [3] (Gandhi & Iyer, 2021) proposes to
+split both the feature and the GCN layer for mitigating the communication overhead, but it makes a
+strong assumption that the hidden dimensions of a GCN should be considerably smaller than that of
+
+
+-----
+
+|2 5|1 6|
+|---|---|
+
+|2 5|1 6|
+|---|---|
+
+|Iteration #1 ... 2 5 1 6|Col2|
+|---|---|
+|Communicate|Compute|
+|3 4 2 5 ...||
+
+|Timeline of (a)|Col2|
+|---|---|
+|Iteration #2 ... 2 5 1 6||
+|Communicate|Compute|
+|3 4 2 5 ...||
+
+
+1 2 3 **Timeline of (a)** **Timeline of PipeGCN**
+
+**Graph** 5
+
+6 4 _Iteration #1_ _Iteration #2_ _Iteration #1_ _Iteration #2_
+
+**Partition** Part 1 ... ... ...... ......
+
+Part 1 Part 2 Part 3
+
+2 5 1 6 2 5 1 6
+
+1 2 1 2 3 2 3 Part 2 Communicate Compute [...] Communicate Compute [...] CommunicateCompute ... Compute ...
+
+5 6 5 4 5 Communicate
+
+6 4 **Inner Node** 6 4 3 4 2 5 3 4 2 5 **Pipeline**
+
+**Boundary Node**
+
+Part 3 ... ... ... ...
+
+**_Communicate Boundary Feature & Grad_**
+
+(a) Vanilla partition-parallel training (b) Timeline of vanilla partition-parallel training (c) PipeGCN
+
+
+Figure 1: An illustrative comparison between vanilla partition-parallel training and PipeGCN.
+
+input features, which restricts the model size. A concurrent work Dorylus (Thorpe et al., 2021) adopts
+a fine-grained pipeline along each compute operation in GCN training and supports asynchronous
+usage of stale features. Nevertheless, the resulting staleness of feature gradients is neither analyzed
+nor considered for convergence proof, let alone error reduction methods for the incurred staleness.
+
+**Asynchronous Distributed Training. Many** Table 1: Differences between conventional asynprior works have been proposed for asyn- chronous distributed training and PipeGCN.
+chronous distributed training of DNNs. Most
+works (e.g., Hogwild! (Niu et al., 2011), SSP Hogwild!, SSP,
+(Ho et al., 2013), and MXNet (Li et al., 2014)) Method MXNet, Pipe-SGD, **PipeGCN**
+rely on a parameter server with multiple work- PipeDream, PipeMare
+ers running asynchronously to hide commu- Large Model,
+
+Target Large Feature
+
+nication overhead of weights/(weight gradi- Small Feature
+_ents) among each other, at a cost of using_ Features and
+
+Staleness Weight Gradients
+
+stale weight gradients from previous itera- Feature Gradients
+tions. Other works like Pipe-SGD (Li et al.,
+2018b) pipeline such communication with local computation of each worker. Another direction is to
+partition a large model along its layers across multiple GPUs and then stream in small data batches
+through the layer pipeline, e.g., PipeDream (Harlap et al., 2018) and PipeMare (Yang et al., 2021).
+Nonetheless, all these works aim at large models with small data, where communication overhead
+of model weights/weight gradients are substantial but data feature communications are marginal (if
+not none), thus not well suited for GCNs. More importantly, they focus on convergence with stale
+_weight gradients of models, rather than stale features/feature gradients incurred in GCN training._
+Tab. 1 summarizes the differences. In a nutshell, little effort has been made to study asynchronous or
+_pipelined distributed training of GCNs, where feature communication plays the major role, let alone_
+_the corresponding theoretical convergence proofs._
+
+**GCNs with Stale Features/Feature Gradients. Several recent works have been proposed to adopt**
+either stale features (Chen et al., 2018; Cong et al., 2020) or feature gradients (Cong et al., 2021) in
+single-GPU training of GCNs. Nevertheless, their convergence analysis considers only one of two
+kinds of staleness and derives a convergence rate of O(T _[−]_ [1]2 ) for pure sampling-based methods. This
+
+is, however, limited in distributed GCN training as its convergence is simultaneously affected by both
+_kinds of staleness. PipeGCN proves such convergence with both stale features and feature gradients_
+and offers a better rate of O(T _[−]_ [2]3 ). Furthermore, none of previous works has studied the errors
+
+incurred by staleness which harms the convergence speed, while PipeGCN develops a low-overhead
+smoothing method to reduce such errors.
+
+3 THE PROPOSED PIPEGCN FRAMEWORK
+
+**Overview. To enable efficient distributed GCN training, we first identify the two bottlenecks**
+associated with vanilla partition-parallel training: substantial communication overhead and frequently
+_synchronized communication (see Fig. 1(b)), and then address them directly by proposing a novel_
+strategy, PipeGCN, which pipelines the communication and computation stages across two adjacent
+iterations in each partition of distributed GCN training for breaking the synchrony and then hiding
+the communication latency (see Fig. 1(c)). It is non-trivial to achieve efficient GCN training with
+such a pipeline method, as staleness is incurred in communicated features/feature gradients and
+
+
+-----
+
+Time
+
+**_Current Iteration_**
+
+
+**+** Received from
+
+other subgraphs
+
+|Col1|Col2|
+|---|---|
+|+||
+|||
+
+
+|Communicate|L1 Forward|Communicate|L2 Forward|...|L2 Backward|Communicate|L1 Back.|Update|
+|---|---|---|---|---|---|---|---|---|
+
+
+|on|Col2|
+|---|---|
+|||
+|+||
+|||
+
+
+|Current Iteration Previous Iteration|Col2|Col3|Col4|Col5|Col6|Col7|Col8|Col9|Col10|Col11|Col12|Col13|Col14|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+|From Current Iteration + From Previous Iteration||||||||||||||
+|L1 For.|L2 For.|...|L2 Back.|L1 Back.||Up.|L1 Forward||L2 Forward|...|L2 Backward|L1 Backward|Update|
+|Communicate for Next L1 Forward|||||||Communicate|||||||
+||Communicate for Next L2 Forward||||||||Communicate|||||
+
+
+
+Communicate
+
+
+Keep
+Send
+
+
+Inner Feature
+
+Boundary Feat.
+
+
+L1 Feat.
+Feature Gradient
+
+
+(a) Vanilla partition-parallel training of GCNs (per-partition view)
+
+_Previous Iteration_ **_Current Iteration_**
+
+From Current Iteration **+**
+
+From Previous Iteration
+
+... L2 Back. L1 Back. Up. L1 Forward L2 Forward ... L2 Backward
+
+**Next L1 Forward** Communicate
+
+Communicate for Next L2 Forward Communicate
+
+... ...
+
+Communicate for Next L1 Backward
+
+(b) PipeGCN (per-partition view)
+
+
+Figure 2: A detailed comparison between vanilla partition-parallel training of GCNs and PipeGCN.
+
+more importantly little effort has been made to study the convergence guarantee of GCN training
+using stale feature gradients. This work takes an initial effort to prove both the theoretical and
+empirical convergence of such a pipelined GCN training method, and for the first time shows its
+convergence rate to be close to that of vanilla GCN training without staleness. Furthermore, we
+propose a low-overhead smoothing method to reduce the errors due to stale features/feature gradients
+for further improving the convergence.
+
+3.1 BOTTLENECKS IN VANILLA PARTITION-PARALLEL TRAINING
+
+**Significant communication overhead. Fig. 1(a) illus-** Table 2: The substantial communication
+trates vanilla partition-parallel training, where each overhead in vanilla partition-parallel trainpartition holds inner nodes that come from the original ing, where Comm. Ratio is the communicagraph and boundary nodes that come from other sub- tion time divided by the total training time.
+graphs. These boundary nodes are demanded by the
+
+**Dataset** **# Partition** **Comm. Ratio**
+
+_neighbor aggregation of GCNs across neighbor parti-_
+
+2 65.83%
+
+tions, e.g., in Fig. 1(a) node-5 needs nodes-[3,4,6] from Reddit
+
+4 82.89%
+
+other partitions for calculating Equ. 1. Therefore, it
+
+5 76.17%
+
+_is the features/gradients of boundary nodes that dom-_ ogbn-products
+
+10 85.79%
+
+_inate the communication overhead in distributed GCN_ 3 61.16%
+_training. Note that the amount of boundary nodes can_ Yelp 6 76.84%
+be excessive and far exceeds the inner nodes, as the
+boundary nodes are replicated across partitions and scale with the number of partitions. Besides the
+sheer size, communication of boundary nodes occurs for (1) each layer and (2) both forward and
+backward passes, making communication overhead substantial. We evaluate such overhead[1] in Tab. 2
+and find communication to be dominant, which is consistent with CAGNET (Tripathy et al., 2020).
+
+**Frequently synchronized communication. The aforementioned communication of boundary nodes**
+must be finished before calculating Equ. 1 and Equ. 2, which inevitably forces synchronization be_tween communication and computation and requires a fully sequential execution (see Fig. 1(b)). Thus,_
+for most of training time, each partition is waiting for dominant features/gradients communication to
+finish before the actual compute, repeated for each layer and for both forward and backward passes.
+
+3.2 THE PROPOSED PIPEGCN METHOD
+
+Fig. 1(c) illustrates the high-level overview of PipeGCN, which pipelines the communicate and
+_compute stages spanning two iterations for each GCN layer. Fig. 2 further provides the detailed_
+end-to-end flow, where PipeGCN removes the heavy communication overhead in the vanilla approach
+by breaking the synchronization between communicate and compute and hiding communicate with
+compute of each GCN layer. This is achieved by deferring the communicate to next iteration’s
+_compute (instead of serving the current iteration) such that compute and communicate can run in_
+
+1The detailed setting can be found in Sec. 4.
+
+
+-----
+
+**Algorithm 1: Training a GCN with PipeGCN (per-partition view).**
+**Input: partition id i, partition count n, graph partition Gi, propagation matrix Pi, node feature**
+_Xi, label Yi, boundary node set_ _i, layer count L, learning rate η, initial model W0_
+_B_
+
+**Output: trained model WT after T iterations**
+
+**12 V Broadcasti ←{node Bi v and Receive ∈Gi : v /∈B [Bi1}, · · ·, Bn]** _▷_ create inner node set
+
+**43 Broadcast [Si,1, · · ·, V Sii,n and Receive] ←** [B1 ∩V [Vi1, · · ·, · · ·,, B Vnn ∩V] _i]_
+
+**5 [S1,i, · · ·, Sn,i] ←** [Bi ∩V1, · · ·, Bi ∩Vn]
+
+**6 H** [(0)] _Xi_ _▷_ initialize node feature, set boundary feature as 0
+_←_ 0
+ 
+
+**7 for t := 1 →** _T do_
+
+**8** **for ℓ** := 1 → _L do_ _▷_ forward pass
+
+**9** **if t > 1 then**
+
+**10** wait until thread[(]f[ℓ][)] completes
+
+**11** [HS[(][ℓ]1[−],i[1)][,][ · · ·][, H]S[(][ℓ]n,i[−][1)][]][ ←] [[][B]1[(][ℓ][)][,][ · · ·][, B]n[(][ℓ][)][]] _▷_ update boundary feature
+
+**12** **end**
+
+**13** **with thread[(]f[ℓ][)]** _▷_ communicate boundary features in parallel
+
+**14** Send [HS[(][ℓ]i,[−]1[1)][,][ · · ·][, H]S[(][ℓ]i,n[−][1)][]][ to partition][ [1][,][ · · ·][, n][]][ and Receive][ [][B]1[(][ℓ][)][,][ · · ·][, B]n[(][ℓ][)][]]
+
+**15** _HV[(][ℓ]i[)]_ _t−1[)]_ _▷_ update inner nodes feature
+
+**16** **end** _[←]_ _[σ][(][P][i][H]_ [(][ℓ][−][1)][W][ (][ℓ][)]
+
+_∂Loss(H[(][L][)]_
+**17** _JV[(][L]i_ [)] _←_ _∂HV[(]V[L]ii[)]_ _[,Y][i][)]_
+
+**18** **for ℓ** := L → 1 do _▷_ backward pass
+
+**19** _G[(]i[ℓ][)]_ _←_ _PiH_ [(][ℓ][−][1)][i][⊤] []JV[(][ℓ]i[)] _[◦]_ _[σ][′][(][P][i][H]_ [(][ℓ][−][1)][W][ (]t−[ℓ][)]1[)] _▷_ calculate weight gradient
+
+**20** **if ℓ> 1 thenh** 
+
+**21** _J_ [(][ℓ][−][1)] _←_ _Pi[⊤]_ _JV[(][ℓ]i[)]_ _[◦]_ _[σ][′][(][P][i][H]_ [(][ℓ][−][1)][W][ (]t−[ℓ][)]1[)] [Wt[(]−[ℓ][)]1[]][⊤] _▷_ calculate feature gradient
+
+**22** **if t > 1 then**  
+
+**23** wait until thread[(]b[ℓ][)] completes
+
+**24** **for j := 1 →** _n do_
+
+**25** _JS[(][ℓ]i,j[−][1)]_ _←_ _JS[(][ℓ]i,j[−][1)]_ + Cj[(][ℓ][)] _▷_ accumulate feature gradient
+
+**26** **end**
+
+**27** **end**
+
+**28** **with thread[(]b[ℓ][)]** _▷_ communicate boundary feature gradient in parallel
+
+**29** Send [JS[(][ℓ]1[−],i[1)][,][ · · ·][, J]S[(][ℓ]n,i[−][1)][]][ to partition][ [1][,][ · · ·][, n][]][ and Receive][ [][C]1[(][ℓ][)][,][ · · ·][, C]n[(][ℓ][)][]]
+
+**30** **end**
+
+**31** **end**
+
+**32** _G ←_ _AllReduce(Gi)_ _▷_ synchronize model gradient
+
+**33** _Wt_ _Wt_ 1 _η_ _G_ _▷_ update model
+_←_ _−_ _−_ _·_
+
+**34 end**
+
+**35 return WT**
+
+parallel. Inevitably, staleness is introduced in the deferred communication and results in a mixture
+_usage of fresh inner features/gradients and staled boundary features/gradients._
+
+Analytically, PipeGCN is achieved by modifying Equ. 1. For instance, when using a mean aggregator,
+Equ. 1 and its corresponding backward formulation in PipeGCN become:
+
+_zv[(][t,ℓ][)]_ = MEAN _h[(]u[t,ℓ][−][1)]_ _u_ (v) (v) _h[(]u[t][−][1][,ℓ][−][1)]_ _u_ (v) (3)
+_{_ _|_ _∈N_ _\ B_ _} ∪{_ _|_ _∈B_ _}_
+ 
+
+
+_δh[(][t,ℓ]u_ [)]
+
+
+1
+
+_dv_ _· δz[(][t,ℓ]v_ [+1)]
+
+
+1
+
+_dv_ _· δz[(][t]v[−][1][,ℓ][+1)]_ (4)
+
+
+_v:u∈N (v)\B(v)_
+
+
+_v:u∈B(v)_
+
+
+where (v) is node v’s boundary node set, dv denotes node v’s degree, and δh[(][t,ℓ]u [)] and δz[(][t,ℓ]v [)] rep_B_
+resent the gradient approximation of hu and zv at layer ℓ and iteration t, respectively. Lastly, the
+implementation of PipeGCN are outlined in Alg. 1.
+
+
+-----
+
+3.3 PIPEGCN’S CONVERGENCE GUARANTEE
+
+As PipeGCN adopts a mixture usage of fresh inner features/gradients and staled boundary features/gradients, its convergence rate is still unknown. We have proved the convergence of PipeGCN
+and present the convergence property in the following theorem.
+**Theorem 3.1 (Convergence of PipeGCN, informal version). There exists a constant E such that for**
+_any arbitrarily small constant ε > 0, we can choose a learning rate η =_ _√Eε_ _[and number of training]_
+
+_iterations T = (L(θ[(1)]) −L(θ[∗]))Eε[−]_ 2[3] such that:
+
+_T_
+
+1
+
+(θ[(][t][)]) 2 (ε)
+
+_T_ _t=1_ _∥∇L_ _∥_ _≤O_
+
+X
+
+_where L(·) is the loss function, θ[(][t][)]_ _and θ[∗]_ _represent the parameter vector at iteration t and the_
+_optimal parameter respectively._
+
+Therefore, the convergence rate of PipeGCN is O(T _[−]_ 3[2] ), which is better than sampling-based
+
+**_method (O(T_** _[−]_ 2[1] )) (Chen et al., 2018; Cong et al., 2021) and close to full-graph training (O(T _[−][1]))._
+
+The formal version of the theorem and our detailed proof can be founded in Appendix A.
+
+
+3.4 THE PROPOSED SMOOTHING METHOD
+
+To further improve the convergence of PipeGCN, we propose a smoothing method to reduce errors
+incurred by stale features/feature gradients at a minimal overhead. Here we present the smoothing
+of feature gradients, and the same formulation also applies to features. To improve the approximate
+gradients for each feature, fluctuations in feature gradients between adjacent iterations should be
+reduced. Therefore, we apply a light-weight moving average to the feature gradients of each boundary
+node v as follow:
+
+_δˆz[(][t,ℓ]v_ [)] = γδ[ˆ]z[(][t]v[−][1][,ℓ][)] + (1 _γ)δz[(][t,ℓ]v_ [)]
+_−_
+
+where _δ[ˆ]z[(][t,ℓ]v_ [)] is the smoothed feature gradient at layer ℓ and iteration t, and γ is the decay rate. When
+integrating this smoothed feature gradient method into the backward pass, Equ. 4 can be rewritten as:
+
+
+_δˆh[(][t,ℓ]u_ [)]
+
+
+1
+
+_dv_ _· δz[(][t,ℓ]v_ [+1)]
+
+
+1
+
+_dv_ _·_ _δ[ˆ]z[(][t]v[−][1][,ℓ][+1)]_
+
+
+_v:u∈N (v)\B(v)_
+
+
+_v:u∈B(v)_
+
+
+Note that the smoothing of stale features and gradients can be independently applied to PipeGCN.
+
+4 EXPERIMENT RESULTS
+
+We evaluate PipeGCN on four large-scale datasets, Reddit (Hamilton et al., 2017), ogbn-products (Hu
+et al., 2020), Yelp (Zeng et al., 2020), and ogbn-papers100M (Hu et al., 2020). More details are
+provided in Tab. 3. To ensure robustness and reproducibility, we fix (i.e., do not tune) the hyper**_parameters and settings for PipeGCN and its variants throughout all experiments. To implement_**
+partition parallelism (for both vanilla distributed GCN training and PipeGCN), the widely used
+METIS (Karypis & Kumar, 1998) partition algorithm is adopted for graph partition with its objective
+set to minimize the communication volume. We implement PipeGCN in PyTorch (Paszke et al., 2019)
+and DGL (Wang et al., 2019). Experiments are conducted on a machine with 10 RTX-2080Ti (11GB),
+Xeon 6230R@2.10GHz (187GB), and PCIe3x16 connecting CPU-GPU and GPU-GPU. Only for
+ogbn-papers100M, we use 4 compute nodes (each contains 8 MI60 GPUs, an AMD EPYC 7642
+CPU, and 48 lane PCI 3.0 connecting CPU-GPU and GPU-GPU) networked with 10Gbps Ethernet.
+To support full-graph GCN training with the model sizes in Tab. 3, the minimum required partition
+numbers are 2, 3, 5, 32 for Reddit, ogbn-products, Yelp, and ogbn-papers100M, respectively.
+
+For convenience, we here name all methods: vanilla partition-parallel training of GCNs (GCN),
+PipeGCN with feature gradient smoothing (PipeGCN-G), PipeGCN with feature smoothing
+(PipeGCN-F), and PipeGCN with both smoothing (PipeGCN-GF). The default decay rate γ for all
+smoothing methods is set to 0.95.
+
+
+-----
+
+Table 3: Detailed experiment setups: graph datasets, GCN models, and training hyper-parameters.
+
+|Dataset|# Nodes # Edges Feat. size GraphSAGE model size Optimizer LearnRate Dropout # Epoch|
+|---|---|
+|Reddit ogbn-products Yelp ogbn-papers100M|233K 114M 602 4 layer, 256 hidden units Adam 0.01 0.5 3000 2.4M 62M 100 3 layer, 128 hidden units Adam 0.003 0.3 500 716K 7.0M 300 4 layer, 512 hidden units Adam 0.001 0.1 3000 111M 1.6B 128 3 layer, 48 hidden units Adam 0.01 0.0 1000|
+
+
+Reddit
+
+|Col1|Col2|ROC|Col4|Col5|Col6|Col7|GCN|Col9|Col10|Col11|Col12|Col13|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||CAGNET (c=1) PipeGCN CAGNET (c=2) PipeGCN-GF||||||||||||
+||||||||||||||
+||||||||||||||
+||||||||||||||
+
+
+
+4
+
+ROC GCN
+CAGNET (c=1) PipeGCN
+CAGNET (c=2) PipeGCN-GF
+
+Number of GPUs
+
+
+ogbn-products
+
+|Col1|Col2|ROC|Col4|Col5|Col6|Col7|Col8|GCN|Col10|Col11|Col12|Col13|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||CAGNET (c=1) PipeGCN CAGNET (c=2) PipeGCN-GF||||||||||||
+||||||||||||||
+||||||||||||||
+
+
+
+8 10
+
+ROC GCN
+CAGNET (c=1) PipeGCN
+CAGNET (c=2) PipeGCN-GF
+
+Number of GPUs
+
+
+Yelp
+
+
+4.0
+3.5
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+
+
+|Col1|Col2|ROC|Col4|Col5|Col6|Col7|Col8|GCN|Col10|Col11|Col12|Col13|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||CAGNET (c=1) PipeGCN CAGNET (c=2) PipeGCN-GF||||||||||||
+||||||||||||||
+||||||||||||||
+
+
+6 10
+
+Number of GPUs
+
+
+Figure 3: Throughput comparison. Each partition uses one GPU (except CAGNET (c=2) uses two).
+
+4.1 IMPROVING TRAINING THROUGHPUT OVER FULL-GRAPH TRAINING METHODS
+
+
+Fig. 3 compares the training throughput between PipeGCN and the SOTA full-graph training methods
+(ROC (Jia et al., 2020) and CAGNET (Tripathy et al., 2020)). We observe that both vanilla partitionparallel training (GCN) and PipeGCN greatly outperform ROC and CAGNET across different number
+of partitions, because they avoid both the expensive CPU-GPU swaps (ROC) and the redundant node
+broadcast (CAGNET). Specifically, GCN is 3.1×∼16.4× faster than ROC and 2.1×∼10.2× faster
+than CAGNET (c=2). PipeGCN further improves upon GCN, achieving a throughput improvement
+of 5.6×∼28.5× over ROC and 3.9×∼17.7× over CAGNET (c=2)[2]. Note that we are not able to
+compare PipeGCN with NeuGraph (Ma et al., 2019), AliGraph (Zhu et al., 2019), and P [3] (Gandhi
+& Iyer, 2021) as their code are not publicly available. Besides, Dorylus (Thorpe et al., 2021) is
+not comparable, as it is not for regular GPU servers. Considering the substantial performance gap
+_between ROC/CAGNET and GCN, we focus on comparing GCN with PipeGCN for the reminder of_
+_the section._
+
+4.2 IMPROVING TRAINING THROUGHPUT WITHOUT COMPROMISING ACCURACY
+
+
+We compare the training performance of both test score and training throughput between GCN and
+PipeGCN in Tab. 4. We can see that PipeGCN without smoothing already achieves a comparable test
+_score with the vanilla GCN training on both Reddit and Yelp, and incurs only a negligible accuracy_
+drop (-0.08%∼-0.23%) on ogbn-products, while boosting the training throughput by 1.72×∼2.16×
+across all datasets and different number of partitions[3], thus validating the effectiveness of PipeGCN.
+
+With the proposed smoothing method plugged in, PipeGCN-G/F/GF is able to compensate the
+_dropped score of vanilla PipeGCN, achieving an equal or even better test score as/than the vanilla_
+_GCN training (without staleness), e.g., 97.14% vs. 97.11% on Reddit, 79.36% vs. 79.14% on_
+ogbn-products and 65.28% vs. 65.26% on Yelp. Meanwhile, PipeGCN-G/F/GF enjoys a similar
+throughput improvement as vanilla PipeGCN, thus validating the negligible overhead of the proposed
+smoothing method. Therefore, pipelined transfer of features and gradients greatly improves the
+**_training throughput while maintaining the full-graph accuracy._**
+
+Note that our distributed GCN training methods consistently achieve higher test scores than SOTA
+sampling-based methods for GraphSAGE-based models reported in (Zeng et al., 2020) and (Hu et al.,
+2020), confirming that full-graph training is preferred to obtain better GCN models. For example, the
+best sampling-based method achieves a 96.6% accuracy on Reddit (Zeng et al., 2020) while full-graph
+GCN training achieves 97.1%, and PipeGCN improves the accuracy by 0.28% over sampling-based
+GraphSAGE models on ogbn-products (Hu et al., 2020). This advantage of full-graph training is also
+validated by recent works (Jia et al., 2020; Tripathy et al., 2020; Liu et al., 2022; Wan et al., 2022).
+
+2More detailed comparisons among full-graph training methods can be found in Appendix B.
+3More details regarding PipeGCN’s advantages in training throughput can be found in Appendix C.
+
+
+-----
+
+Table 4: Training performance comparison among vanilla partition-parallel training (GCN) and
+PipeGCN variants (PipeGCN*), where we report the test accuracy for Reddit and ogbn-products,
+and the F1-micro score for Yelp. Highest performance is in bold.
+
+|Dataset Method Test Score (%) Throughput|Dataset Method Test Score (%)|
+|---|---|
+|GCN 97.11±0.02 1× (1.94 epochs/s) PipeGCN 97.12±0.02 1.91× Reddit PipeGCN-G 97.14±0.03 1.89× (2 partitions) PipeGCN-F 97.09±0.02 1.89× PipeGCN-GF 97.12±0.02 1.87×|GCN 97.11±0.02 1× PipeGCN 97.04±0.03 Reddit PipeGCN-G 97.09±0.03 (4 partitions) PipeGCN-F 97.10±0.02 PipeGCN-GF 97.10±0.02|
+|GCN 79.14±0.35 1× (1.45 epochs/s) PipeGCN 79.06±0.42 1.94× ogbn-products PipeGCN-G 79.20±0.38 1.90× (5 partitions) PipeGCN-F 79.36±0.38 1.90× PipeGCN-GF 78.86±0.34 1.91×|GCN 79.14±0.35 1× PipeGCN 78.91±0.65 ogbn-products PipeGCN-G 79.08±0.58 (10 partitions) PipeGCN-F 79.21±0.31 PipeGCN-GF 78.77±0.23|
+|GCN 65.26±0.02 1× (2.00 epochs/s) PipeGCN 65.27±0.01 2.16× Yelp PipeGCN-G 65.26±0.02 2.15× (3 partitions) PipeGCN-F 65.26±0.03 2.15× PipeGCN-GF 65.26±0.04 2.11×|GCN 65.26±0.02 1× PipeGCN 65.24±0.02 Yelp PipeGCN-G 65.28±0.02 (6 partitions) PipeGCN-F 65.25±0.04 PipeGCN-GF 65.26±0.04|
+
+
+
+
+
+|Reddit (2 partitions)|Col2|
+|---|---|
+|||
+|||
+||GCN PipeGCN|
+||PipeGCN-G PipeGCN-F|
+||PipeGCN-GF|
+|0|1000 2000 3 Epoch|
+
+
+Reddit (2 partitions) Reddit (4 partitions) ogbn-products (5 partitions) ogbn-products (10 partitions)
+
+79 79
+
+97 97
+
+78 78
+
+96 GCN 96 GCN 77 GCN 77 GCN
+
+95 PipeGCNPipeGCN-G 95 PipeGCNPipeGCN-G 76 PipeGCNPipeGCN-G 76 PipeGCNPipeGCN-G
+
+est Accuracy (%)T94 PipeGCN-FPipeGCN-GF est Accuracy (%)T94 PipeGCN-FPipeGCN-GF est Accuracy (%)T7574 PipeGCN-FPipeGCN-GF est Accuracy (%)T7574 PipeGCN-FPipeGCN-GF
+
+0 1000 2000 3000 0 1000 2000 3000 0 500 1000 0 500 1000
+
+Epoch Epoch Epoch Epoch
+
+
+Figure 4: Epoch-to-accuracy comparison among vanilla partition-parallel training (GCN) and
+PipeGCN variants (PipeGCN*), where PipeGCN and its variants achieve a similar convergence as
+_the vanilla training (without staleness) but are twice as fast in wall-clock time (see Tab. 4)._
+
+4.3 MAINTAINING CONVERGENCE SPEED
+
+
+To understand PipeGCN’s influence on the convergence speed, we compare the training curve among
+different methods in Fig. 4. We observe that the convergence of PipeGCN without smoothing is
+still comparable with that of the vanilla GCN training, although PipeGCN converges slower at the
+early phase of training and then catches up at the later phase, due to the staleness of boundary
+features/gradients. With the proposed smoothing methods, PipeGCN-G/F boosts the convergence
+_substantially and matches the convergence speed of vanilla GCN training. There is no clear difference_
+between PipeGCN-G and PipeGCN-F. Lastly, with combined smoothing of features and gradients,
+_PipeGCN-GF can acheive the same or even slightly better convergence speed as vanilla GCN_
+_training (e.g., on Reddit) but can overfit gradually similar to the vanilla GCN training, which is_
+further investigated in Sec. 4.4. Therefore, PipeGCN maintains the convergence speed w.r.t the
+**_number of epochs while reduces the end-to-end training time by around 50% thanks to its boosted_**
+**_training throughput (see Tab. 4)._**
+
+4.4 BENEFIT OF STALENESS SMOOTHING METHOD
+
+
+**Error Reduction and Convergence Speedup. To understand why the proposed smoothing tech-**
+nique (Sec. 3.4) speeds up convergence, we compare the error incurred by the stale communication
+between PipeGCN and PipeGCN-G/F. The error is calculated as the Frobenius-norm of the gap
+between the correct gradient/feature and the stale gradient/feature used in PipeGCN training. Fig. 5
+compares the error at each GCN layer. We can see that the proposed smoothing technique (PipeGCN_G/F) reduces the error of staleness substantially (from the base version of PipeGCN) and this benefit_
+consistently holds across different layers in terms of both feature and gradient errors, validating the
+effectiveness of our smoothing method and explaining its improvement to the convergence speed.
+
+**Overfitting Mitigation. To understand the effect of staleness smoothing on model overfitting, we**
+also evaluate the test-accuracy convergence under different decay rates γ in Fig. 6. Here ogbnproducts is adopted as the study case because the distribution of its test set largely differs from that
+of its training set. From Fig. 6, we observe that smoothing with a large γ (0.7/0.95) offers a fast
+convergence, i.e., close to the vanilla GCN training, but overfits rapidly. To understand this issue, we
+
+
+-----
+
+|PipeGCN (layer 1) PipeGCN-G (layer 1)|Col2|
+|---|---|
+|PipeGCN (layer 1) PipeGCN-G (layer 1) PipeGCN (layer 2) PipeGCN-G (layer 2) PipeGCN (layer 3) PipeGCN-G (layer 3)||
+|||
+|||
+|||
+|||
+
+
+Backward Gradient Error Forward Feature Error
+
+5 PipeGCN (layer 1) PipeGCN-G (layer 1) PipeGCN (layer 1) PipeGCN-F (layer 1)
+
+2) PipeGCN (layer 2) PipeGCN-G (layer 2) 3)3.0 PipeGCN (layer 2) PipeGCN-F (layer 2)
+
+4 PipeGCN (layer 3) PipeGCN-G (layer 3) 2.5 PipeGCN (layer 3) PipeGCN-F (layer 3)
+
+3 2.0
+
+2 1.5
+
+1 1.0
+
+Frobenius Norm (×10 Frobenius Norm (×10
+
+00 500 Epoch 1000 1500 0.50 500 Epoch 1000 1500
+
+
+79
+
+78
+
+77
+
+GCN
+
+76 = 0 (PipeGCN)
+
+= 0.3
+
+est Accuracy (%)T75 = 0.5= 0.7
+
+74 = 0.95
+
+0 500 1000
+
+Epoch
+
+
+Figure 5: Comparison of the resulting feature gradient error
+and feature error from PipeGCN and PipeGCN-G/F at each
+GCN layer on Reddit (2 partitions). PipeGCN-G/F here
+uses a default smoothing decay rate of 0.95.
+
+
+Figure 6: Test-accuracy convergence
+comparison among different smoothing decay rates γ in PipeGCN-GF on
+ogbn-products (10 partitions).
+
+
+
+
+
+|Col1|or (Layer 2)|
+|---|---|
+|||
+||= 0.0 = 0.3|
+||= 0.5|
+||= 0.7 = 0.95|
+|||
+|||
+
+
+2) Gradient Error (Layer 1)= 0.0 2)3.5 Gradient Error (Layer 2)= 0.0 4)9 Feature Error (Layer 1)= 0.0 4) Feature Error (Layer 2)= 0.0
+
+8 = 0.3 = 0.3 = 0.3 12 = 0.3
+
+= 0.5 3.0 = 0.5 8 = 0.5 = 0.5
+
+6 = 0.7 2.5 = 0.7 7 = 0.7 10 = 0.7
+
+= 0.95 2.0 = 0.95 6 = 0.95 8 = 0.95
+
+4
+
+1.5 5 6
+
+Frobenius Norm (×102 Frobenius Norm (×101.0 Frobenius Norm (×104 Frobenius Norm (×10 4
+
+0 Epoch500 1000 0 Epoch500 1000 0 Epoch500 1000 0 Epoch500 1000
+
+
+Figure 7: Comparison of the resulting feature gradient error and feature error when adopting
+different decay rates γ at each GCN layer on ogbn-products (10 partitions).
+
+further provide detailed comparisons of the errors incurred under different γ in Fig. 7. We can see
+that a larger γ enjoys lower approximation errors and makes the gradients/features more stable, thus
+improving the convergence speed. The increased stability on the training set, however, constrains
+the model from exploring a more general minimum point on the test set, thus leading to overfitting
+as the vanilla GCN training. In contrast, a small γ (0 ∼ 0.5) mitigates this overfitting and achieves
+_a better accuracy (see Fig. 6). But a too-small γ (e.g., 0) gives a high error for both stale features_
+and gradients (see Fig. 7), thus suffering from a slower convergence. Therefore, a trade-off between
+convergence speed and achievable optimality exists between different smoothing decay rates, and
+_γ = 0.5 combines the best of both worlds in this study._
+
+
+4.5 SCALING LARGE GRAPH TRAINING OVER MULTIPLE SERVERS
+
+
+To further test the capability of PipeGCN, we scale up
+the graph size to ogbn-papers100M and train GCN
+over multiple GPU servers with 32 GPUs. Tab. 5
+shows that even at such a large-scale setting where
+communication overhead dominates, PipeGCN still
+reduce communication time by 61%, leading to a
+total training time reduction of 38% compared to the
+vanilla GCN baseline [4].
+
+5 CONCLUSION
+
+
+Table 5: Comparison of epoch training time
+on ogbn-papers100M.
+
+
+
+**Method** **Total** **Communication**
+
+GCN 1.00× (10.5s) 1.00× (6.6s)
+PipeGCN 0.62× (6.5s) 0.39× (2.6s)
+PipeGCN-GF 0.64× (6.7s) 0.42× (2.8s)
+
+
+In this work, we propose a new method, PipeGCN, for efficient full-graph GCN training. PipeGCN
+pipelines communication with computation in distributed GCN training to hide the prohibitive
+communication overhead. More importantly, we are the first to provide convergence analysis for
+GCN training with both stale features and feature gradients, and further propose a light-weight
+smoothing method for convergence speedup. Extensive experiments validate the advantages of
+PipeGCN over both vanilla GCN training (without staleness) and state-of-the-art full-graph training.
+
+4More experiments on multi-server training can be found in Appendix E.
+
+
+-----
+
+6 ACKNOWLEDGEMENT
+
+The work is supported by the National Science Foundation (NSF) through the MLWiNS program
+(Award number: 2003137), the CC[∗] Compute program (Award number: 2019007), and the NeTS
+program (Award number: 1801865).
+
+REFERENCES
+
+Dan Alistarh, Demjan Grubic, Jerry Li, Ryota Tomioka, and Milan Vojnovic. Qsgd: Communicationefficient sgd via gradient quantization and encoding. Advances in Neural Information Processing
+_Systems, 30, 2017._
+
+Jianfei Chen, Jun Zhu, and Le Song. Stochastic training of graph convolutional networks with
+variance reduction. In International Conference on Machine Learning, pp. 942–950. PMLR, 2018.
+
+Wei-Lin Chiang, Xuanqing Liu, Si Si, Yang Li, Samy Bengio, and Cho-Jui Hsieh. Cluster-gcn: An
+efficient algorithm for training deep and large graph convolutional networks. In Proceedings of
+_the 25th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pp._
+257–266, 2019.
+
+Weilin Cong, Rana Forsati, Mahmut Kandemir, and Mehrdad Mahdavi. Minimal variance sampling
+with provable guarantees for fast training of graph neural networks. In Proceedings of the 26th
+_ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pp. 1393–1403,_
+2020.
+
+Weilin Cong, Morteza Ramezani, and Mehrdad Mahdavi. On the importance of sampling in learning
+graph convolutional networks. arXiv preprint arXiv:2103.02696, 2021.
+
+Swapnil Gandhi and Anand Padmanabha Iyer. P3: Distributed deep graph learning at scale. In 15th
+_USENIX Symposium on Operating Systems Design and Implementation (OSDI 21), pp. 551–568,_
+2021.
+
+Vikas Garg, Stefanie Jegelka, and Tommi Jaakkola. Generalization and representational limits of
+graph neural networks. In International Conference on Machine Learning, pp. 3419–3430. PMLR,
+2020.
+
+Will Hamilton, Zhitao Ying, and Jure Leskovec. Inductive representation learning on large graphs. In
+_Advances in neural information processing systems, pp. 1024–1034, 2017._
+
+Aaron Harlap, Deepak Narayanan, Amar Phanishayee, Vivek Seshadri, Nikhil Devanur, Greg Ganger,
+and Phil Gibbons. Pipedream: Fast and efficient pipeline parallel dnn training. arXiv preprint
+_arXiv:1806.03377, 2018._
+
+Qirong Ho, James Cipar, Henggang Cui, Jin Kyu Kim, Seunghak Lee, Phillip B Gibbons, Garth A
+Gibson, Gregory R Ganger, and Eric P Xing. More effective distributed ml via a stale synchronous
+parallel parameter server. Advances in neural information processing systems, 2013:1223, 2013.
+
+Weihua Hu, Matthias Fey, Marinka Zitnik, Yuxiao Dong, Hongyu Ren, Bowen Liu, Michele Catasta,
+and Jure Leskovec. Open graph benchmark: Datasets for machine learning on graphs. arXiv
+_preprint arXiv:2005.00687, 2020._
+
+Zhihao Jia, Sina Lin, Mingyu Gao, Matei Zaharia, and Alex Aiken. Improving the accuracy,
+scalability, and performance of graph neural networks with roc. Proceedings of Machine Learning
+_and Systems (MLSys), pp. 187–198, 2020._
+
+George Karypis and Vipin Kumar. A fast and high quality multilevel scheme for partitioning irregular
+graphs. SIAM Journal on scientific Computing, 20(1):359–392, 1998.
+
+Thomas N Kipf and Max Welling. Semi-supervised classification with graph convolutional networks.
+_arXiv preprint arXiv:1609.02907, 2016._
+
+
+-----
+
+Mu Li, David G Andersen, Alexander J Smola, and Kai Yu. Communication efficient distributed
+machine learning with the parameter server. Advances in Neural Information Processing Systems,
+27:19–27, 2014.
+
+Youjie Li, Jongse Park, Mohammad Alian, Yifan Yuan, Zheng Qu, Peitian Pan, Ren Wang,
+Alexander Gerhard Schwing, Hadi Esmaeilzadeh, and Nam Sung Kim. A network-centric hardware/algorithm co-design to accelerate distributed training of deep neural networks. In Proceedings
+_of the 51st IEEE/ACM International Symposium on Microarchitecture (MICRO’18), Fukuoka City,_
+Japan, 2018a.
+
+Youjie Li, Mingchao Yu, Songze Li, Salman Avestimehr, Nam Sung Kim, and Alexander Schwing.
+Pipe-SGD: A decentralized pipelined sgd framework for distributed deep net training. Advances in
+_Neural Information Processing Systems, 2018b._
+
+Renjie Liao, Raquel Urtasun, and Richard Zemel. A pac-bayesian approach to generalization bounds
+for graph neural networks. arXiv preprint arXiv:2012.07690, 2020.
+
+Zirui Liu, Kaixiong Zhou, Fan Yang, Li Li, Rui Chen, and Xia Hu. EXACT: Scalable graph neural
+networks training via extreme activation compression. In International Conference on Learning
+_[Representations, 2022. URL https://openreview.net/forum?id=vkaMaq95_rX.](https://openreview.net/forum?id=vkaMaq95_rX)_
+
+Lingxiao Ma, Zhi Yang, Youshan Miao, Jilong Xue, Ming Wu, Lidong Zhou, and Yafei Dai. Neugraph:
+parallel deep neural network computation on large graphs. In 2019 USENIX Annual Technical
+_Conference (USENIX ATC 19), pp. 443–458, 2019._
+
+Feng Niu, Benjamin Recht, Christopher Re, and Stephen J Wright. Hogwild!: A lock-free approach´
+to parallelizing stochastic gradient descent. arXiv preprint arXiv:1106.5730, 2011.
+
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor
+Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style,
+high-performance deep learning library. In Advances in neural information processing systems, pp.
+8026–8037, 2019.
+
+Frank Seide, Hao Fu, Jasha Droppo, Gang Li, and Dong Yu. 1-bit stochastic gradient descent and its
+application to data-parallel distributed training of speech dnns. In Fifteenth Annual Conference of
+_the International Speech Communication Association. Citeseer, 2014._
+
+John Thorpe, Yifan Qiao, Jonathan Eyolfson, Shen Teng, Guanzhou Hu, Zhihao Jia, Jinliang Wei,
+Keval Vora, Ravi Netravali, Miryung Kim, et al. Dorylus: affordable, scalable, and accurate
+gnn training with distributed cpu servers and serverless threads. In 15th USENIX Symposium on
+_Operating Systems Design and Implementation (OSDI 21), pp. 495–514, 2021._
+
+Alok Tripathy, Katherine Yelick, and Aydin Buluc. Reducing communication in graph neural network
+training. arXiv preprint arXiv:2005.03300, 2020.
+
+Cheng Wan, Youjie Li, Ang Li, Nam Sung Kim, and Yingyan Lin. BNS-GCN: Efficient full-graph
+training of graph convolutional networks with partition-parallelism and random boundary node
+sampling. Fifth Conference on Machine Learning and Systems, 2022.
+
+Minjie Wang, Da Zheng, Zihao Ye, Quan Gan, Mufei Li, Xiang Song, Jinjing Zhou, Chao Ma,
+Lingfan Yu, Yu Gai, Tianjun Xiao, Tong He, George Karypis, Jinyang Li, and Zheng Zhang.
+Deep graph library: A graph-centric, highly-performant package for graph neural networks. arXiv
+_preprint arXiv:1909.01315, 2019._
+
+Wei Wen, Cong Xu, Feng Yan, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Terngrad:
+Ternary gradients to reduce communication in distributed deep learning. Advances in neural
+_information processing systems, 30, 2017._
+
+Keyulu Xu, Weihua Hu, Jure Leskovec, and Stefanie Jegelka. How powerful are graph neural
+networks? arXiv preprint arXiv:1810.00826, 2018.
+
+Bowen Yang, Jian Zhang, Jonathan Li, Christopher Re, Christopher Aberger, and Christopher De Sa.´
+Pipemare: Asynchronous pipeline parallel dnn training. Proceedings of Machine Learning and
+_Systems, 3, 2021._
+
+
+-----
+
+Rex Ying, Ruining He, Kaifeng Chen, Pong Eksombatchai, William L Hamilton, and Jure Leskovec.
+Graph convolutional neural networks for web-scale recommender systems. In Proceedings of
+_the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pp._
+974–983, 2018.
+
+Mingchao Yu, Zhifeng Lin, Krishna Giri Narra, Songze Li, Youjie Li, Nam Sung Kim, Alexander Schwing, Murali Annavaram, and Salman Avestimehr. Gradiveq: Vector quantization for
+bandwidth-efficient gradient aggregation in distributed cnn training. In Proceedings of the 32nd
+_Conference on Neural Information Processing Systems (NIPS’18), Montreal, Canada, 2018._
+
+Hanqing Zeng, Hongkuan Zhou, Ajitesh Srivastava, Rajgopal Kannan, and Viktor Prasanna. Graphsaint: Graph sampling based inductive learning method. arXiv preprint arXiv:1907.04931, 2020.
+
+Muhan Zhang and Yixin Chen. Link prediction based on graph neural networks. In Advances in
+_Neural Information Processing Systems, pp. 5165–5175, 2018._
+
+Rong Zhu, Kun Zhao, Hongxia Yang, Wei Lin, Chang Zhou, Baole Ai, Yong Li, and Jingren Zhou.
+Aligraph: A comprehensive graph neural network platform. arXiv preprint arXiv:1902.08730,
+2019.
+
+
+-----
+
+A CONVERGENCE PROOF
+
+In this section, we prove the convergence of PipeGCN. Specifically, we first figure out that when the
+model is updated via gradient descent, the change of intermediate features and their gradients are
+bounded by a constant which is proportional to learning rate η under standard assumptions. Based
+on this, we further demonstrate that the error occurred by the staleness is proportional to η, which
+guarantees that the gradient error is bounded by ηE where E is defined in Corollary A.10, and thus
+PipeGCN converges in O(ε[−] [3]2 ) iterations.
+
+A.1 NOTATIONS AND ASSUMPTIONS
+
+For a given graph G = (V, E) with an adjacency matrix A, feature matrix X, we define the propagation
+matrix P as P := _D[−][1][/][2][ e]AD[−][1][/][2], where_ _A = A + I,_ _Du,u =_ _v_ _Au,v. One GCN layer performs_
+
+one step of feature propagation (Kipf & Welling, 2016) as formulated below
+
+[e] [e] _H_ [(0)][e]= X [e] [P] [e]
+
+_Z_ [(][ℓ][)] = PH [(][ℓ][−][1)]W [(][ℓ][)]
+
+_H_ [(][ℓ][)] = σ(Z [(][ℓ][)])
+
+where H [(][ℓ][)], W [(][ℓ][)], and Z [(][ℓ][)] denote the embedding matrix, the trainable weight matrix, and
+the intermediate embedding matrix in the ℓ-th layer, respectively, and σ denotes a non-linear
+activation function. For an L-layer GCN, the loss function is denoted by L(θ) where θ =
+vec[W [(1)], W [(2)], · · ·, W [(][L][)]]. We define the ℓ-th layer as a function f [(][ℓ][)](·, ·).
+
+_f_ [(][ℓ][)](H [(][ℓ][−][1)], W [(][ℓ][)]) := σ(PH [(][ℓ][−][1)]W [(][ℓ][)])
+
+Its gradient w.r.t. the input embedding matrix can be represented as
+
+
+_J_ [(][ℓ][−][1)] = _H_ _f_ [(][ℓ][)](J [(][ℓ][)], H [(][ℓ][−][1)], W [(][ℓ][)]) := P _M_ [(][ℓ][)][W [(][ℓ][)]][⊤]
+_∇_ _[⊤]_
+
+and its gradient w.r.t. the weight can be represented as
+
+_G[(][ℓ][)]_ = ∇W f [(][ℓ][)](J [(][ℓ][)], H [(][ℓ][−][1)], W [(][ℓ][)]) := [PH [(][ℓ][−][1)]][⊤]M [(][ℓ][)]
+
+where M [(][ℓ][)] = J [(][ℓ][)] _◦_ _σ[′](PH_ [(][ℓ][−][1)]W [(][ℓ][)]) and ◦ denotes Hadamard product.
+
+For partition-parallel training, we can split P into two parts P = Pin +Pbd where Pin represents intrapartition propagation and Pbd denotes inter-partition propagation. For PipeGCN, we can represent
+one GCN layer as below
+
+_H_ [(][t,][0)] = X
+_Z_ [(][t,ℓ][)] = PinH [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] + PbdH [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)]
+e
+
+_H_ [(][t,ℓ][)] = σ(Z [(][t,ℓ][)])
+
+e [e] [e]
+
+where t is the epoch number ande _W[e][(][t,ℓ][)]_ is the weight at epoch t layer ℓ. We define the loss function
+for this setting as _L(θ[e][(][t][)]) where_ _θ[(][t][)]_ = vec[W[f][(][t,][1)], _W_ [(][t,][2)], · · ·, _W_ [(][t,L][)]]. We can also summarize the
+layer as a function _f_ [(][t,ℓ][)]( _,_ ) [f]
+
+_·_ _·_
+
+[e] [e] [f] [f]
+
+_f_ [(][t,ℓ][)](H [(][t,ℓ][−][1)], _W_ [(][t,ℓ][)]) := σ(PinH [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] + PbdH [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)])
+
+[e]
+
+Note that _H_ [(][t][−][1][,ℓ][−][1)] is not a part of the input of _f_ [(][t,ℓ][)]( _,_ ) because it is a constant for the t-th epoch.
+
+e [e] [f] [e] _·_ _·_ [e]
+
+The corresponding backward propagation follows the following computation
+
+[e] [e]
+
+_J_ [(][t,ℓ][−][1)] = _H_ _f_ [(][t,ℓ][)](J [(][t,ℓ][)], _H_ [(][t,ℓ][−][1)], _W_ [(][t,ℓ][)])
+_∇_
+eG[(][t,ℓ][)] = ∇W _f[e][(][t,ℓ][)](J[e][(][t,ℓ][)],_ _H[e][(][t,ℓ][−][1)],_ _W[f][(][t,ℓ][)])_
+
+where
+_M_ [(][t,ℓ][)] = _Je[(][t,ℓ][)]_ _σ[′](PinH[e]_ [(][t,ℓ][−][e][1)]W[f][(][t,ℓ][e][)] + PbdH[f][(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)])
+f [e] _◦_ [e] [e]
+
+
+-----
+
+_∇H_ _f_ [(][t,ℓ][)](J [(][t,ℓ][)], _H_ [(][t,ℓ][−][1)], _W_ [(][t,ℓ][)]) := Pin[⊤]M [(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤] + Pbd[⊤]M [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤]
+
+_W_ _f_ [(][t,ℓ][)](J [(][t,ℓ][)], _H_ [(][t,ℓ][−][1)], _W_ [(][t,ℓ][)]) := [PinH [(][t,ℓ][−][1)] + PbdH [(][t][−][1][,ℓ][−][1)]][⊤]M[f][(][t,ℓ][)]
+_∇[e]_ [e] [e] [f] [f] [f]
+
+Again, _J_ [(][t][−][1][,ℓ][)] is not a part of the input of _H_ _f_ [(][t,ℓ][)]( _,_ _,_ ) or _W_ _f_ [(][t,ℓ][)]( _,_ _,_ ) because it is a constant
+for epoch t. Finally, we define[e] [e] [e] _∇L[e](θ[e][(][f][t][)]) = ∇ vec[G[(][t,][1)]·_ _·,[e]G ·_ [(][t,][2)] ∇, · · ·, _G[(][e][t,L]·_ [)] ·]. It should be highlighted ·
+that the ‘gradient’[e] _H_ _f_ [(][t,ℓ][)]( _,_ _,_ ), _W_ _f_ [(][t,ℓ][)]([e], _,_ ) and (θ[e][(][t][)])[e] are not the standard gradient for
+_∇_ _·_ _·_ _·_ _∇_ _·_ _·_ _·_ _∇L[e]_
+the corresponding forward process due to the stale communication. Properties of gradient cannot be[e] [e] [e]
+directly applied to these variables.
+
+[e] [e]
+
+Before proceeding our proof, we make the following standard assumptions about the adopted GCN
+architecture and input graph.
+
+**Assumption A.1. The loss function Loss(·, ·) is Closs-Lipschitz continuous and Lloss-smooth w.r.t. to**
+_the input node embedding vector, i.e., |Loss(h[(][L][)], y) −_ _Loss(h[′][(][L][)], y)| ≤_ _Closs∥h[(][L][)]_ _−_ _h[′][(][L][)]∥2 and_
+_∥∇is the correct label vector.Loss(h[(][L][)], y) −∇Loss(h[′][(][L][)], y)∥2 ≤_ _Lloss∥h[(][L][)]_ _−_ _h[′][(][L][)]∥2 where h is the predicted label and y_
+
+**Assumption A.2. The activation function σ(·) is Cσ-Lipschitz continuous and Lσ-smooth, i.e.,**
+_∥σ(z[(][ℓ][)]) −_ _σ(z[′][(][ℓ][)])∥2 ≤_ _Cσ∥z[(][ℓ][)]_ _−_ _z[′][(][ℓ][)]∥2 and ∥σ[′](z[(][ℓ][)]) −_ _σ[′](z[′][(][ℓ][)])∥2 ≤_ _Lσ∥z[(][ℓ][)]_ _−_ _z[′][(][ℓ][)]∥2._
+
+**Assumption A.3. For any ℓ** _∈_ [L], the norm of weight matrices, the propagation matrix, and the
+_input feature matrix are bounded:assumption is also used in (Chen et al. ∥W, 2018[(][ℓ][)]∥;F Liao et al. ≤_ _BW, ∥, 2020P_ _∥F ≤; Garg et al.BP, ∥X,∥ 2020F ≤; Cong et al.BX_ _. (This generic, 2021).)_
+
+A.2 BOUNDED MATRICES AND CHANGES
+
+**Lemma A.1. For any ℓ** _∈_ [L], the Frobenius norm of node embedding matrices, gradient passing
+_from the ℓ-th layer node embeddings to the (ℓ_ _−_ 1)-th, gradient matrices are bounded, i.e.,
+
+_∥H_ [(][ℓ][)]∥F, ∥H[e] [(][t,ℓ][)]∥F ≤ _BH_ _,_
+
+_∥J_ [(][ℓ][)]∥F, ∥J[e][(][t,ℓ][)]∥F ≤ _BJ_ _,_
+
+_∥M_ [(][ℓ][)]∥F, ∥M[f][(][t,ℓ][)]∥F ≤ _BM_ _,_
+
+_∥G[(][ℓ][)]∥F, ∥G[e][(][t,ℓ][)]∥F ≤_ _BG_
+_where_
+_BH = max_
+1 _ℓ_ _L[(][C][σ][B][P][ B][W][ )][ℓ][B][X]_
+_≤_ _≤_
+
+_BJ = max_
+2 _ℓ_ _L[(][C][σ][B][P][ B][W][ )][L][−][ℓ][C][loss]_
+_≤_ _≤_
+
+_BM = CσBJ_
+_BG = BP BH_ _BM_
+
+_Proof.et al., 2021 The proof of). By induction, ∥H_ [(][ℓ][)]∥F ≤ _BH and ∥J_ [(][ℓ][)]∥F ≤ _BJ can be found in Proposition 1 in (Cong_
+
+_∥H[e]_ [(][t,ℓ][)]∥F = ∥σ(PinH [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] + PbdH [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)])∥F
+_≤_ _CσBW ∥Pin + Pbd∥F (CσBP BW )[ℓ][−][1]BX_
+
+[e] [e]
+_≤_ (CσBP BW )[ℓ]BX
+
+_∥J[e][(][t,ℓ][−][1)]∥F =_ _Pin[⊤]_ _J_ [(][t,ℓ][)] _◦_ _σ[′](Z_ [(][t,ℓ][)]) [W[f][(][t,ℓ][)]][⊤] + Pbd[⊤] _J_ [(][t][−][1][,ℓ][)] _◦_ _σ[′](Z_ [(][t][−][1][,ℓ][)]) [W[f][(][t][−][1][,ℓ][)]][⊤] _F_
+   
+_CσBW_ _Pin + Pbd_ _F (CσBP BW )[L][−][ℓ]Closs_
+_≤_ _∥e_ [e]∥ e [e]
+_≤_ (CσBP BW )[L][−][ℓ][+1]Closs
+
+_∥M_ [(][ℓ][)]∥F = ∥J [(][ℓ][)] _◦_ _σ[′](Z_ [(][ℓ][)])∥F ≤ _CσBJ_
+
+_∥M[f][(][t,ℓ][)]∥F = ∥J[e][(][t,ℓ][)]_ _◦_ _σ[′](Z[e][(][t,ℓ][)])∥F ≤_ _CσBJ_
+
+
+-----
+
+_G[(][ℓ][)]_ = [PH [(][ℓ][−][1)]][⊤]M [(][ℓ][)]
+
+_≤_ _BP BH_ _BM_
+
+_G[(][t,ℓ][)]_ = [PinH [(][t,ℓ][−][1)] + PbdH [(][t][−][1][,ℓ][−][1)]][⊤]M[f][(][t,ℓ][)]
+
+_≤_ _BP BH_ _BM_
+
+e [e] [e]
+
+Because the gradient matrices are bounded, the weight change is bounded.
+
+
+**Corollary A.2. For any t, ℓ, ∥W[f][(][t,ℓ][)]** _−_ _W[f][(][t][−][1][,ℓ][)]∥F ≤_ _B∆W = ηBG where η is the learning rate._
+
+Now we can analyze the changes of intermediate variables.
+
+**Lemma A.3. For anyL** 1 _t, ℓ, we have ∥Z[e][(][t,ℓ][)]_ _−_ _Z[e][(][t][−][1][,ℓ][)]∥F ≤_ _B∆Z, ∥H[e]_ [(][t,ℓ][)] _−_ _H[e]_ [(][t][−][1][,ℓ][)]∥F ≤ _B∆H_ _,_
+
+_−_
+_where B∆Z =_ _Cσ[i]_ _[B]P[i][+1]BW[i]_ _[B][H]_ _[B][∆][W][ and][ B][∆][H][ =][ C][σ][B][∆][Z][.]_
+
+_i=0_
+
+P
+
+_Proof. When ℓ_ = 0, ∥H[e] [(][t,][0)] _−_ _H[e]_ [(][t][−][1][,][0)]∥F = ∥X − _X∥F = 0. Now we consider ℓ> 0 by induction._
+
+_∥Z[e][(][t,ℓ][)]_ _−_ _Z[e][(][t][−][1][,ℓ][)]∥F =∥(PinH_ [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] + PbdH [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)])
+
+(PinH [(][t][−][1][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)] + PbdH [(][t][−][2][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)]) _F_
+_−_ _∥_
+
+[e] [e]
+
+= _Pin(H_ [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] _H_ [(][t][−][1][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)])
+_∥_ _−_ [e]
+
+[e] [e]
+
++ Pbd(H [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)] _H_ [(][t][−][2][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)]) _F_
+
+[e] _−_ [e] _∥_
+
+Then we analyze the bound of _H_ [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] _H_ [(][t][−][1][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)] _F which is denoted by s[(][t,ℓ][)]._
+_∥_ [e] [e] _−_ [e] _∥_
+
+_s[(][t,ℓ][)]_ _≤∥H[e]_ [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] _−_ _H[e]_ [(][t,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)]∥F + ∥H[e] [(][t,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)] _−_ _H[e]_ [(][t][−][1][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)]∥F
+
+_≤_ _BH_ _∥W[f][(][t,ℓ][)]_ _−_ _W[f][(][t][−][1][,ℓ][)]∥F + BW ∥H[e]_ [(][t,ℓ][−][1)] _−_ _H[e]_ [(][t][−][1][,ℓ][−][1)]∥F
+
+According to Corollaryℓ−2 A.2, ∥W[f][(][t,ℓ][)] _−_ _W[f][(][t][−][1][,ℓ][)]∥F_ _≤_ _B∆W ._ By induction, ∥H[e] [(][t,ℓ][−][1)] _−_
+
+_H_ [(][t][−][1][,ℓ][−][1)]∥F ≤ _i=0_ _Cσ[i][+1]BP[i][+1]BW[i]_ _[B][H]_ _[B][∆][W][ . Combining these inequalities,]_
+P
+e
+
+
+_ℓ−1_
+
+_Cσ[i]_ _[B]P[i]_ _[B]W[i]_ _[B][H]_ _[B][∆][W]_
+_i=1_
+
+X
+
+
+_s[(][t,ℓ][)]_ _≤_ _BH_ _B∆W +_
+
+
+Plugging it back, we have
+
+_Z_ [(][t,ℓ][)] _Z_ [(][t][−][1][,ℓ][)] _F_ _Pin(H_ [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] _H_ [(][t][−][1][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)])
+_∥_ [e] _−_ [e] _∥_ _≤∥_ _−_ [e]
+
++ Pbd(H [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)] _H_ [(][t][−][2][,ℓ][−][1)]W[f][(][t][−][1][,ℓ][)]) _F_
+
+[e] _ℓ−1_ _−_ [e] _∥_
+
+_BP_ _BH[e]B∆W +_ _Cσ[i]_ _[B]P[i]_ _[B]W[i]_ _[B][H]_ _[B][∆][W]_
+_≤_ _i=1_ !
+
+X
+
+
+_ℓ−1_
+
+= _Cσ[i]_ _[B]P[i][+1]BW[i]_ _[B][H]_ _[B][∆][W]_
+
+_i=0_
+
+X
+
+_∥H[e]_ [(][t,ℓ][)] _−_ _H[e]_ [(][t][−][1][,ℓ][)]∥F =∥σ(Z [(][t,ℓ][)]) − _σ(Z_ [(][t][−][1][,ℓ][)])∥F
+
+_Cσ_ _Z_ [(][t,ℓ][)] _Z_ [(][t][−][1][,ℓ][)] _F_
+_≤_ _∥[e][e]_ _−_ [e] [e] _∥_
+_CσB∆Z_
+_≤_
+
+
+-----
+
+**Lemma A.4. ∥J[e][(][t,ℓ][)]** _−_ _J[e][(][t][−][1][,ℓ][)]∥F ≤_ _B∆J where_
+
+_B∆J = max_
+2 _ℓ_ _L[(][B][P][ B][W][ C][σ][)][L][−][ℓ][B][∆][H]_ _[L][loss][ + (][B][M]_ _[B][∆][W][ +][ L][σ][B][J]_ _[B][∆][Z][B][W][ )]_
+_≤_ _≤_
+
+
+_L−3_
+
+_BP[i][+1]BW[i]_ _[C]σ[i]_
+_i=0_
+
+X
+
+
+For the case ofProof. For the last layer ℓ< L, we prove the lemma by using induction. (ℓ = L), ∥J[e][(][t,L][)] _−_ _J[e][(][t][−][1][,L][)]∥F ≤_ _Lloss∥H[e]_ [(][t,L][)] _−_ _H[e]_ [(][t][−][1][,L][)]∥F ≤ _LlossB∆H_ .
+
+_∥J[e][(][t,ℓ][−][1)]_ _−_ _J[e][(][t][−][1][,ℓ][−][1)]∥F =_ _Pin[⊤]M_ [(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤] + Pbd[⊤]M [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤][]
+
+
+_−_ _Pin[⊤][f]M_ [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] +[f] Pbd[⊤]M [(][t][−][2][,ℓ][)][W[f][(][t][−][2][,ℓ][)]][⊤][]F
+
+
+_≤_ _Pin[⊤]_ _M[f][(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤]_ _−_ _M[f][(][t][−][1][,ℓ][)][W[f][f][(][t][−][1][,ℓ][)]][⊤][]F_
+
+
++ _Pbd[⊤]fM_ [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _M[f][(][t][−][2][,ℓ][)][W[f][(][t][−][2][,ℓ][)]][⊤][]F_
+
+f
+
+We denote _M_ [(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤] _M_ [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤]
+
+[f]s[(][t,ℓ][)] _M_ [(][t,ℓ][)]−[W[f][f][(][t,ℓ][)]][⊤] _M_ [(][t,ℓ][)][W[f][(][t][−]F[1][,ℓ][by][)]][ s][⊤][(][t,ℓ][)][ and analyze its bound.]
+
+_≤_ _−_ [f] _F_
+
++ _M_ [(][t,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _M_ [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤]
+
+[f] _−_ [f] _F_
+
+_BM_ [W[f][(][t,ℓ][)]][⊤] [W[f][(][t][−][1][,ℓ][)]][⊤] _M_ [(][t,ℓ][)] _M_ [(][t][−][1][,ℓ][)]
+
+According to Corollary≤ A.2[f], [W[f][(][t,ℓ][)]−][⊤] [W[f][(][t][−][1][,ℓ][)]]F[⊤] [+][ B][W] [f] _−_ [f] _F_
+_−_ _F_ _[≤]_ _[B][∆][W][ . For the second term,]_
+
+_M_ [(][t,ℓ][)] _M_ [(][t][−][1][,ℓ][)] _F_
+_∥_ [f] _−_ [f] _∥_
+
+= _J_ [(][t,ℓ][)] _σ[′](Z_ [(][t,ℓ][)]) _J_ [(][t][−][1][,ℓ][)] _σ[′](Z_ [(][t][−][1][,ℓ][)]) _F_
+_∥_ [e] _◦_ _−_ [e] _◦_ _∥_
+
+_≤∥J[e][(][t,ℓ][)]_ _◦_ _σ[′](Z[e][(][t,ℓ][)]) −_ _J[e][(][t,ℓ][)]_ _◦_ _σ[′](Z_ [(][t][e][−][1][,ℓ][)])∥F + ∥J[e][(][t,ℓ][)] _◦_ _σ[′](Z_ [(][t][−][1][,ℓ][)]) − _J[e][(][t][−][1][,ℓ][)]_ _◦_ _σ[′](Z_ [(][t][−][1][,ℓ][)])∥F
+
+_≤BJ_ _∥σ[′](Z_ [(][t,ℓ][)][e]) − _σ[′](Z_ [(][t][−][1][,ℓ][)])∥F +[e] _Cσ∥J[e][(][t,ℓ][)]_ _−_ _J[e][(][t][−][1][,ℓ][)]∥F_ [e] [e] (5)
+
+According to the smoothness of[e] [e] _σ and Lemma A.3,_ _σ[′](Z_ [(][t,ℓ][)]) _σ[′](Z_ [(][t][−][1][,ℓ][)]) _F_ _LσB∆Z. By_
+induction, _∥_ _−_ _∥_ _≤_
+
+[e] [e]
+
+_J_ [(][t,ℓ][)] _J_ [(][t][−][1][,ℓ][)] _F_
+_∥_ [e] _−_ [e] _∥_
+
+_L−ℓ−1_
+
+_≤_ (BP BW Cσ)[(][L][−][ℓ][)]B∆H _Lloss + (BM_ _B∆W + LσBJ_ _B∆ZBW )_ _BP[i][+1]BW[i]_ _[C]σ[i]_
+
+_i=0_
+
+X
+
+As a result,
+
+
+_s[(][t,ℓ][)]_ _≤BM_ _B∆W + BW BJ_ _LσB∆Z + BW Cσ∥J[e][(][t,ℓ][)]_ _−_ _J[e][(][t][−][1][,ℓ][)]∥F_
+
+=(BM _B∆W + BW BJ_ _LσB∆Z) + BP[(][L][−][ℓ][)]BW[(][L][−][ℓ][+1)]Cσ[(][L][−][ℓ][+1)]B∆H_ _Lloss_
+
+_L−ℓ_
+
++ (BM _B∆W + LσBJ_ _B∆ZBW )_ _BP[i]_ _[B]W[i]_ _[C]σ[i]_
+
+_i=1_
+
+X
+
+_BP[(][L][−][ℓ][)]BW[(][L][−][ℓ][+1)]Cσ[(][L][−][ℓ][+1)]B∆H_ _Lloss_
+_≤_
+
+_L−ℓ_
+
++ (BM _B∆W + LσBJ_ _B∆ZBW )_ _BP[i]_ _[B]W[i]_ _[C]σ[i]_
+
+_i=0_
+
+X
+
+
+-----
+
+_∥J[e][(][t,ℓ][−][1)]_ _−_ _J[e][(][t][−][1][,ℓ][−][1)]∥F =_ _Pin[⊤]_ _M_ [(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤] _−_ _M[f][(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤][]F_
+
+
++ _Pbd[⊤]fM_ [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _M[f][(][t][−][2][,ℓ][)][W[f][(][t][−][2][,ℓ][)]][⊤][]_
+
+_≤BP s[(][t,ℓ][)]_ f
+
+_≤(BP BW Cσ)[(][L][−][ℓ][+1)]B∆H_ _Lloss_
+
+_L−ℓ_
+
++ (BM _B∆W + LσBJ_ _B∆ZBW )_ _BP[i][+1]BW[i]_ _[C]σ[i]_
+
+_i=0_
+
+X
+
+From Equation 5, we can also conclude that
+
+**Corollary A.5. ∥M[f][(][t,ℓ][)]** _−_ _M[f][(][t][−][1][,ℓ][)]∥F ≤_ _B∆M with B∆M = BJ_ _LσB∆Z + CσB∆J_ _._
+
+A.3 BOUNDED FEATURE ERROR AND GRADIENT ERROR
+
+
+In this subsection, we compare the difference between generic GCN and PipeGCN with the same
+parameter set, i.e., θ = _θ[(][t][)]._
+
+_L_
+
+**Lemma A.6. ∥Z[e][(][t,ℓ][)]** _−_ _Z[e]_ [(][ℓ][)]∥F ≤ _EZ_ _,∥H[e]_ [(][t,ℓ][)] _−_ _H_ [(][ℓ][)]∥F ≤ _EH where EZ = B∆H_ _i=1_ _Cσ[i][−][1]BW[i]_ _[B]P[i]_
+
+_L_
+
+P
+
+_and EH = B∆H_ (CσBW BP )[i].
+
+_i=1_
+
+P
+
+_Proof._
+
+
+_∥Z[e][(][t,ℓ][)]_ _−_ _Z_ [(][ℓ][)]∥F = ∥(PinH [(][t,ℓ][−][1)]W[f][(][t,ℓ][)] + PbdH [(][t][−][1][,ℓ][−][1)]W[f][(][t,ℓ][)]) − (PH [(][ℓ][−][1)]W [(][ℓ][)])∥F
+
+(PinH [(][t,ℓ][−][1)] + PbdH [(][t][−][1][,ℓ][−][1)] _PH_ [(][ℓ][−][1)])W [(][ℓ][)] _F_
+_≤∥_ _−_ _∥_
+
+[e] [e]
+
+= BW _P_ (H [(][t,ℓ][−][1)] _H_ [(][ℓ][−][1)]) + Pbd(H [(][t][−][1][,ℓ][−][1)] _H_ [(][t,ℓ][−][1)]) _F_
+_∥_ [e] _−_ [e] _−_ [e] _∥_
+
+_≤_ _BW BP_ [e]∥H[e] [(][t,ℓ][−][1)] _−_ _H_ [(][ℓ][−][1)]∥F + B[e]∆H
+ 
+
+_ℓ−1_
+
+By induction, we assume that ∥H[e] [(][t,ℓ][−][1)] _−_ _H_ [(][ℓ][−][1)]∥F ≤ _B∆H_ _i=1(CσBW BP )[i]. Therefore,_
+
+P
+
+_ℓ−1_
+
+_∥Z[e][(][t,ℓ][)]_ _−_ _Z_ [(][ℓ][)]∥F ≤ _BW BP B∆H_ _i=0(CσBW BP )[i]_
+
+X
+
+_ℓ_
+
+= B∆H _Cσ[i][−][1]BW[i]_ _[B]P[i]_
+
+_i=1_
+
+X
+
+_∥H[e]_ [(][t,ℓ][)] _−_ _H_ [(][ℓ][)]∥F = ∥σ(Z [(][t,ℓ][)]) − _σ(Z_ [(][ℓ][)])∥F
+
+_Cσ_ _Z_ [(][t,ℓ][)] _Z_ [(][ℓ][)] _F_
+_≤_ _∥[e][e]_ _ℓ_ _−_ _∥_
+
+_≤_ _B∆H_ (CσBW BP )[i]
+
+_i=1_
+
+X
+
+
+**Lemma A.7. ∥J[e][(][t,ℓ][)]** _−_ _J_ [(][ℓ][)]∥F ≤ _EJ and ∥M[f][(][t,ℓ][)]_ _−_ _M_ [(][ℓ][)]∥F ≤ _EM with_
+
+_EJ = max_
+2 _ℓ_ _L[(][B][P][ B][W][ C][σ][)][L][−][ℓ][L][loss][E][H]_ [+][B][P][ (][B][W][ (][B][J] _[E][Z][L][σ]_ [+][B][∆][M] [)+][B][∆][W][ B][M] [)]
+_≤_ _≤_
+
+_EM = CσEJ + LσBJ_ _EZ_
+
+
+_L−3_
+
+(BP BW Cσ)[i]
+_i=0_
+
+X
+
+
+-----
+
+_Proof. When ℓ_ = L, ∥J[e][(][t,L][)] _−_ _J_ [(][L][)]∥F ≤ _LlossEH_ . For any ℓ, we assume thatL−ℓ−1
+
+_∥J[e][(][t,ℓ][)]_ _−_ _J_ [(][ℓ][)]∥F ≤ (BP BW Cσ)[L][−][ℓ]LlossEH + U _i=0_ (BP BW Cσ)[i] (6)
+
+X
+
+_L−ℓ−1_
+
+_∥M[f][(][t,ℓ][)]_ _−_ _M_ [(][ℓ][)]∥F ≤ (BP BW Cσ)[L][−][ℓ]CσLlossEH + UCσ _i=0_ (BP BW Cσ)[i] + LσBJ _EZ_ (7)
+
+X
+
+where U = BP (BW BJ _EZLσ + B∆W BM + BW B∆M_ ). We prove them by induction as follows.
+
+_M_ [(][t,ℓ][)] _M_ [(][ℓ][)] _F_
+_∥_ [f] _−_ _∥_
+
+= _J_ [(][t,ℓ][)] _σ[′](Z_ [(][t,ℓ][)]) _J_ [(][ℓ][)] _σ[′](Z_ [(][ℓ][)]) _F_
+_∥_ [e] _◦_ _−_ _◦_ _∥_
+
+_≤∥J[e][(][t,ℓ][)]_ _◦_ _σ[′](Z[e][(][t,ℓ][)]) −_ _J[e][(][t,ℓ][)]_ _◦_ _σ[′](Z_ [(][ℓ][)])∥F + ∥J[e][(][t,ℓ][)] _◦_ _σ[′](Z_ [(][ℓ][)]) − _J_ [(][ℓ][)] _◦_ _σ[′](Z_ [(][ℓ][)])∥F
+
+_≤_ _BJ_ _∥σ[′](Z_ [(][t,ℓ][)][e]) − _σ[′](Z_ [(][ℓ][)])∥F + Cσ∥J[e][(][t,ℓ][)] _−_ _J_ [(][ℓ][)]∥F
+Here _σ[′](Z_ [(][t,ℓ][)]) _σ[′](Z_ [(][ℓ][)]) _F_ _LσEZ. With Equation 6,_
+_∥_ _−[e]_ _∥_ _≤_ _L_ _ℓ_ 1
+
+_−_ _−_
+
+_M_ [(][t,ℓ][e][)] _M_ [(][ℓ][)] _F_ (BP BW Cσ)[L][−][ℓ]CσLlossEH + UCσ (BP BW Cσ)[i] + LσBJ _EZ_
+_∥_ [f] _−_ _∥_ _≤_ _i=0_
+
+X
+
+On the other hand,
+_J_ [(][t,ℓ][−][1)] _J_ [(][ℓ][−][1)] _F_
+_∥_ [e] _−_ _∥_
+
+= ∥Pin[⊤]M [(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤] + Pbd[⊤]M [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _P_ _[⊤]M_ [(][ℓ][)][W [(][ℓ][)]][⊤]∥F
+
+= ∥P _[⊤](M[f][(][t,ℓ][)]_ _−_ _M_ [(][ℓ][)])[W [(][ℓ][)]][⊤] + Pbd[⊤][(]M[f][(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _M[f][(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤])∥F_
+
+[f] [f]
+
+_≤∥P_ _[⊤](M[f][(][t,ℓ][)]_ _−_ _M_ [(][ℓ][)])[W [(][ℓ][)]][⊤]∥F + ∥Pbd[⊤][(]M[f][(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _M[f][(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤])∥F_
+
+_≤_ _BP BW ∥M[f][(][t,ℓ][)]_ _−_ _M_ [(][ℓ][)]∥F + BP ∥M[f][(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _M[f][(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤]∥F_
+The first part is bounded by Equation 7. For the second part,
+
+_M_ [(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _M_ [(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤] _F_
+_∥_ [f] _−_ [f] _∥_
+
+_≤∥M[f][(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤]_ _−_ _M[f][(][t][−][1][,ℓ][)][W[f][(][t,ℓ][)]][⊤]∥F + ∥M[f][(][t][−][1][,ℓ][)][W[f][(][t,ℓ][)]][⊤]_ _−_ _M[f][(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤]∥F_
+_≤_ _B∆W BM + BW B∆M_
+Therefore,
+_J_ [(][t,ℓ][−][1)] _J_ [(][ℓ][−][1)] _F_
+_∥_ [e] _−_ _∥_
+
+_≤_ _BP BW ∥M[f][(][t,ℓ][)]_ _−_ _M_ [(][ℓ][)]∥F + BP ∥M[f][(][t][−][1][,ℓ][)][W[f][(][t][−][1][,ℓ][)]][⊤] _−_ _M[f][(][t,ℓ][)][W[f][(][t,ℓ][)]][⊤]∥F_
+
+_L−ℓ_
+
+_≤_ (BP BW Cσ)[L][−][ℓ][+1]LlossEH + U (BP BW Cσ)[i] + U
+
+_i=1_
+
+X
+
+
+_L−ℓ_
+
+(BP BW Cσ)[i]
+_i=0_
+
+X
+
+
+= (BP BW Cσ)[L][−][ℓ][+1]LlossEH + U
+
+
+**Lemma A.8. ∥G[e][(][t,ℓ][)]** _−_ _G[(][ℓ][)]∥F ≤_ _EG where EG = BP (BH_ _EM + BM_ _EH_ )
+
+_Proof._
+
+_G[(][t,ℓ][)]_ _G[(][ℓ][)]_ _F_
+_∥_ [e] _−_ _∥_
+
+= [PinH [(][t,ℓ][−][1)] + PbdH [(][t][−][1][,ℓ][−][1)]][⊤]M[f][(][t,ℓ][)] [PH [(][ℓ][)]][⊤]M [(][ℓ][)]
+_−_ _F_
+
+[PinH [(][t,ℓ][−][1)] + PbdH [(][t][−][1][,ℓ][−][1)]][⊤]M[f][(][t,ℓ][)] [PH [(][ℓ][−][1)]][⊤]M[f][(][t,ℓ][)]
+_≤_ [e] [e] _−_ _F_
+
++ [PH [(][ℓ][−][1)]][⊤]M[f][(][t,ℓ][)] [PH [(][ℓ][−][1)]][⊤]M [(][ℓ][)]
+
+[e] [e] _−_ _F_
+
+_≤BM_ (∥P (H [(][t,ℓ][−][1)] _−_ _H_ [(][ℓ][−][1)]) + Pbd(H [(][t][−][1][,ℓ][−][1)] _−_ _H[e]_ [(][t,ℓ][−][1)])∥F ) + BP BH _EM_
+_≤BM_ _BP (EH + B∆H_ ) + BP BH _EM_
+
+[e] [e]
+
+
+-----
+
+By summing up from ℓ = 1 to ℓ = L to both sides, we have
+
+**Corollary A.9. ∥∇L[e](θ) −∇L(θ)∥2 ≤** _Eloss where Eloss = LEG._
+
+According to the derivation of Eloss, we observe that Eloss contains a factor η. To simplify the expression ofthe following. Eloss, we assume that BP BW Cσ ≤ 2[1] [without loss of generality, and rewrite Corollary][ A.9][ as]
+
+
+**Corollary A.10. ∥∇L[e](θ) −∇L(θ)∥2 ≤** _ηE where_
+
+_E = [1]_ _P_ _[B]X[2]_ _[C][loss][C][σ]_ 3BX _Cσ[2][L][loss]_ [+ 6][B][X] _[C][loss][L][σ]_ [+ 10][C][loss][C]σ[2]
+
+8 _[LB][3]_
+ 
+
+A.4 PROOF OF THE MAIN THEOREM
+
+
+We first introduce a lemma before the proof of our main theorem.
+**Lemma A.11 (Lemma 1 in (Cong et al., 2021)). An L-layer GCN is Lf** _-Lipschitz smoothness, i.e.,_
+(θ1) (θ2) 2 _Lf_ _θ1_ _θ2_ 2.
+_∥∇L_ _−∇L_ _∥_ _≤_ _∥_ _−_ _∥_
+
+Now we prove the main theorem.
+**Theorem A.12 (Convergence of PipeGCN, formal). Under Assumptions A.1, A.2, and A.3, we**
+_can derive the following by choosing a learning rate η =_ _√Eε_ _[and number of training iterations]_
+
+_T = (L(θ[(1)]) −L(θ[∗]))Eε[−]_ [3]2 : _T_
+
+1
+
+(θ[(][t][)]) 2 3ε
+
+_T_ _t=1_ _∥∇L_ _∥_ _≤_
+
+X
+
+_where E is defined in Corollary A.10, ε > 0 is an arbitrarily small constant, L(·) is the loss function,_
+_θ[(][t][)]_ _and θ[∗]_ _represent the parameter vector at iteration t and the optimal parameter respectively._
+
+_Proof. With the smoothness of the model,_
+
+_L(θ[(][t][+1)]) ≤L(θ[(][t][)]) +_ D∇L(θ[(][t][)]), θ[(][t][+1)] _−_ _θ[(][t][)][E]_ + _[L]2[f]_ _[∥][θ][(][t][+1)][ −]_ _[θ][(][t][)][∥]2[2]_
+
+= L(θ[(][t][)]) − _η_ _∇L(θ[(][t][)]), ∇L[e](θ[(][t][)])_ + _[η][2]2[L][f]_ _∥∇L[e](θ[(][t][)])∥2[2]_
+D E
+
+Let δ[(][t][)] = (θ[(][t][)]) (θ[(][t][)]) and η 1/Lf, we have
+_∇L[e]_ _−∇L_ _≤_
+
+_L(θ[(][t][+1)]) ≤L(θ[(][t][)]) −_ _η_ _∇L(θ[(][t][)]), ∇L(θ[(][t][)]) + δ[(][t][)][E]_ + _[η]2_ _[∥∇L][(][θ][(][t][)][) +][ δ][(][t][)][∥]2[2]_
+D
+
+(θ[(][t][)]) 2 [+][ η] 2
+_≤L_ _−_ _[η]2_ _[∥∇L][(][θ][(][t][)][)][∥][2]_ 2 _[∥][δ][(][t][)][∥][2]_
+
+
+From Corollary A.10 we know that ∥δ[(][t][)]∥2 < ηE. After rearranging the terms,
+
+_∥∇L(θ[(][t][)])∥2[2]_ _[≤]_ _η[2]_ [(][L][(][θ][(][t][)][)][ −L][(][θ][(][t][+1)][)) +][ η][2][E][2]
+
+Summing up from t = 1 to T and taking the average,
+
+_T_
+
+1
+
+_T_ _t=1_ _∥∇L(θ[(][t][)])∥2[2]_ _[≤]_ _ηT[2]_ [(][L][(][θ][(1)][)][ −L][(][θ][(][T][ +1)][)) +][ η][2][E][2]
+
+X
+
+
+_≤_ _ηT[2]_ [(][L][(][θ][(1)][)][ −L][(][θ][∗][)) +][ η][2][E][2]
+
+where θ[∗] is the minimum point of L(·). By taking η = _√Eε_ [and][ T][ = (][L][(][θ][(1)][)][ −L][(][θ][∗][))][Eε][−] 2[3] with
+
+an arbitrarily small constant ε > 0, we have
+
+_T_
+
+1
+
+(θ[(][t][)]) 2 3ε
+
+_T_ _t=1_ _∥∇L_ _∥_ _≤_
+
+X
+
+
+-----
+
+B TRAINING TIME BREAKDOWN OF FULL-GRAPH TRAINING METHODS
+
+To understand why PipeGCN significantly boosts the training throughput over full-graph training
+methods, we provide the detailed time breakdown in Tab. 6 using the same model as Tab. 3 (4-layer
+GraphSAGE, 256 hidden units), in which “GCN” denotes the vanilla partition-parallel training
+illustrated in Fig. 1(a). We observe that PipeGCN greatly saves communication time.
+
+Table 6: Epoch time breakdown of full-graph training methods on the Reddit dataset.
+
+|Method|Total time (s) Compute (s) Communication (s) Reduce (s)|
+|---|---|
+|ROC (2 GPUs) CAGNET (c=1, 2 GPUs) CAGNET (c=2, 2 GPUs) GCN (2 GPUs) PipeGCN (2 GPUs) ROC (4 GPUs) CAGNET (c=1, 4 GPUs) CAGNET (c=2, 4 GPUs) GCN (4 GPUs) PipeGCN (4 GPUs)|3.63 0.5 3.13 0.00 2.74 1.91 0.65 0.18 5.41 4.36 0.09 0.96 0.52 0.17 0.34 0.01 0.27 0.25 0.00 0.02 3.34 0.42 2.92 0.00 2.31 0.97 1.23 0.11 2.26 1.03 0.55 0.68 0.48 0.07 0.40 0.01 0.23 0.10 0.10 0.03|
+
+
+-----
+
+C TRAINING TIME IMPROVEMENT BREAKDOWN OF PIPEGCN
+
+To understand the training time improvement offered by PipeGCN, we further breakdown the
+epoch time into three parts (intra-partition computation, inter-partition communication, and reduce
+for aggregating model gradient) and provide the result in Fig. 8. We can observe that: 1) interpartition communication dominates the training time in vanilla partition-parallel training (GCN); 2)
+**_PipeGCN (with or without smoothing) greatly hides the communication overhead across different_**
+number of partitions and all datasets, e.g., the communication time is hidden completely in 2-partition
+Reddit and almost completely in 3-partition Yelp, thus the substantial reduction in training time; and
+3) the proposed smoothing incurs only minimal overhead (i.e., minor difference between PipeGCN
+and PipeGCN-GF). Lastly, we also notice that when communication ratio is extremely large (85%+),
+_PipeGCN hides communication significantly but not completely (e.g., 10-partition ogbn-products), in_
+which case we can employ those compression and quantization techniques (Alistarh et al. (2017);
+Seide et al. (2014); Wen et al. (2017); Li et al. (2018a); Yu et al. (2018)) from the area of general
+distributed SGD for further reducing the communication, as the compression is orthogonal to the
+pipeline method. Besides compression, we can also increase the pipeline depth of PipeGCN, e.g.,
+using two iterations of compute to hide one iteration of communication, which is left to our future
+work.
+
+
+2 4
+
+|Col1|Reddit|Col3|Col4|Col5|Col6|Col7|Col8|Col9|
+|---|---|---|---|---|---|---|---|---|
+||computation communication||||||||
+||||||||||
+|reduce|||||||||
+|GCN GCN GCN-GF GCN N N-GF|||||||||
+||||||||||
+|||Pipe Pipe||||PipeGC PipeGC|||
+||||||||||
+
+
+computation
+communication
+reduce
+
+GCN PipeGCN PipeGCN-GF GCN PipeGCN PipeGCN-GF
+
+Number of partitions
+
+
+obgn-products
+
+5 10
+
+|Col1|computation communication|Col3|Col4|Col5|Col6|Col7|Col8|Col9|
+|---|---|---|---|---|---|---|---|---|
+||||||||||
+||reduce||||||||
+||||||||||
+|CN F GCN GF|||||||||
+||G|CN CN-G||||GCN GCN-|||
+|||PipeG PipeG||||Pipe Pipe|||
+||||||||||
+
+
+computation
+communication
+reduce
+
+GCN
+
+GCN PipeGCN PipeGCN-GF PipeGCN PipeGCN-GF
+
+Number of partitions
+
+
+3 6
+
+|Col1|Yelp|Col3|Col4|Col5|Col6|Col7|Col8|Col9|
+|---|---|---|---|---|---|---|---|---|
+||computation communication||||||||
+||||||||||
+|reduce N|||||||||
+|GC CN CN-GF GCN CN GCN-GF|||||||||
+||||||||||
+|||PipeG PipeG||||PipeG Pipe|||
+||||||||||
+
+
+computation
+communication
+reduce
+
+GCN
+
+PipeGCN PipeGCN-GF GCN PipeGCN PipeGCN-GF
+
+Number of partitions
+
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+1.4
+
+1.2
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+Figure 8: Training time breakdown of vanilla partition-parallel training (GCN), PipeGCN, and
+PipeGCN with smoothing (PipeGCN-GF).
+
+
+-----
+
+D MAINTAINING CONVERGENCE SPEED (ADDITIONAL EXPERIMENTS)
+
+We provide the additional convergence curves on Yelp in Fig. 9. We can see that PipeGCN and its
+**_variants maintain the convergence speed w.r.t the number of epochs while substantially reducing_**
+**_the end-to-end training time._**
+
+
+
+|Yelp (3 partitions)|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||GCN||
+|||GCN|
+|||PipeGCN PipeGCN-G|
+|||PipeGCN-F|
+|||PipeGCN-GF|
+|0|1000 2000 3000 4000 500 Epoch||
+
+|Yelp (6 partitions)|Col2|Col3|
+|---|---|---|
+||||
+||||
+||||
+||GCN||
+|||GCN|
+|||PipeGCN PipeGCN-G|
+|||PipeGCN-F|
+|||PipeGCN-GF|
+|0|1000 2000 3000 4000 500 Epoch||
+
+
+Yelp (3 partitions) Yelp (6 partitions)
+
+64 64
+
+62 62
+
+60 60
+
+GCN GCN
+
+58 PipeGCN 58 PipeGCN
+
+est F1 Score (%)T56 PipeGCN-G est F1 Score (%)T56 PipeGCN-G
+
+PipeGCN-F PipeGCN-F
+
+54 PipeGCN-GF 54 PipeGCN-GF
+
+0 1000 2000 3000 4000 5000 0 1000 2000 3000 4000 5000
+
+Epoch Epoch
+
+
+Figure 9: The epoch-to-accuracy comparison on “Yelp” among the vanilla partition-parallel training
+(GCN) and PipeGCN variants (PipeGCN*), where PipeGCN and its variants achieve a similar
+_convergence as the vanilla training (without staleness) but are twice as fast in terms of wall-clock_
+_time (see the Throughput improvement in Tab. 4 of the main content)._
+
+
+-----
+
+E SCALING GCN TRAINING OVER MULTIPLE GPU SERVERS
+
+We also scale up PipeGCN training over multiple GPU servers (each contains AMD Radeon Instinct
+MI60 GPUs, an AMD EPYC 7642 CPU, and 48 lane PCI 3.0 connecting CPU-GPU and GPU-GPU)
+networked with 10Gbps Ethernet.
+
+The accuracy results of PipeGCN and its variants are summarized in Tab. 7:
+
+Table 7: The accuracy of PipeGCN and its variants on Reddit.
+
+|#partitions (#node×#gpus)|PipeGCN PipeGCN-F PipeGCN-G PipeGCN-GF|
+|---|---|
+|2 (1 2) × 3 (1 3) × 4 (1 4) × 6 (2 3) × 8 (2 4) × 9 (3 3) × 12 (3 4) × 16 (4 4) ×|97.12% 97.09% 97.14% 97.12% 97.01% 97.15% 97.17% 97.14% 97.04% 97.10% 97.09% 97.10% 97.09% 97.12% 97.08% 97.10% 97.02% 97.06% 97.15% 97.03% 97.03% 97.08% 97.11% 97.08% 97.05% 97.05% 97.12% 97.10% 96.99% 97.02% 97.14% 97.12%|
+
+
+
+Furthermore, we provide PipeGCN’s speedup against vanilla partition-parallel training in Tab. 8:
+
+Table 8: The speedup of PipeGCN and its vatiants against vanilla partition-parallel training on
+Reddit.
+
+|#nodes×#gpus|GCN PipeGCN PipeGCN-G PipeGCN-F PipeGCN-GF|
+|---|---|
+|1 2 × 1 3 × 1 4 × 2 2 × 2 3 × 2 4 × 3 2 × 3 3 × 3 4 × 4 2 × 4 3 × 4 4 ×|1.00 1.16 1.16 1.16 1.16 × × × × × 1.00 1.22 1.22 1.22 1.22 × × × × × 1.00 1.29 1.28 1.29 1.28 × × × × × 1.00 1.61 1.60 1.61 1.60 × × × × × 1.00 1.64 1.64 1.64 1.64 × × × × × 1.00 1.41 1.42 1.41 1.37 × × × × × 1.00 1.65 1.65 1.65 1.65 × × × × × 1.00 1.48 1.49 1.50 1.48 × × × × × 1.00 1.35 1.36 1.35 1.34 × × × × × 1.00 1.64 1.63 1.63 1.62 × × × × × 1.00 1.38 1.38 1.38 1.38 × × × × × 1.00 1.30 1.29 1.29 1.29 × × × × ×|
+
+
+
+From the two tables above, we can observe that our PipeGCN family consistently maintains the
+**accuracy of the full-graph training, while improving the throughput by 15%∼66% regardless of**
+the machine settings and number of partitions.
+
+
+-----
+
+F IMPLEMENTATION DETAILS
+
+We discuss the details of the effective and efficient implementation of PipeGCN in this section.
+
+First, for parallel communication and computation, a second cudaStream is required for communication besides the default cudaStream for computation. To also save memory buffers for communication,
+we batch all communication (e.g., from different layers) into this second cudaStream. When the
+popular communication backend, Gloo, is used, we parallelize the CPU-GPU transfer with CPU-CPU
+transfer.
+
+Second, when Dropout layer is used in GCN model, it should be applied after communication. The
+implementation of the dropout layer for PipeGCN should be considered carefully so that the dropout
+mask remains consistent for the input tensor and corresponding gradient. If the input feature passes
+through the dropout layer before being communicated, during the backward phase, the dropout mask
+is changed and the gradient of masked values is involved in the computation, which introduces noise
+to the calculation of followup gradients. As a result, the dropout layer can only be applied after
+receiving boundary features.
+
+
+-----
+

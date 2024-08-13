@@ -1,0 +1,2573 @@
+# LEVERAGING UNLABELED DATA TO PREDICT OUT-OF-DISTRIBUTION PERFORMANCE
+
+
+**Saurabh Garg[˚]**
+Carnegie Mellon University
+[sgarg2@andrew.cmu.edu](mailto:sgarg2@andrew.cmu.edu)
+
+
+**Sivaraman Balakrishnan**
+Carnegie Mellon University
+[sbalakri@andrew.cmu.edu](mailto:sbalakri@andrew.cmu.edu)
+
+
+**Zachary C. Lipton**
+Carnegie Mellon University
+[zlipton@andrew.cmu.edu](mailto:zlipton@andrew.cmu.edu)
+
+
+**Behnam Neyshabur**
+Google Research, Blueshift team
+[neyshabur@google.com](mailto:neyshabur@google.com)
+
+
+**Hanie Sedghi**
+Google Research, Brain team
+[hsedghi@google.com](mailto:hsedghi@google.com)
+
+ABSTRACT
+
+
+Real-world machine learning deployments are characterized by mismatches between the source (training) and target (test) distributions that may cause performance drops. In this work, we investigate methods for predicting the target domain
+accuracy using only labeled source data and unlabeled target data. We propose Average Thresholded Confidence (ATC), a practical method that learns a threshold on
+the model’s confidence, predicting accuracy as the fraction of unlabeled examples
+for which model confidence exceeds that threshold. ATC outperforms previous
+methods across several model architectures, types of distribution shifts (e.g., due to
+synthetic corruptions, dataset reproduction, or novel subpopulations), and datasets
+(WILDS, ImageNet, BREEDS, CIFAR, and MNIST). In our experiments, ATC
+estimates target performance 2–4ˆ more accurately than prior methods. We also
+explore the theoretical foundations of the problem, proving that, in general, identifying the accuracy is just as hard as identifying the optimal predictor and thus, the
+efficacy of any method rests upon (perhaps unstated) assumptions on the nature
+of the shift. Finally, analyzing our method on some toy distributions, we provide
+insights concerning when it works.
+
+1 INTRODUCTION
+
+Machine learning models deployed in the real world typically encounter examples from previously
+unseen distributions. While the IID assumption enables us to evaluate models using held-out data
+from the source distribution (from which training data is sampled), this estimate is no longer valid
+in presence of a distribution shift. Moreover, under such shifts, model accuracy tends to degrade
+(Szegedy et al., 2014; Recht et al., 2019; Koh et al., 2021). Commonly, the only data available to
+the practitioner are a labeled training set (source) and unlabeled deployment-time data which makes
+the problem more difficult. In this setting, detecting shifts in the distribution of covariates is known
+to be possible (but difficult) in theory (Ramdas et al., 2015), and in practice (Rabanser et al., 2018).
+However, producing an optimal predictor using only labeled source and unlabeled target data is
+well-known to be impossible absent further assumptions (Ben-David et al., 2010; Lipton et al., 2018).
+
+Two vital questions that remain are: (i) the precise conditions under which we can estimate a classifier’s target-domain accuracy; and (ii) which methods are most practically useful. To begin, the
+straightforward way to assess the performance of a model under distribution shift would be to collect
+labeled (target domain) examples and then to evaluate the model on that data. However, collecting fresh labeled data from the target distribution is prohibitively expensive and time-consuming,
+especially if the target distribution is non-stationary. Hence, instead of using labeled data, we aim
+to use unlabeled data from the target distribution, that is comparatively abundant, to predict model
+performance. Note that in this work, our focus is not to improve performance on the target but, rather,
+to estimate the accuracy on the target for a given classifier.
+
+˚Work done in part while Saurabh Garg was interning at Google
+
+
+-----
+
+Figure 1: Illustration of our proposed method ATC. Left: using source domain validation data, we
+identify a threshold on a score (e.g. negative entropy) computed on model confidence such that
+fraction of examples above the threshold matches the validation set accuracy. ATC estimates accuracy
+on unlabeled target data as the fraction of examples with the score above the threshold. Interestingly,
+this threshold yields accurate estimates on a wide set of target distributions resulting from natural
+and synthetic shifts. Right: Efficacy of ATC over previously proposed approaches on our testbed
+with a post-hoc calibrated model. To obtain errors on the same scale, we rescale all errors with
+Average Confidence (AC) error. Lower estimation error is better. See Table 1 for exact numbers and
+comparison on various types of distribution shift. See Sec. 5 for details on our testbed.
+
+Recently, numerous methods have been proposed for this purpose (Deng & Zheng, 2021; Chen et al.,
+2021; Jiang et al., 2021; Deng et al., 2021; Guillory et al., 2021). These methods either require
+calibration on the target domain to yield consistent estimates (Jiang et al., 2021; Guillory et al.,
+2021) or additional labeled data from several target domains to learn a linear regression function on a
+distributional distance that then predicts model performance (Deng et al., 2021; Deng & Zheng, 2021;
+Guillory et al., 2021). However, methods that require calibration on the target domain typically yield
+poor estimates since deep models trained and calibrated on source data are not, in general, calibrated
+on a (previously unseen) target domain (Ovadia et al., 2019). Besides, methods that leverage labeled
+data from target domains rely on the fact that unseen target domains exhibit strong linear correlation
+with seen target domains on the underlying distance measure and, hence, can be rendered ineffective
+when such target domains with labeled data are unavailable (in Sec. 5.1 we demonstrate such a failure
+on a real-world distribution shift problem). Therefore, throughout the paper, we assume access to
+labeled source data and only unlabeled data from target domain(s).
+
+In this work, we first show that absent assumptions on the source classifier or the nature of the shift,
+no method of estimating accuracy will work generally (even in non-contrived settings). To estimate
+accuracy on target domain perfectly, we highlight that even given perfect knowledge of the labeled
+source distribution (i.e., ps _x, y_ ) and unlabeled target distribution (i.e., pt _x_ ), we need restrictions
+p q p q
+on the nature of the shift such that we can uniquely identify the target conditional pt _y_ _x_ . Thus, in
+p | q
+general, identifying the accuracy of the classifier is as hard as identifying the optimal predictor.
+
+Second, motivated by the superiority of methods that use maximum softmax probability (or logit) of
+a model for Out-Of-Distribution (OOD) detection (Hendrycks & Gimpel, 2016; Hendrycks et al.,
+2019), we propose a simple method that leverages softmax probability to predict model performance.
+Our method, Average Thresholded Confidence (ATC), learns a threshold on a score (e.g., maximum
+confidence or negative entropy) of model confidence on validation source data and predicts target
+domain accuracy as the fraction of unlabeled target points that receive a score above that threshold.
+ATC selects a threshold on validation source data such that the fraction of source examples that
+receive the score above the threshold match the accuracy of those examples. Our primary contribution
+in ATC is the proposal of obtaining the threshold and observing its efficacy on (practical) accuracy
+estimation. Importantly, our work takes a step forward in positively answering the question raised in
+Deng & Zheng (2021); Deng et al. (2021) about a practical strategy to select a threshold that enables
+accuracy prediction with thresholded model confidence.
+
+ATC is simple to implement with existing frameworks, compatible with arbitrary model classes, and
+dominates other contemporary methods. Across several model architectures on a range of benchmark
+
+
+-----
+
+vision and language datasets, we verify that ATC outperforms prior methods by at least 2–4ˆ in
+predicting target accuracy on a variety of distribution shifts. In particular, we consider shifts due
+to common corruptions (e.g., ImageNet-C), natural distribution shifts due to dataset reproduction
+(e.g., ImageNet-v2, ImageNet-R), shifts due to novel subpopulations (e.g., BREEDS), and distribution
+shifts faced in the wild (e.g., WILDS).
+
+As a starting point for theory development, we investigate ATC on a simple toy model that models
+distribution shift with varying proportions of the population with spurious features, as in Nagarajan
+et al. (2020). Finally, we note that although ATC achieves superior performance in our empirical
+evaluation, like all methods, it must fail (returns inconsistent estimates) on certain types of distribution
+shifts, per our impossibility result.
+
+2 PRIOR WORK
+
+**Out-of-distribution detection.** The main goal of OOD detection is to identify previously unseen
+examples, i.e., samples out of the support of training distribution. To accomplish this, modern methods
+utilize confidence or features learned by a deep network trained on some source data. Hendrycks &
+Gimpel (2016); Geifman & El-Yaniv (2017) used the confidence score of an (already) trained deep
+model to identify OOD points. Lakshminarayanan et al. (2016) use entropy of an ensemble model to
+evaluate prediction uncertainty on OOD points. To improve OOD detection with model confidence,
+Liang et al. (2017) propose to use temperature scaling and input perturbations. Jiang et al. (2018)
+propose to use scores based on the relative distance of the predicted class to the second class. Recently,
+residual flow-based methods were used to obtain a density model for OOD detection (Zhang et al.,
+2020). Ji et al. (2021) proposed a method based on subfunction error bounds to compute unreliability
+per sample. Refer to Ovadia et al. (2019); Ji et al. (2021) for an overview and comparison of methods
+for prediction uncertainty on OOD data.
+
+**Predicting model generalization.** Understanding generalization capabilities of overparameterized
+models on in-distribution data using conventional machine learning tools has been a focus of a long
+line of work; representative research includes Neyshabur et al. (2015; 2017); Neyshabur (2017);
+Neyshabur et al. (2018); Dziugaite & Roy (2017); Bartlett et al. (2017); Zhou et al. (2018); Long
+& Sedghi (2019); Nagarajan & Kolter (2019a). At a high level, this line of research bounds the
+generalization gap directly with complexity measures calculated on the trained model. However, these
+bounds typically remain numerically loose relative to the true generalization error (Zhang et al., 2016;
+Nagarajan & Kolter, 2019b). On the other hand, another line of research departs from complexitybased approaches to use unseen unlabeled data to predict in-distribution generalization (Platanios
+et al., 2016; 2017; Garg et al., 2021; Jiang et al., 2021).
+
+Relevant to our work are methods for predicting the error of a classifier on OOD data based on
+unlabeled data from the target (OOD) domain. These methods can be characterized into two broad
+categories: (i) Methods which explicitly predict correctness of the model on individual unlabeled
+points (Deng & Zheng, 2021; Jiang et al., 2021; Deng et al., 2021); and (ii) Methods which directly
+obtain an estimate of error with unlabeled OOD data without making a point-wise prediction (Chen
+et al., 2021; Guillory et al., 2021; Chuang et al., 2020).
+
+To achieve a consistent estimate of the target accuracy, Jiang et al. (2021); Guillory et al. (2021)
+require calibration on target domain. However, these methods typically yield poor estimates as
+deep models trained and calibrated on some source data are seldom calibrated on previously unseen
+domains (Ovadia et al., 2019). Additionally, Deng & Zheng (2021); Guillory et al. (2021) derive
+model-based distribution statistics on unlabeled target set that correlate with the target accuracy and
+propose to use a subset of labeled target domains to learn a (linear) regression function that predicts
+model performance. However, there are two drawbacks with this approach: (i) the correlation of
+these distribution statistics can vary substantially as we consider different nature of shifts (refer to
+Sec. 5.1, where we empirically demonstrate this failure); (ii) even if there exists a (hypothetical)
+statistic with strong correlations, obtaining labeled target domains (even simulated ones) with strong
+correlations would require significant a priori knowledge about the nature of shift that, in general,
+might not be available before models are deployed in the wild. Nonetheless, in our work, we only
+assume access to labeled data from the source domain presuming no access to labeled target domains
+or information about how to simulate them.
+
+Moreover, unlike the parallel work of Deng et al. (2021), we do not focus on methods that alter the
+training on source data to aid accuracy prediction on the target data. Chen et al. (2021) propose an
+
+
+-----
+
+importance re-weighting based approach that leverages (additional) information about the axis along
+which distribution is shifting in form of “slicing functions”. In our work, we make comparisons
+with importance re-weighting baseline from Chen et al. (2021) as we do not have any additional
+information about the axis along which the distribution is shifting.
+
+3 PROBLEM SETUP
+
+**Notation. By ||¨||, and x¨, ¨y we denote the Euclidean norm and inner product, respectively. For a**
+vector v P R[d], we use vj to denote its j[th] entry, and for an event E we let I rEs denote the binary
+indicator of the event.
+
+Suppose we have a multi-class classification problem with the input domain X Ď R[d] and label
+space Y “ t1, 2, . . ., ku. For binary classification, we use Y “ t0, 1u. By D[S] and D[T], we denote
+source and target distribution over X ˆ Y. For distributions D[S] and D[T], we define pS or pT as
+the corresponding probability density (or mass) functions. A datasetcontains n points sampled i.i.d. from D[S]. Let F be a class of hypotheses mapping S :“ tpxi, y Xi toqui[n] ∆“1[k][´][„ p][1] where[D][S][q][n]
+
+∆[k][´][1] is a simplex in k dimensions. Given a classifier f P F and datum px, yq, we denote the 0-1
+error (i.e., classification error) on that point by _f_ _x_ _, y_ : I _y_ arg maxj _fj_ _x_ . Given a
+_Ep_ p q q “ R PY p q
+model f, our goal in this work is to understand the performance of f on without access to
+P F “ _D[T]_ ‰
+labeled data from D[T]. Note that our goal is not to adapt the model to the target data. Concretely,
+we aim to predict accuracy of f on D[T]. Throughout this paper, we assume we have access to the
+following: (i) model f ; (ii) previously-unseen (validation) data from D[S]; and (iii) unlabeled data
+from target distribution D[T].
+
+3.1 ACCURACY ESTIMATION: POSSIBILITY AND IMPOSSIBILITY RESULTS
+
+First, we investigate the question of when it is possible to estimate the target accuracy of an arbitrary
+classifier, even given knowledge of the full source distribution ps _x, y_ and target marginal pt _x_ .
+p q p q
+Absent assumptions on the nature of shift, estimating target accuracy is impossible. Even given
+access to ps _x, y_ and pt _x_, the problem is fundamentally unidentifiable because pt _y_ _x_ can shift
+p q p q p | q
+arbitrarily. In the following proposition, we show that absent assumptions on the classifier f (i.e.,
+when f can be any classifier in the space of all classifiers on X ), we can estimate accuracy on the
+target data iff assumptions on the nature of the shift, together with ps _x, y_ and pt _x_, uniquely
+p q p q
+identify the (unknown) target conditional pt _y_ _x_ . We relegate proofs from this section to App. A.
+p | q
+**Proposition 1. Absent further assumptions, accuracy on the target is identifiable iff ptpy|xq is**
+_uniquely identified given ps_ _x, y_ _and pt_ _x_ _._
+p q p q
+
+Proposition 1 states that we need enough constraints on nature of shift such that ps _x, y_ and pt _x_
+p q p q
+identifies unique pt _y_ _x_ . It also states that under some assumptions on the nature of the shift, we
+p | q
+can hope to estimate the model’s accuracy on target data. We will illustrate this on two common
+assumptions made in domain adaptation literature: (i) covariate shift (Heckman, 1977; Shimodaira,
+2000) and (ii) label shift (Saerens et al., 2002; Zhang et al., 2013; Lipton et al., 2018). Under
+covariate shift assumption, that the target marginal support supppptpxqq is a subset of the source
+marginal support suppppspxqq and that the conditional distribution of labels given inputs does not
+change within support, i.e., ps _y_ _x_ _pt_ _y_ _x_, which, trivially, identifies a unique target conditional
+p | q “ p | q
+_pt_ _y_ _x_ . Under label shift, the reverse holds, i.e., the class-conditional distribution does not change
+p | q
+(ps _x_ _y_ _pt_ _x_ _y_ ) and, again, information about pt _x_ uniquely determines the target conditional
+p | q “ p | q p q
+_pt_ _y_ _x_ (Lipton et al., 2018; Garg et al., 2020). In these settings, one can estimate an arbitrary
+p | q
+classifier’s accuracy on the target domain either by using importance re-weighting with the ratio
+_pt_ _x_ _ps_ _x_ in case of covariate shift or by using importance re-weighting with the ratio pt _y_ _ps_ _y_
+p q{ p q p q{ p q
+in case of label shift. While importance ratios in the former case can be obtained directly when pt _x_
+p q
+and ps _x_ are known, the importance ratios in the latter case can be obtained by using techniques
+p q
+from Lipton et al. (2018); Azizzadenesheli et al. (2019); Alexandari et al. (2019).
+
+As a corollary of Proposition 1, we now present a simple impossibility result, demonstrating that no
+single method can work for all families of distribution shift.
+**Corollary 1. Absent assumptions on the classifier f** _, no method of estimating accuracy will work in_
+_all scenarios, i.e., for different nature of distribution shifts._
+
+Intuitively, this result states that every method of estimating accuracy on target data is tied up with
+some assumption on the nature of the shift and might not be useful for estimating accuracy under
+
+
+-----
+
+a different assumption on the nature of the shift. For illustration, consider a setting where we have
+access to distribution ps _x, y_ and pt _x_ . Additionally, assume that the distribution can shift only
+p q p q
+due to covariate shift or label shift without any knowledge about which one. Then Corollary 1 says
+that it is impossible to have a single method that will simultaneously for both label shift and covariate
+shift as in the following example (we spell out the details in App. A):
+
+**Example 1.** Assume binary classification with pspxq “ _α ¨ φpµ1q ` p1 ´ αq ¨ φpµ2q,_
+_ps_ _x_ _y_ 0 _φ_ _µ1_, ps _x_ _y_ 1 _φ_ _µ2_, and pt _x_ _β_ _φ_ _µ1_ 1 _β_ _φ_ _µ2_
+p | “ q “ p q p | “ q “ p q p q “ ¨ p q ` p ´ q ¨ p q
+where φpµq “ _N_ pµ, 1q, α, β P p0, 1pqt, andx _α_ ‰ _β._ Error of a classifier f on target
+data is given by E1 “ Epx,yq„pspx,yq _psppxqq_ [I][ r][f] [p][x][q ‰][ y][s] under covariate shift and by E2 “
+
+E _x,y_ _ps_ _x,y_ _αβ_ [I][ r][y][ “][ 0][s `][ 1]1[´]α[β] [I][ r][y][ “]”[ 1][s] I _f_ _x_ _y_ ıunder label shift. In App. A, we show
+p q„ p q ´ r p q ‰ s
+
+thatestimates error of a classifer under covariate shift will give an incorrect estimate of error under label E1 ‰ E2 for all”´ _f_ . Thus, given access to¯ _pspx, yq, andı_ _ptpxq, any method that consistently_
+shift and vice-versa. The reason is that the same ptpxq and pspx, yq can correspond to error E1 (under
+covariate shift) or error E2 (under label shift) and determining which scenario one faces requires
+further assumptions on the nature of shift.
+
+4 PREDICTING ACCURACY WITH AVERAGE THRESHOLDED CONFIDENCE
+
+In this section, we present our method ATC that leverages a black box classifier f and (labeled)
+validation source data to predict accuracy on target domain given access to unlabeled target data.
+Throughout the discussion, we assume that the classifier f is fixed.
+
+Before presenting our method, we introduce some terminology. Define a score function s : ∆[k][´][1] Ñ
+R that takes in the softmax prediction of the function f and outputs a scalar. We want a score function
+such that if the score function takes a high value at a datum px, yq then f is likely to be correct. In this
+work, we explore two such score functions: (i) Maximum confidence, i.e., spf pxqq “ maxjPY _fjpxq;_
+and (ii) Negative Entropy, i.e., spf pxqq “ _j_ _[f][j][p][x][q][ log][p][f][j][p][x][qq][. Our method identifies a threshold][ t]_
+
+on source data D[S] such that the expected number of points that obtain a score less than t match the
+error of f on, i.e., [ř]
+_D[S]_
+
+Ex S I _s_ _f_ _x_ _t_ E _x,y_ S I arg max _fj_ _x_ _y_ _,_ (1)
+„D r r p p qq ă ss “ p q„D „ „ _jPY_ p q ‰ 
+
+and then our error estimate ATCDT _s_ on the target domain is given by the expected number of
+p q _D[T]_
+target points that obtain a score less than t, i.e.,
+
+ATC T _s_ Ex T I _s_ _f_ _x_ _t_ _._ (2)
+_D_ p q “ „D r r p p qq ă ss
+
+In short, in (1), ATC selects a threshold on the score function such that the error in the source domain
+matches the expected number of points that receive a score below t and in (2), ATC predicts error
+on the target domain as the fraction of unlabeled points that obtain a score below that threshold t.
+Note that, in principle, there exists a different threshold t[1] on the target distribution D[T] such that (1)
+is satisfied on D[T]. However, in our experiments, the same threshold performs remarkably well. The
+main empirical contribution of our work is to show that the threshold obtained with (1) might be used
+effectively in condunction with modern deep networks in a wide range of settings to estimate error on
+the target data. In practice, to obtain the threshold with ATC, we minimize the difference between the
+expression on two sides of (1) using finite samples. In the next section, we show that ATC precisely
+predicts accuracy on the OOD data on the desired line y “ x. In App. C, we discuss an alternate
+interpretation of the method and make connections with OOD detection methods.
+
+5 EXPERIMENTS
+
+We now empirical evaluate ATC and compare it with existing methods. In each of our main
+experiment, keeping the underlying model fixed, we vary target datasets and make a prediction
+of the target accuracy with various methods given access to only unlabeled data from the target.
+Unless noted otherwise, all models are trained only on samples from the source distribution with the
+main exception of pre-training on a different distribution. We use labeled examples from the target
+distribution to only obtain true error estimates.
+
+**Datasets. First, we consider synthetic shifts induced due to different visual corruptions (e.g., shot**
+noise, motion blur etc.) under ImageNet-C (Hendrycks & Dietterich, 2019). Next, we consider
+
+
+-----
+
+CIFAR10
+
+|Col1|Col2|Col3|Col4|
+|---|---|---|---|
+|||DOC||
+|||GDE||
+|||ATC (O|urs)|
+|||||
+
+
+
+40 60 80
+
+OOD Accuracy
+
+
+ImageNet200
+
+|Col1|Col2|
+|---|---|
+||DOC|
+||GDE ATC (Ours)|
+
+
+
+20 40 60 80
+
+
+Living17
+
+|Col1|Col2|
+|---|---|
+||DOC|
+||GDE ATC (Ours)|
+
+
+
+20 40 60 80
+
+
+90
+80
+70
+60
+50
+40
+30
+
+
+80
+
+60
+
+40
+
+20
+
+
+80
+
+60
+
+40
+
+20
+
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+
+Figure 2: Scatter plot of predicted accuracy versus (true) OOD accuracy. Each point denotes a
+different OOD dataset, all evaluated with the same DenseNet121 model. We only plot the best three
+methods. With ATC (ours), we refer to ATC-NE. We observe that ATC significantly outperforms
+other methods and with ATC, we recover the desired line y “ x with a robust linear fit. Aggregated
+estimation error in Table 1 and plots for other datasets and architectures in App. H.
+
+natural shifts due to differences in the data collection process of ImageNet (Russakovsky et al., 2015),
+e.g, ImageNetv2 (Recht et al., 2019). We also consider images with artistic renditions of object
+classes, i.e., ImageNet-R (Hendrycks et al., 2021) and ImageNet-Sketch (Wang et al., 2019). Note
+that renditions dataset only contains a subset 200 classes from ImageNet. To include renditions
+dataset in our testbed, we include results on ImageNet restricted to these 200 classes (which we call
+ImageNet-200) along with full ImageNet.
+
+Second, we consider BREEDS (Santurkar et al., 2020) to assess robustness to subpopulation shifts, in
+particular, to understand how accuracy estimation methods behave when novel subpopulations not
+observed during training are introduced. BREEDS leverages class hierarchy in ImageNet to create 4
+datasets ENTITY-13, ENTITY-30, LIVING-17, NON-LIVING-26. We focus on natural and synthetic
+shifts as in ImageNet on same and different subpopulations in BREEDs. Third, from WILDS (Koh
+et al., 2021) benchmark, we consider FMoW-WILDS (Christie et al., 2018), RxRx1-WILDS (Taylor
+et al., 2019), Amazon-WILDS (Ni et al., 2019), CivilComments-WILDS (Borkan et al., 2019) to
+consider distribution shifts faced in the wild.
+
+Finally, similar to ImageNet, we consider (i) synthetic shifts (CIFAR-10-C) due to common corruptions; and (ii) natural shift (i.e., CIFARv2 (Recht et al., 2018)) on CIFAR-10 (Krizhevsky & Hinton,
+2009). On CIFAR-100, we just have synthetic shifts due to common corruptions. For completeness,
+we also consider natural shifts on MNIST (LeCun et al., 1998) as in the prior work (Deng & Zheng,
+2021). We use three real shifted datasets, i.e., USPS (Hull, 1994), SVHN (Netzer et al., 2011) and
+QMNIST (Yadav & Bottou, 2019). We give a detailed overview of our setup in App. F.
+
+**Architectures and Evaluation. For ImageNet, BREEDS, CIFAR, FMoW-WILDS, RxRx1-WILDS**
+datasets, we use DenseNet121 (Huang et al., 2017) and ResNet50 (He et al., 2016) architectures. For
+Amazon-WILDS and CivilComments-WILDS, we fine-tune a DistilBERT-base-uncased (Sanh et al.,
+2019) model. For MNIST, we train a fully connected multilayer perceptron. We use standard training
+with benchmarked hyperparameters. To compare methods, we report average absolute difference
+between the true accuracy on the target data and the estimated accuracy on the same unlabeled
+examples. We refer to this metric as Mean Absolute estimation Error (MAE). Along with MAE,
+we also show scatter plots to visualize performance at individual target sets. Refer to App. G for
+additional details on the setup.
+
+**Methods With ATC-NE, we denote ATC with negative entropy score function and with ATC-MC,**
+we denote ATC with maximum confidence score function. For all methods, we implement post-hoc
+calibration on validation source data with Temperature Scaling (TS; Guo et al. (2017)). Below we
+briefly discuss baselines methods compared in our work and relegate details to App. E.
+
+_Average Confidence (AC). Error is estimated as the expected value of the maximum softmax_
+confidence on the target data, i.e, AC T Ex T maxj _fj_ _x_ .
+_D_ “ „D r PY p qs
+
+_Difference Of Confidence (DOC). We estimate error on target by subtracting difference of confidences_
+on source and target (as a surrogate to distributional distance Guillory et al. (2021)) from the error on
+source distribution, i.e, DOC T Ex S I arg maxj _fj_ _x_ _y_ Ex T maxj _fj_ _x_
+_D_ “ „D PY p q ‰ ` „D r PY p qs ´
+Ex S maxj _fj_ _x_ . This is referred to as DOC-Feat in (Guillory et al., 2021).
+„D r PY p qs “ “ ‰‰
+
+
+-----
+
+IM AC DOC GDE ATC-MC (Ours) ATC-NE (Ours)
+Dataset Shift
+Pre T Post T Pre T Post T Pre T Post T Post T Pre T Post T Pre T Post T
+
+Natural 6.60 5.74 9.88 6.89 7.25 6.07 4.77 3.21 3.02 2.99 **2.85**
+CIFAR10
+Synthetic 12.33 10.20 16.50 11.91 13.87 11.08 6.55 4.65 4.25 4.21 **3.87**
+
+CIFAR100 Synthetic 13.69 11.51 23.61 13.10 14.60 10.14 9.85 5.50 **4.75** **4.72** 4.94
+
+Natural 12.37 8.19 22.07 8.61 15.17 7.81 5.13 4.37 2.04 3.79 **1.45**
+ImageNet200
+Synthetic 19.86 12.94 32.44 13.35 25.02 12.38 5.41 5.93 3.09 5.00 **2.68**
+
+Natural 7.77 6.50 18.13 6.02 8.13 5.76 6.23 3.88 2.17 2.06 **0.80**
+ImageNet
+Synthetic 13.39 10.12 24.62 8.51 13.55 7.90 6.32 3.34 **2.53** **2.61** 4.89
+
+FMoW-WILDS Natural 5.53 4.31 33.53 12.84 5.94 4.45 5.74 3.06 **2.70** 3.02 **2.72**
+
+RxRx1-WILDS Natural 5.80 5.72 7.90 4.84 5.98 5.98 6.03 4.66 **4.56** **4.41** **4.47**
+
+Amazon-WILDS Natural 2.40 2.29 8.01 2.38 2.40 2.28 17.87 1.65 **1.62** **1.60** **1.59**
+
+CivilCom.-WILDS Natural 12.64 10.80 16.76 11.03 13.31 10.99 16.65 **7.14**
+
+MNIST Natural 18.48 15.99 21.17 14.81 20.19 14.56 24.42 5.02 **2.40** 3.14 3.50
+
+Same 16.23 11.14 24.97 10.88 19.08 10.47 10.71 5.39 **3.88** 4.58 4.19
+ENTITY-13
+Novel 28.53 22.02 38.33 21.64 32.43 21.22 20.61 13.58 10.28 12.25 **6.63**
+
+Same 18.59 14.46 28.82 14.30 21.63 13.46 12.92 9.12 **7.75** 8.15 **7.64**
+ENTITY-30
+Novel 32.34 26.85 44.02 26.27 36.82 25.42 23.16 17.75 14.30 15.60 **10.57**
+
+Same 18.66 17.17 26.39 16.14 19.86 15.58 16.63 10.87 **10.24** 10.07 **10.26**
+NONLIVING-26
+Novel 33.43 31.53 41.66 29.87 35.13 29.31 29.56 21.70 20.12 19.08 **18.26**
+
+Same 12.63 11.05 18.32 10.46 14.43 10.14 9.87 4.57 **3.95** **3.81** 4.21
+LIVING-17
+Novel 29.03 26.96 35.67 26.11 31.73 25.73 23.53 16.15 14.49 12.97 **11.39**
+
+Table 1: Mean Absolute estimation Error (MAE) results for different datasets in our setup grouped by
+_the nature of shift. ‘Same’ refers to same subpopulation shifts and ‘Novel’ refers novel subpopulation_
+shifts. We include details about the target sets considered in each shift in Table 2. Post T denotes use
+of TS calibration on source. Across all datasets, we observe that ATC achieves superior performance
+(lower MAE is better). For language datasets, we use DistilBERT-base-uncased, for vision dataset we
+report results with DenseNet model with the exception of MNIST where we use FCN. We include
+results on other architectures in App. H. For GDE post T and pre T estimates match since TS doesn’t
+alter the argmax prediction. Results reported by aggregating MAE numbers over 4 different seeds.
+We include results with standard deviation values in Table 3.
+
+_Importance re-weighting (IM). We estimate the error of the classifier with importance re-weighting_
+of 0-1 error in the pushforward space of the classifier. This corresponds to MANDOLIN using one
+slice based on the underlying classifier confidence Chen et al. (2021).
+
+_Generalized Disagreement Equality (GDE). Error is estimated as the expected disagreement of two_
+models (trained on the same training set but with different randomization) on target data (Jiang et al.,
+2021), i.e., GDEDT “ Ex„DT rI rf pxq ‰ f [1]pxqss where f and f [1] are the two models. Note that GDE
+requires two models trained independently, doubling the computational overhead while training.
+
+5.1 RESULTS
+
+In Table 1, we report MAE results aggregated by the nature of the shift in our testbed. In Fig. 2
+and Fig. 1(right), we show scatter plots for predicted accuracy versus OOD accuracy on several
+datasets. We include scatter plots for all datasets and parallel results with other architectures in
+App. H. In App. H.1, we also perform ablations on CIFAR using a pre-trained model and observe
+that pre-training doesn’t change the efficacy of ATC.
+
+We predict accuracy on the target data before and after calibration with TS. First, we observe that
+both ATC-NE and ATC-MC (even without TS) obtain significantly lower MAE when compared with
+other methods (even with TS). Note that with TS we observe substantial improvements in MAE
+for all methods. Overall, ATC-NE (with TS) typically achieves the smallest MAE improving by
+more than 2ˆ on CIFAR and by 3–4ˆ on ImageNet over GDE (the next best alternative to ATC).
+Alongside, we also observe that a linear fit with robust regression (Siegel, 1982) on the scatter plot
+recovers a line close to x “ y for ATC-NE with TS while the line is far away from x “ y for other
+
+
+-----
+
+90
+80
+70
+60
+50
+40
+30
+20
+
+
+
+|Col1|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+||Diff-subpopulati|on||
+||Same-subpopula|tion||
+|20 40 60 80 OOD Accuracy||||
+
+|90 80 70 60 50 40 DOC (w/o fit) DOC (w/ fit) 30 ATC (w/o fit) 20 0 20 40 60 80 OOD Accuracy|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+|||DOC (w/ DOC (w/|o fit) fit)|
+|||ATC (w/o|fit)|
+
+
+Figure 3: Left: Predicted accuracy with DOC on Living17 BREEDS dataset. We observe a substantial
+gap in the linear fit of same and different subpopulations highlighting poor correlation. Middle:
+After fitting a robust linear model for DOC on same subpopulation, we show predicted accuracy on
+different subpopulations with fine-tuned DOC (i.e., DOC (w/ fit)) and compare with ATC without any
+regression model, i.e., ATC (w/o fit). While observe substantial improvements in MAE from 24.41
+with DOC (w/o fit) to 13.26 with DOC (w/ fit), ATC (w/o fit) continues to outperform even DOC
+(w/ fit) with MAE 10.22. We show parallel results with other BREEDS datasets in App. H.2. Right :
+Empirical validation of our toy model. We show that ATC perfectly estimates target performance as
+we vary the degree of spurious correlation in target. ‘ˆ’ represents accuracy on source.
+
+methods (Fig. 2 and Fig. 1(right)). Remarkably, MAE is in the range of 0.4–5.8 with ATC for CIFAR,
+ImageNet, MNIST, and Wilds. However, MAE is much higher on BREEDS benchmark with novel
+subpopulations. While we observe a small MAE (i.e., comparable to our observations on other
+datasets) on BREEDS with natural and synthetic shifts from the same sub-population, MAE on shifts
+with novel population is significantly higher with all methods. Note that even on novel populations,
+ATC continues to dominate all other methods across all datasets in BREEDS.
+
+Additionally, for different subpopulations in BREEDS setup, we observe a poor linear correlation
+of the estimated performance with the actual performance as shown in Fig. 3 (left)(we notice a
+similar gap in the linear fit for all other methods). Hence in such a setting, we would expect methods
+that fine-tune a regression model on labeled target examples from shifts with one subpopulation
+will perform poorly on shifts with different subpopulations. Corroborating this intuition, next, we
+show that even after fitting a regression model for DOC on natural and synthetic shifts with source
+subpopulations, ATC without regression model continues to outperform DOC with regression model
+on shifts with novel subpopulation.
+
+**Fitting a regression model on BREEDS with DOC. Using label target data from natural and**
+synthetic shifts for the same subpopulation (same as source), we fit a robust linear regression
+model (Siegel, 1982) to fine-tune DOC as in Guillory et al. (2021). We then evaluate the fine-tuned
+DOC (i.e., DOC with linear model) on natural and synthetic shifts from novel subpopulations on
+BREEDS benchmark. Although we observe significant improvements in the performance of finetuned DOC when compared with DOC (without any fine-tuning), ATC without any regression model
+continues to perform better (or similar) to that of fine-tuned DOC on novel subpopulations (Fig. 3
+(middle)). Refer to App. H.2 for details and Table 5 for MAE on BREEDS with regression model.
+
+6 INVESTIGATING ATC ON TOY MODEL
+
+
+In this section, we propose and analyze a simple theoretical model that distills empirical phenomena
+from the previous section and highlights efficacy of ATC. Here, our aim is not to obtain a general
+model that captures complicated real distributions on high dimensional input space as the images in
+ImageNet. Instead to further our understanding, we focus on an easy-to-learn binary classification
+task from Nagarajan et al. (2020) with linear classifiers, that is rich enough to exhibit some of the
+same phenomena as with deep networks on real data distributions.
+
+Consider a easy-to-learn binary classification problem with two features x “ rxinv, xsps P R[2] where
+(i.e., a feature that is correlated but not predictive of the true label). Conditional onxinv is fully predictive invariant feature with a margin γ ą 0 and xsp P t´1, 1u is a spurious feature y, the distribution
+over xinv is given as follows: xinv|py “ 1q „ U rγ, cs and xinv|py “ 0q „ U r´c, ´γs, where c is a
+fixed constant greater than γ. For simplicity, we assume that label distribution on source is uniform
+onthe degree of spurious correlation. To model distribution shift, we simulate target data with different t´1, 1u. xsp is distributed such that Psrxsp ¨ p2y ´ 1q ą 0s “ psp, where psp P p0.5, 1.0q controls
+degree of spurious correlation, i.e., in target distribution Pt _xsp_ 2y 1 0 _p[1]sp_
+r ¨ p ´ q ą s “ [P r][0][,][ 1][s][. Note]
+
+
+-----
+
+that here we do not consider shifts in the label distribution but our result extends to arbitrary shifts in
+the label distribution as well.
+
+1 _e[wT x]_
+In this setup, we examine linear sigmoid classifiers of the form f _x_ where
+p q “ 1`e[wT x][,] 1`e[wT x]
+
+_w “ rwinv, wsps P R[2]. While there exists a linear classifier with w “ r1, 0s” that correctly classifies allı_
+the points with a margin γ, Nagarajan et al. (2020) demonstrated that a linear classifier will typically
+have a dependency on the spurious feature, i.e., wsp 0. They show that due to geometric skews,
+despite having positive dependencies on the invariant feature, a max-margin classifier trained on ‰
+finite samples relies on the spurious feature. Refer to App. D for more details on these skews. In
+our work, we show that given a linear classifier that relies on the spurious feature and achieves a
+non-trivial performance on the source (i.e., winv 0), ATC with maximum confidence score function
+_consistently estimates the accuracy on the target distribution. ą_
+**Theorem 1in (1) together with ATC as in (Informal). Given any classifier with (2) with maximum confidence score function obtains a consistent winv ą 0 in the above setting, the threshold obtained**
+_estimate of the target accuracy._
+
+Consider a classifier that depends positively on the spurious feature (i.e., wsp 0). Then as the
+spurious correlation decreases in the target data, the classifier accuracy on the target will drop and ą
+vice-versa if the spurious correlation increases on the target data. Theorem 1 shows that the threshold
+identified with ATC as in (1) remains invariant as the distribution shifts and hence ATC as in (2)
+will correctly estimate the accuracy with shifting distributions. Next, we illustrate Theorem 1 by
+simulating the setup empirically. First we pick a arbitrary classifier (which can also be obtained by
+training on source samples), tune the threshold on hold-out source examples and predict accuracy
+with different methods as we shift the distribution by varying the degree of spurious correlation.
+
+**Empirical validation and comparison with other methods.** Fig. 3(right) shows that as the degree
+of spurious correlation varies, our method accurately estimates the target performance where all other
+methods fail to accurately estimate the target performance. Understandably, due to poor calibration of
+the sigmoid linear classifier AC, DOC and GDE fail. While in principle IM can perfectly estimate the
+accuracy on target in this case, we observe that it is highly sensitive to the number bins and choice of
+histogram binning (i.e., uniform mass or equal width binning). We elaborate more on this in App. D.
+
+**Biased estimation with ATC.** Now we discuss changes in the above setup where ATC yields
+inconsistent estimates. We assumed that both in source and target xinv _y_ 1 is uniform between _γ, c_
+| “ r s
+and x _y_ 1 is uniform between _c,_ _γ_ . Shifting the support of target class conditional pt _xinv_ _y_
+| “ ´ r´ ´ s p | q
+may introduce a bias in ATC estimates, e.g., shrinking the support to c1( _c) (while maintaining_
+ă
+uniform distribution) in the target will lead to an over-estimation of the target performance with
+ATC. In App. D.1, we elaborate on this failure and present a general (but less interpretable) classifier
+dependent distribution shift condition where ATC is guaranteed to yield consistent estimates.
+
+7 CONCLUSION AND FUTURE WORK
+
+In this work, we proposed ATC, a simple method for estimating target domain accuracy based on
+unlabeled target (and labeled source data). ATC achieves remarkably low estimation error on several
+synthetic and natural shift benchmarks in our experiments. Notably, our work draws inspiration
+from recent state-of-the-art methods that use softmax confidences below a certain threshold for OOD
+detection (Hendrycks & Gimpel, 2016; Hendrycks et al., 2019) and takes a step forward in answering
+questions raised in Deng & Zheng (2021) about the practicality of threshold based methods.
+
+Our distribution shift toy model justifies ATC on an easy-to-learn binary classification task. In our
+experiments, we also observe that calibration significantly improves estimation with ATC. Since in
+binary classification, post hoc calibration with TS does not change the effective threshold, in future
+work, we hope to extend our theoretical model to multi-class classification to understand the efficacy
+of calibration. Our theory establishes that a classifier’s accuracy is not, in general identified, from
+labeled source and unlabeled target data alone, absent considerable additional constraints on the
+target conditional pt _y_ _x_ . In light of this finding, we also hope to extend our understanding beyond
+p | q
+the simple theoretical toy model to characterize broader sets of conditions under which ATC might
+be guaranteed to obtain consistent estimates. Finally, we should note that while ATC outperforms
+previous approaches, it still suffers from large estimation error on datasets with novel populations,
+e.g., BREEDS. We hope that our findings can lay the groundwork for future work for improving
+accuracy estimation on such datasets.
+
+
+-----
+
+**Reproducibility Statement** We have been careful to ensure that our results are reproducible. We
+have stored all models and logged all hyperparameters and seeds to facilitate reproducibility. Note
+that throughout our work, we do not perform any hyperparameter tuning, instead, using benchmarked
+hyperparameters and training procedures to make our results easy to reproduce. While, we have not
+released code yet, the appendix provides all the necessary details to replicate our experiments and
+results. Moreover, we plan to release the code with a revised version of the manuscript.
+
+ACKNOWLEDGEMENT
+
+Authors would like to thank Ariel Kleiner and Sammy Jerome as the problem formulation and
+motivation of this paper was highly influenced by initial discussions with them.
+
+REFERENCES
+
+Amr Alexandari, Anshul Kundaje, and Avanti Shrikumar. Adapting to label shift with bias-corrected
+calibration. In arXiv preprint arXiv:1901.06852, 2019.
+
+Kamyar Azizzadenesheli, Anqi Liu, Fanny Yang, and Animashree Anandkumar. Regularized learning
+for domain adaptation under label shifts. In International Conference on Learning Representations
+_(ICLR), 2019._
+
+Peter L Bartlett, Dylan J Foster, and Matus J Telgarsky. Spectrally-normalized margin bounds for
+neural networks. In Advances in neural information processing systems, pp. 6240–6249, 2017.
+
+Shai Ben-David, Tyler Lu, Teresa Luu, and David P´ al. Impossibility Theorems for Domain Adaptation.´
+In International Conference on Artificial Intelligence and Statistics (AISTATS), 2010.
+
+Daniel Borkan, Lucas Dixon, Jeffrey Sorensen, Nithum Thain, and Lucy Vasserman. Nuanced metrics
+for measuring unintended bias with real data for text classification. In Companion Proceedings of
+_The 2019 World Wide Web Conference, 2019._
+
+Mayee Chen, Karan Goel, Nimit S Sohoni, Fait Poms, Kayvon Fatahalian, and Christopher Re.´
+Mandoline: Model evaluation under distribution shift. In International Conference on Machine
+_Learning, pp. 1617–1629. PMLR, 2021._
+
+Gordon Christie, Neil Fendley, James Wilson, and Ryan Mukherjee. Functional map of the world. In
+_Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 2018._
+
+Ching-Yao Chuang, Antonio Torralba, and Stefanie Jegelka. Estimating generalization under distribution shifts via domain-invariant representations. arXiv preprint arXiv:2007.03511, 2020.
+
+Weijian Deng and Liang Zheng. Are labels always necessary for classifier accuracy evaluation?
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp.
+15069–15078, 2021.
+
+Weijian Deng, Stephen Gould, and Liang Zheng. What does rotation prediction tell us about classifier
+accuracy under varying testing environments? arXiv preprint arXiv:2106.05961, 2021.
+
+Gintare Karolina Dziugaite and Daniel M Roy. Computing nonvacuous generalization bounds for
+deep (stochastic) neural networks with many more parameters than training data. arXiv preprint
+_arXiv:1703.11008, 2017._
+
+Saurabh Garg, Yifan Wu, Sivaraman Balakrishnan, and Zachary C Lipton. A unified view of label
+shift estimation. arXiv preprint arXiv:2003.07554, 2020.
+
+Saurabh Garg, Sivaraman Balakrishnan, J Zico Kolter, and Zachary C Lipton. Ratt: Leveraging
+unlabeled data to guarantee generalization. arXiv preprint arXiv:2105.00303, 2021.
+
+Yonatan Geifman and Ran El-Yaniv. Selective classification for deep neural networks. arXiv preprint
+_arXiv:1705.08500, 2017._
+
+
+-----
+
+Devin Guillory, Vaishaal Shankar, Sayna Ebrahimi, Trevor Darrell, and Ludwig Schmidt. Predicting
+with confidence on unseen distributions. arXiv preprint arXiv:2107.03315, 2021.
+
+Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q Weinberger. On calibration of modern neural
+networks. In International Conference on Machine Learning (ICML), 2017.
+
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep Residual Learning for Image
+Recognition. In Computer Vision and Pattern Recognition (CVPR), 2016.
+
+James J Heckman. Sample Selection Bias as a Specification Error (With an Application to the
+Estimation of Labor Supply Functions), 1977.
+
+Dan Hendrycks and Thomas Dietterich. Benchmarking neural network robustness to common
+corruptions and perturbations. arXiv preprint arXiv:1903.12261, 2019.
+
+Dan Hendrycks and Kevin Gimpel. A baseline for detecting misclassified and out-of-distribution
+examples in neural networks. arXiv preprint arXiv:1610.02136, 2016.
+
+Dan Hendrycks, Steven Basart, Mantas Mazeika, Mohammadreza Mostajabi, Jacob Steinhardt,
+and Dawn Song. Scaling out-of-distribution detection for real-world settings. arXiv preprint
+_arXiv:1911.11132, 2019._
+
+Dan Hendrycks, Steven Basart, Norman Mu, Saurav Kadavath, Frank Wang, Evan Dorundo, Rahul
+Desai, Tyler Zhu, Samyak Parajuli, Mike Guo, Dawn Song, Jacob Steinhardt, and Justin Gilmer.
+The many faces of robustness: A critical analysis of out-of-distribution generalization. ICCV,
+2021.
+
+Gao Huang, Zhuang Liu, Laurens Van Der Maaten, and Kilian Q Weinberger. Densely connected
+convolutional networks. In Proceedings of the IEEE conference on computer vision and pattern
+_recognition, pp. 4700–4708, 2017._
+
+Jonathan J. Hull. A database for handwritten text recognition research. IEEE Transactions on pattern
+_analysis and machine intelligence, 16(5):550–554, 1994._
+
+Xu Ji, Razvan Pascanu, Devon Hjelm, Andrea Vedaldi, Balaji Lakshminarayanan, and Yoshua Bengio.
+Predicting unreliable predictions by shattering a neural network. arXiv preprint arXiv:2106.08365,
+2021.
+
+Heinrich Jiang, Been Kim, Melody Y Guan, and Maya R Gupta. To trust or not to trust a classifier.
+In NeurIPS, pp. 5546–5557, 2018.
+
+Yiding Jiang, Vaishnavh Nagarajan, Christina Baek, and J Zico Kolter. Assessing generalization of
+sgd via disagreement. arXiv preprint arXiv:2106.13799, 2021.
+
+Diederik P Kingma and Jimmy Ba. Adam: A Method for Stochastic Optimization. arXiv Preprint
+_arXiv:1412.6980, 2014._
+
+Pang Wei Koh, Shiori Sagawa, Henrik Marklund, Sang Michael Xie, Marvin Zhang, Akshay Balsubramani, Weihua Hu, Michihiro Yasunaga, Richard Lanas Phillips, Irena Gao, Tony Lee, Etienne
+David, Ian Stavness, Wei Guo, Berton A. Earnshaw, Imran S. Haque, Sara Beery, Jure Leskovec,
+Anshul Kundaje, Emma Pierson, Sergey Levine, Chelsea Finn, and Percy Liang. WILDS: A
+benchmark of in-the-wild distribution shifts. In International Conference on Machine Learning
+_(ICML), 2021._
+
+Alex Krizhevsky and Geoffrey Hinton. Learning Multiple Layers of Features from Tiny Images.
+Technical report, Citeseer, 2009.
+
+Balaji Lakshminarayanan, Alexander Pritzel, and Charles Blundell. Simple and scalable predictive
+uncertainty estimation using deep ensembles. arXiv preprint arXiv:1612.01474, 2016.
+
+Yann LeCun, Leon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-Based Learning Applied´
+to Document Recognition. Proceedings of the IEEE, 86, 1998.
+
+Shiyu Liang, Yixuan Li, and Rayadurgam Srikant. Enhancing the reliability of out-of-distribution
+image detection in neural networks. arXiv preprint arXiv:1706.02690, 2017.
+
+
+-----
+
+Zachary C Lipton, Yu-Xiang Wang, and Alex Smola. Detecting and Correcting for Label Shift with
+Black Box Predictors. In International Conference on Machine Learning (ICML), 2018.
+
+Philip M Long and Hanie Sedghi. Generalization bounds for deep convolutional neural networks.
+_arXiv preprint arXiv:1905.12600, 2019._
+
+Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. _arXiv preprint_
+_arXiv:1711.05101, 2017._
+
+Vaishnavh Nagarajan and J Zico Kolter. Deterministic pac-bayesian generalization bounds for deep
+networks via generalizing noise-resilience. arXiv preprint arXiv:1905.13344, 2019a.
+
+Vaishnavh Nagarajan and J Zico Kolter. Uniform convergence may be unable to explain generalization
+in deep learning. In Advances in Neural Information Processing Systems, pp. 11615–11626, 2019b.
+
+Vaishnavh Nagarajan, Anders Andreassen, and Behnam Neyshabur. Understanding the failure modes
+of out-of-distribution generalization. arXiv preprint arXiv:2010.15775, 2020.
+
+Yuval Netzer, Tao Wang, Adam Coates, Alessandro Bissacco, Bo Wu, and Andrew Y Ng. Reading
+digits in natural images with unsupervised feature learning. In Advances in Neural Information
+_Processing Systems (NIPS), 2011._
+
+Behnam Neyshabur. Implicit regularization in deep learning. arXiv preprint arXiv:1709.01953, 2017.
+
+Behnam Neyshabur, Ryota Tomioka, and Nathan Srebro. Norm-based capacity control in neural
+networks. In Conference on Learning Theory, pp. 1376–1401, 2015.
+
+Behnam Neyshabur, Srinadh Bhojanapalli, David McAllester, and Nathan Srebro. Exploring generalization in deep learning. arXiv preprint arXiv:1706.08947, 2017.
+
+Behnam Neyshabur, Zhiyuan Li, Srinadh Bhojanapalli, Yann LeCun, and Nathan Srebro. The role
+of over-parametrization in generalization of neural networks. In International Conference on
+_Learning Representations, 2018._
+
+Jianmo Ni, Jiacheng Li, and Julian McAuley. Justifying recommendations using distantly-labeled
+reviews and fine-grained aspects. In Proceedings of the 2019 Conference on Empirical Methods in
+_Natural Language Processing and the 9th International Joint Conference on Natural Language_
+_Processing (EMNLP-IJCNLP), 2019._
+
+Yaniv Ovadia, Emily Fertig, Jie Ren, Zachary Nado, David Sculley, Sebastian Nowozin, Joshua V
+Dillon, Balaji Lakshminarayanan, and Jasper Snoek. Can you trust your model’s uncertainty?
+evaluating predictive uncertainty under dataset shift. arXiv preprint arXiv:1906.02530, 2019.
+
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor
+Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward
+Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner,
+Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style, high-performance deep
+learning library. In Advances in Neural Information Processing Systems 32, 2019.
+
+Emmanouil A Platanios, Hoifung Poon, Tom M Mitchell, and Eric Horvitz. Estimating accuracy
+from unlabeled data: A probabilistic logic approach. arXiv preprint arXiv:1705.07086, 2017.
+
+Emmanouil Antonios Platanios, Avinava Dubey, and Tom Mitchell. Estimating accuracy from
+unlabeled data: A bayesian approach. In International Conference on Machine Learning, pp.
+1416–1425. PMLR, 2016.
+
+Stephan Rabanser, Stephan Gunnemann, and Zachary C Lipton. Failing loudly: An empirical study¨
+of methods for detecting dataset shift. arXiv preprint arXiv:1810.11953, 2018.
+
+Aaditya Ramdas, Sashank Jakkam Reddi, Barnabas P´ oczos, Aarti Singh, and Larry A Wasserman.´
+On the Decreasing Power of Kernel and Distance Based Nonparametric Hypothesis Tests in High
+Dimensions. In Association for the Advancement of Artificial Intelligence (AAAI), 2015.
+
+Benjamin Recht, Rebecca Roelofs, Ludwig Schmidt, and Vaishaal Shankar. Do cifar-10 classifiers
+generalize to cifar-10? arXiv preprint arXiv:1806.00451, 2018.
+
+
+-----
+
+Benjamin Recht, Rebecca Roelofs, Ludwig Schmidt, and Vaishaal Shankar. Do imagenet classifiers
+generalize to imagenet? In International Conference on Machine Learning, pp. 5389–5400. PMLR,
+2019.
+
+Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang,
+Andrej Karpathy, Aditya Khosla, Michael Bernstein, et al. Imagenet large scale visual recognition
+challenge. International journal of computer vision, 115(3):211–252, 2015.
+
+Marco Saerens, Patrice Latinne, and Christine Decaestecker. Adjusting the Outputs of a Classifier to
+New a Priori Probabilities: A Simple Procedure. Neural Computation, 2002.
+
+Victor Sanh, Lysandre Debut, Julien Chaumond, and Thomas Wolf. Distilbert, a distilled version of
+bert: smaller, faster, cheaper and lighter. ArXiv, abs/1910.01108, 2019.
+
+Shibani Santurkar, Dimitris Tsipras, and Aleksander Madry. Breeds: Benchmarks for subpopulation
+shift. arXiv preprint arXiv:2008.04859, 2020.
+
+Hidetoshi Shimodaira. Improving Predictive Inference Under Covariate Shift by Weighting the
+Log-Likelihood Function. Journal of Statistical Planning and Inference, 2000.
+
+Andrew F Siegel. Robust regression using repeated medians. Biometrika, 69(1):242–244, 1982.
+
+Christian Szegedy, Wojciech Zaremba, Ilya Sutskever, Joan Bruna, Dumitru Erhan, Ian Goodfellow,
+and Rob Fergus. Intriguing Properties of Neural Networks. In International Conference on
+_Learning Representations (ICLR), 2014._
+
+J. Taylor, B. Earnshaw, B. Mabey, M. Victors, and J. Yosinski. Rxrx1: An image set for cellular
+morphological variation across many experimental batches. In International Conference on
+_Learning Representations (ICLR), 2019._
+
+Antonio Torralba, Rob Fergus, and William T. Freeman. 80 million tiny images: A large data set for
+nonparametric object and scene recognition. IEEE Transactions on Pattern Analysis and Machine
+_Intelligence, 30(11):1958–1970, 2008._
+
+Haohan Wang, Songwei Ge, Zachary Lipton, and Eric P Xing. Learning robust global representations
+by penalizing local predictive power. In Advances in Neural Information Processing Systems, pp.
+10506–10518, 2019.
+
+Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi,
+Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von´
+Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama
+Drame, Quentin Lhoest, and Alexander M. Rush. Transformers: State-of-the-art natural language
+processing. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language
+_Processing: System Demonstrations, pp. 38–45. Association for Computational Linguistics, 2020._
+
+Chhavi Yadav and Leon Bottou. Cold case: The lost mnist digits. In´ _Advances in Neural Information_
+_Processing Systems 32, 2019._
+
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding
+deep learning requires rethinking generalization. arXiv preprint arXiv:1611.03530, 2016.
+
+Hongjie Zhang, Ang Li, Jie Guo, and Yanwen Guo. Hybrid models for open set recognition. In
+_European Conference on Computer Vision, pp. 102–117. Springer, 2020._
+
+Kun Zhang, Bernhard Scholkopf, Krikamol Muandet, and Zhikun Wang. Domain Adaptation Under¨
+Target and Conditional Shift. In International Conference on Machine Learning (ICML), 2013.
+
+Wenda Zhou, Victor Veitch, Morgane Austern, Ryan P Adams, and Peter Orbanz. Non-vacuous
+generalization bounds at the imagenet scale: a pac-bayesian compression approach. arXiv preprint
+_arXiv:1804.05862, 2018._
+
+
+-----
+
+APPENDIX
+
+A PROOFS FROM SEC. 3
+
+Before proving results from Sec. 3, we introduce some notations. Define Epf pxq, yq :“
+I _y_ arg maxj _fj_ _x_ . We express the population error on distribution as _f_ :
+R PY p q _D_ _EDp_ q “
+E _x,y_ _f_ _x_ _, y_ .
+“p q„D rEp p q qs ‰
+
+_Proof of Proposition 1. Consider a binary classification problem. Assume P be the set of possible_
+target conditional distribution of labels given ps _x, y_ and pt _x_ .
+p q p q
+
+The forward direction is simple. If _pt_ _y_ _x_ is singleton given ps _x, y_ and pt _x_, then the
+_P “ t_ p | qu p q p q
+error of any classifier f on the target domain is identified and is given by
+
+_T_ _f_ Ex _pt_ _x_ _,y_ _pt_ _y_ _x_ I arg max _fj_ _x_ _y_ _._ (3)
+_ED_ p q “ „ p q „ p | q „ „ _jPY_ p q ‰ 
+
+For the reverse direction assume that given pt _x_ and ps _x, y_, we have two possible distributions
+p q p q _D[T]_
+
+and D[T][ 1] with ptpy|xq, p[1]t[p][y][|][x][q P][ P][ such that on some][ x][ with][ p][t][p][x][q ą][ 0][, we have][ p][t][p][y][|][x][q ‰][ p][1]t[p][y][|][x][q][.]
+where the two distributions differ. We will now choose a classifierConsider XM “ tx P X |ptpxq ą 0 and ptpy “ 1|xq ‰ p[1]t[p][y][ “][ 1][|][x][qu] f[ be the set of all input covariates] such that the error on the two
+distributions differ. On a subset _M[1]_ _t[p][y][ “][ 1][|][x][qu][, assume]_
+_f_ _x_ 0 and on a subset _M[2]_ _X_ [“ t][x][ P][ X] [|][p][t][p][x][q ą][ 0][ and][ p][t][p][y][ “][ 1][|][x][q ą][ p]t[p][1][y][ “][ 1][|][x][qu][, assume]
+_f_ pxq “ 1. We will show that the error of X [“ t][x][ P][ X] f on distribution with[|][p][t][p][x][q ą][ 0][ and][ p][t][p][y][ “] pt[ 1]y[|][x]x[q ă] is strictly greater than the[ p][1]
+p q “ p | q
+error of f on distribution with p[1]t[p][y][|][x][q][. Formally,]
+_EDT pf_ q ´ EDT [1] pf q
+
+“ Ex„ptpxq,y„ptpy|xq „I „arg maxjPY _fjpxq ‰ y_ ´ Ex„ptpxq,y„p[1]t[p][y][|][x][q] „I „arg maxjPY _fjpxq ‰ y_
+
+“ żxPXM I rf pxq ‰ 0s _ptpy “ 0|xq ´ p[1]t[p][y][ “][ 0][|][x][q]_ _ptpxqdx_
+
+` ˘
+
+` żxPXM I rf pxq ‰ 1s _ptpy “ 1|xq ´ p[1]t[p][y][ “][ 1][|][x][q]_ _ptpxqdx_
+
+` ˘
+
+
+“ _x_ _M[2]_ _ptpy “ 0|xq ´ p[1]t[p][y][ “][ 0][|][x][q]_ _ptpxqdx `_ _x_ _M[1]_ _ptpy “ 1|xq ´ p[1]t[p][y][ “][ 1][|][x][q]_ _ptpxqdx_
+ż PX ż PX
+
+` ˘ ` ˘
+
+ą 0, (4)
+where the last step follows by construction of the set _M[1]_ [and][ X][ 2]M [. Since][ E][D][T][ p][f] [q ‰][ E]
+_X_ _D[T][ 1]_ [p][f] [q][, given]
+the information of pt _x_ and ps _x, y_ it is impossible to distinguish the two values of the error with
+p q p q
+classifier f . Thus, we obtain a contradiction on the assumption that ptpy|xq ‰ p[1]t[p][y][|][x][q][. Hence, we]
+must pose restrictions on the nature of shift such that P is singleton to to identify accuracy on the
+target.
+
+_Proof of Corollary 1. The corollary follows directly from Proposition 1. Since two different target_
+conditional distribution can lead to different error estimates without assumptions on the classifier, no
+method can estimate two different quantities from the same given information. We illustrate this in
+Example 1 next.
+
+B ESTIMATING ACCURACY IN COVARIATE SHIFT OR LABEL SHIFT
+
+**Accuracy estimation under covariate shift assumption** Under the assumption that ptpy|xq “
+_ps_ _y_ _x_, accuracy on the target domain can be estimated as follows:
+p | q
+
+_pt_ _x, y_
+T _f_ E _x,y_ S p q (5)
+_ED_ p q “ p q„D _ps_ _x, y_
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+_pt_ _x_
+E _x,y_ S p q _._ (6)
+“ p q„D _ps_ _x_
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+
+-----
+
+Given access to pt _x_ and ps _x_, one can directly estimate the expression in (6).
+p q p q
+
+**Accuracy estimation under label shift assumption** Under the assumption that ptpx|yq “ pspx|yq,
+accuracy on the target domain can be estimated as follows:
+
+_pt_ _x, y_
+T _f_ E _x,y_ S p q (7)
+_ED_ p q “ p q„D _ps_ _x, y_
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+_pt_ _y_
+E _x,y_ S p q _._ (8)
+“ p q„D _ps_ _y_
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+Estimating importance ratios pt _x_ _ps_ _x_ is straightforward under covariate shift assumption when
+p q{ p q
+the distributions pt _x_ and ps _x_ are known. For label shift, one can leverage moment matching
+p q p q
+approach called BBSE (Lipton et al., 2018) or likelihood minimization approach MLLS (Garg et al.,
+2020). Below we discuss the objective of MLLS:
+_w_ arg max Ex _pt_ _x_ log ps _y_ _x_ _w_ _,_ (9)
+“ _wPW_ „ p q p | q[T]
+“ ‰
+
+where W “ tw | @y, wy ě 0 and _y“1_ _[w][y][p][s][p][y][q “][ 1][u][. MLLS objective is guaranteed to obtain]_
+consistent estimates for the importance ratios w[˚] _y_ _pt_ _y_ _ps_ _y_ under the following condition.
+p q “ p q{ p q
+**Theorem 2 (Theorem 1 (Garg et al., 2020))[ř][k]** **. If the distributions** _p_ _x_ _y_ : y 1, . . ., k _are strictly_
+t p q| q “ u
+_linearly independent, then w[˚]_ _is the unique maximizer of the MLLS objective (9)._
+
+We refer interested reader to Garg et al. (2020) for details.
+
+Above results of accuracy estimation under label shift and covariate shift can be extended to a
+generalized label shift and covariate shift settings. Assume a function h : X Ñ Z such that y is
+independent of x given hpxq. In other words hpxq contains all the information needed to predict
+label y. With help of h, we can extend estimation to following settings: (i) Generalized covariate
+_shift, i.e., ps_ _y_ _h_ _x_ _pt_ _y_ _h_ _x_ and ps _h_ _x_ 0 for all x _t; (ii) Generalized label shift, i.e.,_
+p | p qq “ p | p qq p p qq ą P X
+_ps_ _h_ _x_ _y_ _pt_ _h_ _x_ _y_ and ps _y_ 0 for all y _t. By simply replacing x with h_ _x_ in (6) and
+p p q| q “ p p q| q p q ą P Y p q
+(9), we will obtain consistent error estimates under these generalized conditions.
+
+
+_Proof of Example 1. Under covariate shift using (6), we get_
+
+_pt_ _x_
+
+1 E _x,y_ _ps_ _x,y_ p q
+_E_ “ p q„ p q _ps_ _x_
+
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+_pt_ _x_
+
+Ex _ps_ _x,y_ 0 p q Ex _ps_ _x,y_ 1
+“ „ p “ q _ps_ _x_ ` „ p “ q
+
+„ p q [I][ r][f] [p][x][q ‰][ 0][s]
+
+
+_pt_ _x_
+p q
+
+_ps_ _x_
+
+„ p q [I][ r][f] [p][x][q ‰][ 1][s]
+
+
+“ I rf pxq ‰ 0s ptpxqpspy “ 0|xqdx ` I rf pxq ‰ 1s ptpxqpspy “ 1|xqdx
+ż ż
+
+Under label shift using (8), we get
+
+_pt_ _y_
+2 E _x,y_ S p q
+_E_ “ p q„D _ps_ _y_
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+Ex _ps_ _x,y_ 0 _β_ Ex _ps_ _x,y_ 1 1 ´ β
+“ „ p “ q _α_ [I][ r][f] [p][x][q ‰][ 0][s] ` „ p “ q 1 _α_ [I][ r][f] [p][x][q ‰][ 1][s]
+
+„  „ ´ 
+
+I _f_ _x_ 0 _[β]_ I _f_ _x_ 1
+“ r p q ‰ s _α_ _[p][s][p][y][ “][ 0][|][x][q][p][s][p][x][q][dx][ `]_ r p q ‰ s [p]1[1][ ´] α[ β][q]
+ż ż p ´ q _[p][s][p][y][ “][ 1][|][x][q][p][s][p][x][q][dx]_
+
+Then E1 ´ E2 is given by
+
+1 2 I _f_ _x_ 0 _ps_ _y_ 0 _x_ _pt_ _x_ _[β]_ _dx_
+_E_ ´ E “ r p q ‰ s p “ | q p q ´ _α_ _[p][s][p][x][q]_
+ż „ 
+
+I _f_ _x_ 1 _ps_ _y_ 1 _x_ _pt_ _x_ _dx_
+` r p q ‰ s p “ | q p q ´ [p]1[1][ ´] α[ β][q]
+ż „ p ´ q _[p][s][p][x][q]_
+
+I _f_ _x_ 0 _ps_ _y_ 0 _x_ _φ_ _µ2_ _dx_
+“ r p q ‰ s p “ | q [p][α][ ´]α[ β][q] p q
+ż
+
+
+I _f_ _x_ 1 _ps_ _y_ 1 _x_ (10)
+r p q ‰ s p “ | q [p][α]1[ ´] α [ β][q] _[φ][p][µ][1][q][dx .]_
+
+´
+
+
+-----
+
+Ifps αx, y ą β, and, then p Et 1x ą, any method that consistently estimates error under covariate shift will give an E2 and if α ă β, then E1 ă E2. Since E1 ‰ E2 for arbitrary f, given access to
+p q p q
+incorrect estimate under label shift and vice-versa. The reason being that the same pt _x_ and ps _x, y_
+p q p q
+can correspond to error E1 (under covariate shift) or error E2 (under label shift) either of which is not
+discernable absent further assumptions on the nature of shift.
+
+C ALTERNATE INTERPRETATION OF ATC
+
+Consider the following framework: Given a datum px, yq, define a binary classification problem
+of whether the model prediction arg max f pxq was correct or incorrect. In particular, if the model
+prediction matches the true label, then we assign a label 1 (positive) and conversely, if the model
+prediction doesn’t match the true label then we assign a label 0 (negative).
+
+Our method can be interpreted as identifying examples for correct and incorrect prediction based
+on the value of the score function spf pxqq, i.e., if the score spf pxqq is greater than or equal to
+the threshold t then our method predicts that the classifier correctly predicted datum px, yq and
+vice-versa if the score is less than t. A method that can solve this task will perfectly estimate the
+target performance. However, such an expectation is unrealistic. Instead, ATC expects that most of
+the examples with score above threshold are correct and most of the examples below the threshold
+are incorrect. More importantly, ATC selects a threshold such that the number of falsely identified
+correct predictions match falsely identified incorrect predictions on source distribution, thereby
+balancing incorrect predictions. We expect useful estimates of accuracy with ATC if the threshold
+transfers to target, i.e. if the number of falsely identified correct predictions match falsely identified
+incorrect predictions on target. This interpretation relates our method to the OOD detection literature
+where Hendrycks & Gimpel (2016); Hendrycks et al. (2019) highlight that classifiers tend to assign
+higher confidence to in-distribution examples and leverage maximum softmax confidence (or logit)
+to perform OOD detection.
+
+D DETAILS ON THE TOY MODEL
+
+**Skews observed in this toy model In Fig. 4, we illustrate the toy model used in our empirical**
+experiment. In the same setup, we empirically observe that the margin on population with less density
+is large, i.e., margin is much greater than γ when the number of observed samples is small (in Fig. 4
+(d)). Building on this observation, Nagarajan et al. (2020) showed in cases when margin decreases
+with number of samples, a max margin classifier trained on finite samples is bound to depend on the
+spurious features in such cases. They referred to this skew as geometric skew.
+
+Moreover, even when the number of samples are large so that we do not observe geometric skews,
+Nagarajan et al. (2020) showed that training for finite number of epochs, a linear classifier will have a
+non zero dependency on the spurious feature. They referred to this skew as statistical skew. Due both
+of these skews, we observe that a linear classifier obtained with training for finite steps on training
+data with finite samples, will have a non-zero dependency on the spurious feature. We refer interested
+reader to Nagarajan et al. (2020) for more details.
+
+**Proof of Theorem 1** Recall, we consider a easy-to-learn binary classification problem with two
+features x “ rxinv, xsps P R[2] where xinv is fully predictive invariant feature with a margin γ ą 0 and
+_xsp_ 1, 1 is a spurious feature (i.e., a feature that is correlated but not predictive of the true label).
+Conditional on P t´ u _y, the distribution over xinv is given as follows:_
+
+_U_ _γ, c_ _y_ 1
+_xinv_ _y_ r s “ (11)
+| „ _U_ _c,_ _γ_ _y_ 1 _[,]_
+" r´ ´ s “ ´
+
+where c is a fixed constant greater than γ. For simplicity, we assume that label distribution on source
+is uniform oncontrols the degree of spurious correlation. To model distribution shift, we simulate target data with t´1, 1u. xsp is distributed such that Psrxsp ¨p2y ´ 1q ą 0s “ psp, where psp P p0.5, 1.0q
+different degree of spurious correlation, i.e., in target distribution Pt _xsp_ 2y 1 0 _p[1]sp_
+Note that here we do not consider shifts in the label distribution but our result extends to arbitraryr ¨p ´ q ą s “ [P r][0][,][ 1][s][.]
+shifts in the label distribution as well.
+
+
+-----
+
+(a) (b)
+
+(c) (d)
+
+Figure 4: Illustration of toy model. (a) Source data at n 100. (b) Target data with p[1]s
+Target data withincreases the margin saturates to true margin p[1]s [“][ 0][.][9][. (c) Margin of][ x][inv] γ[in the minority group in source data. As sample size] “ 0.1. “ [“][ 0][.][5][. (b)]
+
+1 _e[wT x]_
+In this setup, we examine linear sigmoid classifiers of the form f _x_ where
+p q “ 1`e[wT x][,] 1`e[wT x]
+
+_w “ rwinv, wsps P R[2]. We show that given a linear classifier that relies on the spurious feature and”_ ı
+achieves a non-trivial performance on the source (i.e., winv 0), ATC with maximum confidence
+score function consistently estimates the accuracy on the target distribution. Define ą _XM_ _x_ _xsp_
+2y 1 0 and XC _x_ _xsp_ 2y 1 0 . Notice that in target distributions, we are changing “ t | ¨
+pthe fraction of examples in ´ q ă u “ t X|M and ¨ p _X ´C but we are not changing the distribution of examples withinq ą_ u
+individual set.
+
+**Theorem 3.obtained with finite sample approximation of Given any classifier f with winv ą (1) 0, i.e., in the above setting, assume that the threshold t is selected such that[1]** _t is_
+
+_n_ _n_
+
+I max I arg max _fj_ _xi_ _yi_ _,_ (12)
+
+_iÿ“1_ „ „ _jPY_ _[f][j][p][x][i][q ă][ t]_ “ _iÿ“1_ „ „ _jPY_ p q ‰ 
+
+_wheren_ 2 log tpxi4, yδiqui[n]“11 [„ p] psp _[D], then the estimate of accuracy by ATC as in[S][q][n][ are][ n][ samples from source distribution. Fix a] (2) satisfies the following[ δ][ ą][ 0][. Assuming]_
+ě p { q{p ´ q[2]
+_with probability at least 1 ´ δ,_
+
+log 8 _δ_
+
+I arg max _fj_ _x_ _y_ p { q _,_ (13)
+„ „ _jPY_ p q ‰  [ď] d _n ¨ csp_
+
+_wherecsp “ p Dsp[T] otherwise.[E]is any target distribution considered in our setting and[x][„][D][T][ r][I][ r][s][p][f]_ [p][x][qq ă][ t][ss ´][ E][p][x,y][q„][D][T] _csp “ p1 ´ pspq if wsp ą 0 and_
+
+
+1Note that this is possible because a linear classifier with sigmoid activation assigns a unique score to each
+point in source distribution.
+
+
+-----
+
+_Proof. First we consider the case of wsp_ 0. The proof follows in two simple steps. First we notice
+that the classifier will make an error only on some points in ą _XM and the threshold t will be selected_
+such that the fraction of points in XM with maximum confidence less than the threshold t will match
+the error of the classifier on XM . Classifier with wsp 0 and winv 0 will classify all the points in
+_XC correctly. Second, since the distribution of points is not changing within ą_ ą _XM and XC, the same_
+threshold continues to work for arbitrary shift in the fraction of examples in XM, i.e., p[1]sp[.]
+
+Note that whensubset Xerr _x wxspsp ą 02y, the classifier makes no error on points in 1_ 0 & _winvxinv_ _wspxsp_ 2y 1 _X 0C and makes an error on a of XM_, i.e., Xerr _XM_ .
+Consider X “ tthres | _x ¨ p arg max ´_ q ăy _fy_ px _t_ as the set of points that obtain a score less than or ` q ¨ p ´ q ď u Ď
+equal to t. Now we will show that ATC chooses a threshold “ t | PY p q ď u _t such that all points in XC gets a score_
+above t, i.e., Xthres _XM_ . First note that the score of points close to the true separator in XC, i.e., at
+_xsymmetricity, i.e.,1 “ pγ, 1q and x2 Ď “ p´γ, ´1q match. In other words, score at x1 matches with the score of x2 by_
+
+_e[w][inv][γ][`][w][sp]_
+arg max _fy_ _x1_ arg max _fy_ _x2_ (14)
+_yPY_ p q “ _yPY_ p q “ p1 ` e[w][inv][γ][`][w][sp]q _[.]_
+
+Hence, if t arg maxy _fy_ _x1_ then we will have _Xerr_ _Xthres_ which is contradiction violating
+ě PY p q _|_ _| ă |_ _|_
+definition of t as in (12). Thus Xthres _XM_ .
+Ď
+
+Now we will relate LHS and RHS of (12) with their expectations using Hoeffdings and DKW
+inequality to conclude (13). Using Hoeffdings’ bound, we have with probability at least 1 ´ δ{4
+
+I arg maxj _fj_ _xi_ _yi_ log 8 _δ_
+PY p q ‰ E _x,y_ T I arg max _fj_ _x_ _y_ p { q
+
+_iPÿXM_ “ “ _|XM_ _|_ ‰‰ ´ p q„D „ „ _jPY_ p q ‰  [ď] d 2 |XM _|_ _[.]_
+
+(15)
+
+With DKW inequality, we have with probability at least 1 ´ δ{4
+
+I maxj _fj_ _xi_ _t[1]_ log 8 _δ_
+r r PY p q ă ss E _x,y_ T I max p { q (16)
+
+_iPÿXM_ _|XM_ _|_ ´ p q„D „ „ _jPY_ _[f][j][p][x][q ă][ t][1]_ [ď] d 2 |XM _|_ _[,]_
+
+for all t[1] ą 0. Combining (15) and (16) at t[1] “ t with definition (12), we have with probability at
+least 1 ´ δ{2
+
+log 8 _δ_
+
+I arg max _fj_ _x_ _y_ p { q (17)
+„ „ _jPY_ p q ‰  [ď] d 2 |XM _|_ _[.]_
+
+Now for the case of[E][x][„][D][T][ r][I][ r] w[s][p]sp[f] [p][x][qq ă] 0, we can use the same arguments on[ t][ss ´][ E][p][x,y][q„][D][T] _XC. That is, since now all the error_
+will be on points in XC ă and classifier will make no error XM, we can show that threshold t will be
+selected such that the fraction of points in XC with maximum confidence less than the threshold t will
+match the error of the classifier on XC . Again, since the distribution of points is not changing within
+_XM and XC, the same threshold continues to work for arbitrary shift in the fraction of examples in_
+_XM_, i.e., p[1]sp[. Thus with similar arguments, we have]
+
+log 8 _δ_
+
+I arg max _fj_ _x_ _y_ p { q (18)
+„ „ _jPY_ p q ‰  [ď] d 2 |XC| _[.]_
+
+[E][x][„][D][T][ r][I][ r][s][p][f] [p][x][qq ă][ t][ss ´][ E][p][x,y][q„][D][T]
+
+Using Hoeffdings’ bound, with probability at least 1 ´ δ{2, we have
+
+_n_ _log_ 4 _δ_
+
+_XM_ _n_ 1 _psp_ ¨ p { q _._ (19)
+_|_ ´ ¨ p ´ q| ď c 2
+
+With probability at least 1 ´ δ{2, we have
+
+_n_ _log_ 4 _δ_
+
+_XC_ _n_ _psp_ ¨ p { q _._ (20)
+_|_ ´ ¨ _| ď_ c 2
+
+Combining (19) and (17), we get the desired result for wsp 0. For wsp 0, we combine (20) and
+(18) to get the desired result. ą ă
+
+
+-----
+
+(a)
+
+Figure 5: Failure of ATC in our toy model. Shifting the support of target class conditional pt _xinv_ _y_
+p | q
+may introduce a bias in ATC estimates, e.g., shrinking the support to c1( _c) (while maintaining_
+ă
+uniform distribution) in the target leads to overestimation bias.
+
+**Issues with IM in toy setting As described in App. E, we observe that IM is sensitive to binning**
+strategy. In the main paper, we include IM result with uniform mass binning with 100 bins. Empirically, we observe that we recover the true performance with IM if we use equal width binning with
+number of bins greater than 5.
+
+**Biased estimation with ATC in our toy model We assumed that both in source and target xinv** _y_ 1
+| “
+is uniform between rγ, cs and x|y “ ´1 is uniform between r´c, ´γs. Shifting the support of target
+class conditional pt _xinv_ _y_ may introduce a bias in ATC estimates, e.g., shrinking the support to
+p | q
+_c1(_ _c) (while maintaining uniform distribution) in the target will lead to an over-estimation of the_
+ă
+target performance with ATC. We show this failure in Fig. 5. The reason being that with the same
+threshold that we see more examples falsely identified as correct as compared to examples falsely
+identified as incorrect.
+
+D.1 A MORE GENERAL RESULT
+
+Recall, for a given threshold t, we categorize an example px, yq as a falsely identified correct
+prediction (ficp) if the predicted label _y “ arg max f_ pxq is not the same as y but the predicted score
+_fy[p][x][q][ is greater than][ t][. Similarly, an example is falsely identified incorrect prediction (fiip) if the]_
+predicted label _y is the same as y but the predicted score fy[p][x][q][ is less than][ t][.]_
+p
+p
+
+In general, we believe that our method will obtain consistent estimates in scenarios where the relativep
+distribution of covariates doesn’t change among examples that are falsely identified as incorrect p
+and examples that are falsely identified as correct. In other words, ATC is expected to work if the
+distribution shift is such that falsely identified incorrect predictions match falsely identified correct
+prediction.
+
+D.2 ATC PRODUCES CONSISTENT ESTIMATE ON SOURCE DISTRIBUTION
+
+**Proposition 2. Given labeled validation data** _xi, yi_ _i_ 1 _[from a distribution][ D][S][ and a model][ f]_ _[,]_
+tp qu[n]“
+_choose a threshold t as in (1). Then for δ ą 0, with probability at least 1 ´ δ, we have_
+
+log 4 _δ_
+
+E _x,y_ I max I arg max _fj_ _x_ _y_ 2 p { q (21)
+p q„D „ „ _jPY_ _[f][j][p][x][q ă][ t]_ ´ „ _jPY_ p q ‰  ď c 2n
+
+_Proof. The proof uses (i) Hoeffdings’ inequality to relate the accuracy with expected accuracy; and_
+(ii) DKW inequality to show the concentration of the estimated accuracy with our proposed method.
+Finally, we combine (i) and (ii) using the fact that at selected threshold t the number of false positives
+is equal to the number of false negatives.
+
+
+Using Hoeffdings’ bound, we have with probability at least 1 ´ δ{2
+
+_n_
+
+I arg max _fj_ _xi_ _yi_ E _x,y_ I arg max _fj_ _x_ _y_
+
+_iÿ“1_ „ „ _jPY_ p q ‰  ´ p q„D „ „ _jPY_ p q ‰ 
+
+
+log 4 _δ_
+p { q _._ (22)
+
+2n
+
+
+-----
+
+With DKW inequality, we have with probability at least 1 ´ δ{2
+
+_n_ log 4 _δ_
+
+I max E _x,y_ I max p { q _,_ (23)
+_j_ _[f][j][p][x][i][q ă][ t][1]_ ´ p q„D _j_ _[f][j][p][x][q ă][ t][1]_ 2n
+
+_iÿ“1_ „ „ PY  „ „ PY  [ď] c
+
+for all t[1] ą 0. Finally by definition, we have
+
+_n_ _n_
+
+I max I arg max _fj_ _xi_ _yi_ (24)
+
+_iÿ“1_ „ „ _jPY_ _[f][j][p][x][i][q ă][ t][1]_ “ _iÿ“1_ „ „ _jPY_ p q ‰ 
+
+Combining (22), (23) at t[1] “ t, and (24), we have the desired result.
+
+E BASLINE METHODS
+
+
+**Importance-re-weighting (IM) If we can estimate the importance-ratios** _p[p]s[t][p][x]x[q]_ [with just the unla-]
+
+p q
+beled data from the target and validation labeled data from source, then we can estimate the accuracy
+as on target as follows:
+
+_pt_ _x_
+T _f_ E _x,y_ S p q _._ (25)
+_ED_ p q “ p q„D _ps_ _x_
+„ p q [I][ r][f] [p][x][q ‰][ y][s]
+
+As previously discussed, this is particularly useful in the setting of covariate shift (within support)
+where importance ratios estimation has been explored in the literature in the past. Mandolin (Chen
+et al., 2021) extends this approach. They estimate importance-weights with use of extra supervision
+about the axis along which the distribution is shifting.
+
+In our work, we experiment with uniform mass binning and equal width binning with the number of
+bins in r5, 10, 50s. Overall, we observed that equal width binning works the best with 10 bins. Hence
+throughout this paper we perform equal width binning with 10 bins to include results with IM.
+
+**Average Confidence (AC)** If we expect the classifier to be argmax calibrated on the target then
+average confidence is equal to accuracy of the classifier. Formally, by definition of argmax calibration
+of f on any distribution D, we have
+
+_f_ E _x,y_ I _y_ arg max _fj_ _x_ E _x,y_ max _._ (26)
+_EDp_ q “ p q„D „ „ R _jPY_ p q “ p q„D „ _jPY_ _[f][j][p][x][q]_
+
+**Difference Of Confidence We estimate the error on target by subtracting difference of confidences**
+on source and target (as a distributional distance (Guillory et al., 2021)) from expected error on
+source distribution, i.e, DOC T Ex S I arg maxj _fj_ _x_ _y_ Ex T maxj _fj_ _x_
+_D_ “ „D PY p q ‰ ` „D r PY p qs ´
+Ex S maxj _fj_ _x_ . This is referred to as DOC-Feat in (Guillory et al., 2021).
+„D r PY p qs “ “ ‰‰
+
+**Generalized Disagreement Equality (GDE) Jiang et al. (2021) proposed average disagreement of**
+two models (trained on the same training set but with different initialization and/or different data
+ordering) as a approximate measure of accuracy on the underlying data, i.e.,
+
+_EDpf_ q “ Epx,yq„D I _f_ pxq ‰ f [1]pxq _._ (27)
+“ “ ‰‰
+
+They show that marginal calibration of the model is sufficient to have expected test error equal to the
+expected of average disagreement of two models where the latter expectation is also taken over the
+models used to calculate disagreement.
+
+F DETAILS ON THE DATASET SETUP
+
+In our empirical evaluation, we consider both natural and synthetic distribution shifts. We consider shifts on ImageNet (Russakovsky et al., 2015), CIFAR Krizhevsky & Hinton (2009), FMoWWILDS (Christie et al., 2018), RxRx1-WILDS (Taylor et al., 2019), Amazon-WILDS (Ni et al., 2019),
+CivilComments-WILDS (Borkan et al., 2019), and MNIST LeCun et al. (1998) datasets.
+
+
+-----
+
+Train (Source) Valid (Source) Evaluation (Target)
+
+MNIST (train) MNIST (valid) USPS, SVHN and Q-MNIST
+CIFAR10 (train) CIFAR10 (valid) CIFAR10v2, 95 CIFAR10-C datasets (Fog and Motion blur, etc. )
+CIFAR100 (train) CIFAR100 (valid) 95 CIFAR100-C datasets (Fog and Motion blur, etc. )
+
+FMoW (2013-15, 2016-17)
+FMoW (2002-12) (train) FMoW (2002-12) (valid) _{_ ˆ
+(All, Africa, Americas, Oceania, Asia, and Europe)}
+
+RxRx1 (train) RxRx1(id-val) RxRx1 (id-test, OOD-val, OOD-test)
+Amazon (train) Amazon (id-val) Amazon (OOD-val, OOD-test)
+
+CiviComments (8 demographic identities male, female, LGBTQ,
+CivilComments (train) CivilComments (id-val)
+Christian, Muslim, other religions, Black, and White)
+
+3 ImageNetv2 datasets, ImageNet-Sketch,
+ImageNet (train) ImageNet (valid)
+95 ImageNet-C datasets
+
+3 ImageNet-200v2 datasets, ImageNet-R,
+ImageNet-200 (train) ImageNet-200 (valid)
+ImageNet200-Sketch, 95 ImageNet200-C datasets
+
+Same subpopulations as train but unseen images from natural
+BREEDS (train) BREEDS (valid) and synthetic shifts in ImageNet, Novel subpopulations on
+natural and synthetic shifts
+
+Table 2: Details of the test datasets considered in our evaluation.
+
+_ImageNet setup. First, we consider synthetic shifts induced to simulate 19 different visual corruptions_
+(e.g., shot noise, motion blur, pixelation etc.) each with 5 different intensities giving us a total of 95
+datasets under ImageNet-C (Hendrycks & Dietterich, 2019). Next, we consider natural distribution
+shifts due to differences in the data collection process. In particular, we consider 3 ImageNetv2 (Recht
+et al., 2019) datasets each using a different strategy to collect test sets. We also evaluate performance
+on images with artistic renditions of object classes, i.e., ImageNet-R (Hendrycks et al., 2021) and
+ImageNet-Sketch (Wang et al., 2019) with hand drawn sketch images. Note that renditions dataset
+only contains 200 classes from ImageNet. Hence, in the main paper we include results on ImageNet
+restricted to these 200 classes, which we call as ImageNet-200, and relegate results on ImageNet with
+1k classes to appendix.
+
+We also consider BREEDS benchmark (Santurkar et al., 2020) in our evaluation to assess robustness
+to subpopulation shifts, in particular, to understand how accuracy estimation methods behave when
+novel subpopulations not observed during training are introduced. BREEDS leverages class hierarchy
+in ImageNet to repurpose original classes to be the subpopulations and defines a classification task
+on superclasses. Subpopulation shift is induced by directly making the subpopulations present
+in the training and test distributions disjoint. Overall, BREEDS benchmark contains 4 datasets
+ENTITY-13, ENTITY-30, LIVING-17, NON-LIVING-26, each focusing on different subtrees in the
+[hierarchy. To generate BREEDS dataset on top of ImageNet, we use the open source library: https:](https://github.com/MadryLab/BREEDS-Benchmarks)
+[//github.com/MadryLab/BREEDS-Benchmarks. We focus on natural and synthetic shifts](https://github.com/MadryLab/BREEDS-Benchmarks)
+as in ImageNet on same and different subpopulations in BREEDs. Thus for both the subpopulation
+(same or novel), we obtain a total of 99 target datasets.
+
+_CIFAR setup. Similar to the ImageNet setup, we consider (i) synthetic shifts (CIFAR-10-C) due to_
+common corruptions; and (ii) natural distribution shift (i.e., CIFARv2 (Recht et al., 2018; Torralba
+et al., 2008)) due to differences in data collection strategy on on CIFAR-10 (Krizhevsky & Hinton,
+2009). On CIFAR-100, we just have synthetic shifts due to common corruptions.
+
+_FMoW-WILDS setup. In order to consider distribution shifts faced in the wild, we consider FMoW-_
+WILDS (Koh et al., 2021; Christie et al., 2018) from WILDS benchmark, which contains satellite
+images taken in different geographical regions and at different times. We obtain 12 different OOD
+target sets by considering images between years 2013–2016 and 2016–2018 and by considering five
+geographical regions as subpopulations (Africa, Americas, Oceania, Asia, and Europe) separately
+and together.
+
+_RxRx1–WILDS setup. Similar to FMoW, we consider RxRx1-WILDS (Taylor et al., 2019) from_
+WILDS benchmark, which contains image of cells obtained by fluorescent microscopy and the task
+
+
+-----
+
+is to genetic treatments the cells received. We obtain 3 target datasets with shift induced by batch
+effects which make it difficult to draw conclusions from data across experimental batches.
+
+_Amazon-WILDS setup. For natural language task, we consider Amazon-WILDS (Ni et al., 2019)_
+dataset from WILDS benchmark, which contains review text and the task is get a corresponding star
+rating from 1 to 5. We obtain 2 target datasets by considered shifts induced due to different set of
+reviewers than the training set.
+
+_CivilComments-WILDS setup. We also consider CivilComments-WILDS (Borkan et al., 2019) from_
+WILDS benchmark, which contains text comments and the task is to classify them for toxicity. We
+obtain 18 target datasets depending on whether a comment mentions each of the 8 demographic
+identities male, female, LGBTQ, Christian, Muslim, other religions, Black, and White.
+
+_MNIST setup. For completeness, we also consider distribution shifts on MNIST (LeCun et al., 1998)_
+digit classification as in the prior work (Deng & Zheng, 2021). We use three real shifted datasets, i.e.,
+USPS (Hull, 1994), SVHN (Netzer et al., 2011) and QMNIST (Yadav & Bottou, 2019).
+
+G DETAILS ON THE EXPERIMENTAL SETUP
+
+All experiments were run on NVIDIA Tesla V100 GPUs. We used PyTorch (Paszke et al., 2019) for
+experiments.
+
+**Deep nets We consider a 4-layered MLP. The PyTorch code for 4-layer MLP is as follows:**
+
+nn.Sequential(nn.Flatten(),
+nn.Linear(input dim, 5000, bias=True),
+nn.ReLU(),
+nn.Linear(5000, 5000, bias=True),
+nn.ReLU(),
+nn.Linear(5000, 50, bias=True),
+nn.ReLU(),
+nn.Linear(50, num label, bias=True)
+)
+
+We mainly experiment convolutional nets. In particular, we use ResNet18 (He et al., 2016), ResNet50,
+and DenseNet121 (Huang et al., 2017) architectures with their default implementation in PyTorch.
+Whenever we initial our models with pre-trained models, we again use default models in PyTorch.
+
+**Hyperparameters and Training details As mentioned in the main text we do not alter the standard**
+training procedures and hyperparameters for each task. We present results at final model, however,
+we observed that the same results extend to an early stopped model as well. For completeness, we
+include these details below:
+
+_CIFAR10 and CIFAR100 We train DenseNet121 and ResNet18 architectures from scratch. We use_
+SGD training with momentum of 0.9 for 300 epochs. We start with learning rate 0.1 and decay it by
+multiplying it with 0.1 every 100 epochs. We use a weight decay of 5[´]4. We use batch size of 200.
+For CIFAR10, we also experiment with the same models pre-trained on ImageNet.
+
+_ImageNet_ For training, we use Adam with a batch size of 64 and learning rate 0.0001. Due to
+huge size of ImageNet, we could only train two models needed for GDE for 10 epochs. Hence, for
+relatively small scale experiments, we also perform experiments on ImageNet subset with 200 classes,
+which we call as ImageNet-200 with the same training procedure. These 200 classes are the same
+classes as in ImageNet-R dataset. This not only allows us to train ImageNet for 50 epochs but also
+allows us to use ImageNet-R in our testbed. On the both the datasets, we observe a similar superioriy
+with ATC. Note that all the models trained here were initialized with a pre-trained ImageNet model
+with the last layer replaced with random weights.
+
+_FMoW-WILDS_ For all experiments, we follow Koh et al. (2021) and use two architectures
+DenseNet121 and ResNet50, both pre-trained on ImageNet. We use the Adam optimizer (Kingma &
+Ba, 2014) with an initial learning rate of 10[´][4] that decays by 0.96 per epoch, and train for 50 epochs
+and with a batch size of 64.
+
+
+-----
+
+_RxRx1-WILDS_ For all experiments, we follow Koh et al. (2021) and use two architectures
+DenseNet121 and ResNet50, both pre-trained on ImageNet. We use Adam optimizer with a learning
+rate of 1e ´ 4 and L2-regularization strength of 1e ´ 5 with a batch size of 75 for 90 epochs. We
+linearly increase the learning rate for 10 epochs, then decreasing it following a cosine learning rate
+schedule. Finally, we pick the model that obtains highest in-distribution validation accuracy.
+
+_Amazon-WILDS_ For all experiments, we follow Koh et al. (2021) and finetuned DistilBERTbase-uncased models (Sanh et al., 2019), using the implementation from Wolf et al. (2020), and
+with the following hyperparameter settings: batch size 8; learning rate 1e ´ 5 with the AdamW
+optimizer (Loshchilov & Hutter, 2017); L2-regularization strength 0.01; 3 epochs with early stopping;
+and a maximum number of tokens of 512.
+
+_CivilComments-WILDS For all experiments, we follow Koh et al. (2021) and fine-tuned DistilBERT-_
+base-uncased models (Sanh et al., 2019), using the implementation from Wolf et al. (2020) and
+with the following hyperparameter settings: batch size 16; learning rate 1e ´ 5 with the AdamW
+optimizer (Loshchilov & Hutter, 2017) for 5 epochs; L2-regularization strength 0.01; and a maximum
+number of tokens of 300.
+
+_Living17 and Nonliving26 from BREEDS For training, we use SGD with a batch size of 128, weight_
+decay of 10[´][4], and learning rate 0.1. Models were trained until convergence. Models were trained
+for a total of 450 epochs, with 10-fold learning rate drops every 150 epochs. Note that since we want
+to evaluate models for novel subpopulations no pre-training was used. We train two architectures
+DenseNet121 and ResNet50.
+
+_Entity13 and Entity30 from BREEDS_ For training, we use SGD with a batch size of 128, weight
+decay of 10[´][4], and learning rate 0.1. Models were trained until convergence. Models were trained
+for a total of 300 epochs, with 10-fold learning rate drops every 100 epochs. Note that since we want
+to evaluate models for novel subpopulations no pre-training was used. We train two architectures
+DenseNet121 and ResNet50.
+
+_MNIST For MNIST, we train a MLP described above with SGD with momentum 0.9 and learning_
+rate 0.01 for 50 epochs. We use weight decay of 10[´][5] and batch size as 200.
+
+We have a single number for CivilComments because it is a binary classification task. For multiclass
+problems, ATC-NE and ATC-MC can lead to different ordering of examples when ranked with
+the corresponding scoring function. Temperature scaling on top can further alter the ordering of
+examples. The changed ordering of examples yields different thresholds and different accuracy
+estimates. However for binary classification, the two scoring functions are the same as entropy
+(i.e. p logppq ` p1 ´ pq logppq) has a one-to-one mapping to the max conf for p P r0, 1s. Moreover,
+temperature scaling also doesn’t change the order of points for binary classification problems. Hence
+for the binary classification problems, both the scoring functions with and without temperature scaling
+yield the same estimates. We have made this clear in the updated draft.
+
+**Implementation for Temperature Scaling** We use temperature scaling implementation from
+[https://github.com/kundajelab/abstention. We use validation set (the same we use](https://github.com/kundajelab/abstention)
+to obtain ATC threshold or DOC source error estimate) to tune a single temperature parameter.
+
+G.1 DETAILS ON FIG. 1 (RIGHT) SETUP
+
+For vision datasets, we train a DenseNet model with the exception of FCN model for MNIST dataset.
+For language datasets, we fine-tune a DistilBERT-base-uncased model. For each of these models,
+we use the exact same setup as described Sec. G. Importantly, to obtain errors on the same scale, we
+rescale all the errors by subtracting the error of Average Confidence method for each model. Results
+are reported as mean of the re-scaled errors over 4 seeds.
+
+
+-----
+
+SUPPLEMENTARY RESULTS
+
+
+H.1 CIFAR PRETRAINING ABLATION
+
+CIFAR10-Pretraining
+
+
+90
+80
+70
+60
+50
+40
+30
+20
+
+|Col1|Col2|
+|---|---|
+|||
+|DOC||
+|GDE||
+|ATC|-NE (Ours)|
+|IM AC||
+|||
+
+
+20 40 60 80
+
+OOD Accuracy
+
+
+(a)
+
+Figure 6: Results with a pretrained DenseNet121 model on CIFAR10. We observe similar behaviour
+as that with a model trained from scratch.
+
+
+H.2 BREEDS RESULTS WITH REGRESSION MODEL
+
+
+Entity13
+
+|Col1|Col2|Col3|
+|---|---|---|
+||DOC (w/ DOC (w/|o fit) fit)|
+||ATC (w/o|fit)|
+
+
+
+20 40 60 80
+
+
+Entity30
+
+
+Nonliving26
+
+
+90
+80
+70
+60
+50
+40
+30
+20
+
+
+90
+80
+70
+60
+50
+40
+30
+20
+
+
+90
+80
+70
+60
+50
+40
+30
+20
+
+|Col1|Col2|Col3|Col4|
+|---|---|---|---|
+|||DOC (w/ DOC (w/|o fit) fit)|
+|||ATC (w/o|fit)|
+
+
+DOC (w/o fit)
+
+DOC (w/ fit)
+
+ATC (w/o fit)
+
+
+DOC (w/o fit)
+
+DOC (w/ fit)
+
+ATC (w/o fit)
+
+20 40 60 80
+
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+
+DOC (w/o fit)
+
+DOC (w/ fit)
+
+ATC (w/o fit)
+
+20 40 60 80
+
+OOD Accuracy
+
+
+Figure 7: Scatter plots for DOC with linear fit. Results parallel to Fig. 3(Middle) on other
+BREEDS dataset.
+
+Dataset DOC (w/o fit) DOC (w fit) ATC-MC (Ours) (w/o fit)
+
+
+LIVING-17 24.32 13.65 **10.07**
+
+
+NONLIVING-26 29.91 **18.13** 19.37
+
+ENTITY-13 22.18 8.63 8.01
+
+
+ENTITY-30 24.71 12.28 **10.21**
+
+Table 5: Mean Absolute estimation Error (MAE) results for BREEDs datasets with novel populations
+_in our setup. After fitting a robust linear model for DOC on same subpopulation, we show predicted_
+accuracy on different subpopulations with fine-tuned DOC (i.e., DOC (w/ fit)) and compare with
+ATC without any regression model, i.e., ATC (w/o fit). While observe substantial improvements in
+MAE from DOC (w/o fit) to DOC (w/ fit), ATC (w/o fit) continues to outperform even DOC (w/ fit).
+
+
+-----
+
+CIFAR10
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+40 60 80
+
+
+CIFAR100
+
+20 40 60 80
+
+
+ImageNet200
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 40 60 80
+
+
+80
+70
+60
+50
+40
+30
+20
+10
+
+75
+70
+65
+60
+55
+50
+45
+40
+35
+
+
+90
+80
+70
+60
+50
+40
+30
+
+70
+60
+50
+40
+30
+20
+10
+
+
+80
+
+60
+
+40
+
+20
+
+37.5
+35.0
+32.5
+30.0
+27.5
+25.0
+22.5
+20.0
+17.5
+
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+OOD Accuracy
+
+ImageNet
+
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+
+FMoW-Wilds
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+40 50 60 70
+
+
+RxRx1-Wilds
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 25 30 35
+
+
+DOC
+GDE
+ATC-MC (Ours)
+IM
+AC
+
+
+20 40 60
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+CivilComments-Wilds
+
+
+OOD Accuracy
+
+
+Amazon-Wilds
+
+
+MNIST
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 40 60 80 100
+
+
+100
+
+80
+
+60
+
+40
+
+20
+
+
+90.0
+87.5
+85.0
+82.5
+80.0
+77.5
+75.0
+72.5
+
+80
+
+60
+
+40
+
+20
+
+
+90
+
+80
+
+70
+
+60
+
+80
+
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+60 70 80 90
+
+OOD Accuracy
+
+
+75 80 85 90
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+
+Living17
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+OOD Accuracy
+
+
+Entity13
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+OOD Accuracy
+
+
+Entity30
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+OOD Accuracy
+
+
+80
+
+60
+
+40
+
+20
+
+
+60
+
+40
+
+20
+
+
+Figure 8: Scatter plot of predicted accuracy versus (true) OOD accuracy. For vision datasets except
+MNIST we use a DenseNet121 model. For MNIST, we use a FCN. For language datasets, we use
+DistillBert-base-uncased. Results reported by aggregating accuracy numbers over 4 different seeds.
+
+
+-----
+
+CIFAR10
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 40 60 80
+
+
+CIFAR100
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 40 60 80
+
+
+ImageNet200
+
+20 40 60 80
+
+
+80
+70
+60
+50
+40
+30
+20
+10
+
+65
+60
+55
+50
+45
+40
+35
+
+
+90
+80
+70
+60
+50
+40
+30
+20
+
+70
+60
+50
+40
+30
+20
+10
+
+
+80
+
+60
+
+40
+
+20
+
+0
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+37.5
+35.0
+32.5
+30.0
+27.5
+25.0
+22.5
+20.0
+17.5
+
+
+OOD Accuracy
+
+ImageNet
+
+
+OOD Accuracy
+
+FMoW-Wilds
+
+
+OOD Accuracy
+
+
+RxRx1-Wilds
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 25 30 35
+
+
+DOC
+GDE
+ATC-MC (Ours)
+IM
+AC
+
+
+DOC
+GDE
+ATC-NE (Ours)
+IM
+AC
+
+
+20 40 60
+
+
+40 50 60
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+Living17
+
+
+OOD Accuracy
+
+
+Nonliving26
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+
+Entity13
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+
+90
+80
+70
+60
+50
+40
+30
+20
+10
+
+
+80
+70
+60
+50
+40
+30
+20
+10
+
+
+80
+70
+60
+50
+40
+30
+20
+10
+
+80
+70
+60
+50
+40
+30
+20
+10
+
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+OOD Accuracy
+
+
+OOD Accuracy
+
+Entity30
+
+
+OOD Accuracy
+
+
+DOC
+GDE
+ATC-NE (Ours)
+
+
+20 40 60 80
+
+OOD Accuracy
+
+Figure 9: Scatter plot of predicted accuracy versus (true) OOD accuracy for vision datasets except
+MNIST with a ResNet50 model. Results reported by aggregating MAE numbers over 4 different
+seeds.
+
+
+-----
+
+IM AC DOC GDE ATC-MC (Ours) ATC-NE (Ours)
+Dataset Shift
+Pre T Post T Pre T Post T Pre T Post T Post T Pre T Post T Pre T Post T
+
+
+6.60 5.74 9.88 6.89 7.25 6.07 4.77 3.21 3.02 2.99 **2.85**
+Natural
+CIFAR10 p0.35q p0.30q p0.16q p0.13q p0.15q p0.16q p0.13q p0.49q p0.40q p0.37q p0.29q
+
+12.33 10.20 16.50 11.91 13.87 11.08 6.55 4.65 4.25 4.21 **3.87**
+Synthetic
+p0.51q p0.48q p0.26q p0.17q p0.18q p0.17q p0.35q p0.55q p0.55q p0.55q p0.75q
+
+13.69 11.51 23.61 13.10 14.60 10.14 9.85 5.50 **4.75** **4.72** 4.94
+CIFAR100 Synthetic
+p0.55q p0.41q p1.16q p0.80q p0.77q p0.64q p0.57q p0.70q p0.73q p0.74q p0.74q
+
+12.37 8.19 22.07 8.61 15.17 7.81 5.13 4.37 2.04 3.79 **1.45**
+Natural
+0.25 0.33 0.08 0.25 0.11 0.29 0.08 0.39 0.24 0.30 0.27
+ImageNet200 p q p q p q p q p q p q p q p q p q p q p q
+
+19.86 12.94 32.44 13.35 25.02 12.38 5.41 5.93 3.09 5.00 **2.68**
+Synthetic
+p1.38q p1.81q p1.00q p1.30q p1.10q p1.38q p0.89q p1.38q p0.87q p1.28q p0.45q
+
+
+7.77 6.50 18.13 6.02 8.13 5.76 6.23 3.88 2.17 2.06 **0.80**
+Natural
+0.27 0.33 0.23 0.34 0.27 0.37 0.41 0.53 0.62 0.54 0.44
+ImageNet p q p q p q p q p q p q p q p q p q p q p q
+
+13.39 10.12 24.62 8.51 13.55 7.90 6.32 3.34 **2.53** **2.61** 4.89
+Synthetic
+p0.53q p0.63q p0.64q p0.71q p0.61q p0.72q p0.33q p0.53q p0.36q p0.33q p0.83q
+
+5.53 4.31 33.53 12.84 5.94 4.45 5.74 3.06 **2.70** 3.02 **2.72**
+FMoW-WILDS Natural
+p0.33q p0.63q p0.13q p12.06q p0.36q p0.77q p0.55q p0.36q p0.54q p0.35q p0.44q
+
+5.80 5.72 7.90 4.84 5.98 5.98 6.03 4.66 **4.56** **4.41** **4.47**
+RxRx1-WILDS Natural
+p0.17q p0.15q p0.24q p0.09q p0.15q p0.13q p0.08q p0.38q p0.38q p0.31q p0.26q
+
+2.40 2.29 8.01 2.38 2.40 2.28 17.87 1.65 **1.62** **1.60** **1.59**
+Amazon-WILDS Natural
+p0.08q p0.09q p0.53q p0.17q p0.09q p0.09q p0.18q p0.06q p0.05q p0.14q p0.15q
+
+12.64 10.80 16.76 11.03 13.31 10.99 16.65 **7.14**
+CivilCom.-WILDS Natural
+p0.52q p0.48q p0.53q p0.49q p0.52q p0.49q p0.25q p0.41q
+
+18.48 15.99 21.17 14.81 20.19 14.56 24.42 5.02 **2.40** 3.14 3.50
+MNIST Natural
+p0.45q p1.53q p0.24q p3.89q p0.23q p3.47q p0.41q p0.44q p1.83q p0.49q p0.17q
+
+16.23 11.14 24.97 10.88 19.08 10.47 10.71 5.39 **3.88** 4.58 4.19
+Same
+0.77 0.65 0.70 0.77 0.65 0.72 0.74 0.92 0.61 0.85 0.16
+ENTITY-13 p q p q p q p q p q p q p q p q p q p q p q
+
+28.53 22.02 38.33 21.64 32.43 21.22 20.61 13.58 10.28 12.25 **6.63**
+Novel
+p0.82q p0.68q p0.75q p0.86q p0.69q p0.80q p0.60q p1.15q p1.34q p1.21q p0.93q
+
+18.59 14.46 28.82 14.30 21.63 13.46 12.92 9.12 **7.75** 8.15 **7.64**
+Same
+0.51 0.52 0.43 0.71 0.37 0.59 0.14 0.62 0.72 0.68 0.88
+ENTITY-30 p q p q p q p q p q p q p q p q p q p q p q
+
+32.34 26.85 44.02 26.27 36.82 25.42 23.16 17.75 14.30 15.60 **10.57**
+Novel
+p0.60q p0.58q p0.56q p0.79q p0.47q p0.68q p0.12q p0.76q p0.85q p0.86q p0.86q
+
+
+18.66 17.17 26.39 16.14 19.86 15.58 16.63 10.87 **10.24** 10.07 **10.26**
+Same
+0.76 0.74 0.82 0.81 0.67 0.76 0.45 0.98 0.83 0.92 1.18
+NONLIVING-26 p q p q p q p q p q p q p q p q p q p q p q
+
+33.43 31.53 41.66 29.87 35.13 29.31 29.56 21.70 20.12 19.08 **18.26**
+Novel
+p0.67q p0.65q p0.67q p0.71q p0.54q p0.64q p0.21q p0.86q p0.75q p0.82q p1.12q
+
+12.63 11.05 18.32 10.46 14.43 10.14 9.87 4.57 **3.95** **3.81** 4.21
+Same
+1.25 1.20 1.01 1.12 1.11 1.16 0.61 0.71 0.48 0.22 0.53
+LIVING-17 p q p q p q p q p q p q p q p q p q p q p q
+
+29.03 26.96 35.67 26.11 31.73 25.73 23.53 16.15 14.49 12.97 **11.39**
+Novel
+p1.44q p1.38q p1.09q p1.27q p1.19q p1.35q p0.52q p1.36q p1.46q p1.52q p1.72q
+
+Table 3: Mean Absolute estimation Error (MAE) results for different datasets in our setup grouped by
+_the nature of shift. ‘Same’ refers to same subpopulation shifts and ‘Novel’ refers novel subpopulation_
+shifts. We include details about the target sets considered in each shift in Table 2. Post T denotes
+use of TS calibration on source. For language datasets, we use DistilBERT-base-uncased, for vision
+dataset we report results with DenseNet model with the exception of MNIST where we use FCN.
+Across all datasets, we observe that ATC achieves superior performance (lower MAE is better). For
+GDE post T and pre T estimates match since TS doesn’t alter the argmax prediction. Results reported
+by aggregating MAE numbers over 4 different seeds. Values in parenthesis (i.e., p¨q) denote standard
+deviation values.
+
+
+-----
+
+IM AC DOC GDE ATC-MC (Ours) ATC-NE (Ours)
+Dataset Shift
+Pre T Post T Pre T Post T Pre T Post T Post T Pre T Post T Pre T Post T
+
+
+7.14 6.20 10.25 7.06 7.68 6.35 5.74 4.02 3.85 3.76 **3.38**
+Natural
+CIFAR10 p0.14q p0.11q p0.31q p0.33q p0.28q p0.27q p0.25q p0.38q p0.30q p0.33q p0.32q
+
+12.62 10.75 16.50 11.91 13.93 11.20 7.97 5.66 5.03 4.87 **3.63**
+Synthetic
+p0.76q p0.71q p0.28q p0.24q p0.29q p0.28q p0.13q p0.64q p0.71q p0.71q p0.62q
+
+12.77 12.34 16.89 12.73 11.18 9.63 12.00 5.61 **5.55** 5.65 5.76
+CIFAR100 Synthetic
+p0.43q p0.68q p0.20q p2.59q p0.35q p1.25q p0.48q p0.51q p0.55q p0.35q p0.27q
+
+12.63 7.99 23.08 7.22 15.40 6.33 5.00 4.60 1.80 4.06 **1.38**
+Natural
+0.59 0.47 0.31 0.22 0.42 0.24 0.36 0.63 0.17 0.69 0.29
+ImageNet200 p q p q p q p q p q p q p q p q p q p q p q
+
+20.17 11.74 33.69 9.51 25.49 8.61 4.19 5.37 2.78 4.53 3.58
+Synthetic
+p0.74q p0.80q p0.73q p0.51q p0.66q p0.50q p0.14q p0.88q p0.23q p0.79q p0.33q
+
+8.09 6.42 21.66 5.91 8.53 5.21 5.90 3.93 1.89 2.45 **0.73**
+Natural
+0.25 0.28 0.38 0.22 0.26 0.25 0.44 0.26 0.21 0.16 0.10
+ImageNet p q p q p q p q p q p q p q p q p q p q p q
+
+13.93 9.90 28.05 7.56 13.82 6.19 6.70 3.33 2.55 2.12 5.06
+Synthetic
+p0.14q p0.23q p0.39q p0.13q p0.31q p0.07q p0.52q p0.25q p0.25q p0.31q p0.27q
+
+5.15 3.55 34.64 5.03 5.58 3.46 5.08 2.59 2.33 2.52 **2.22**
+FMoW-WILDS Natural
+p0.19q p0.41q p0.22q p0.29q p0.17q p0.37q p0.46q p0.32q p0.28q p0.25q p0.30q
+
+6.17 6.11 21.05 **5.21** 6.54 6.27 6.82 5.30 **5.20** **5.19** 5.63
+RxRx1-WILDS Natural
+p0.20q p0.24q p0.31q p0.18q p0.21q p0.20q p0.31q p0.30q p0.44q p0.43q p0.55q
+
+18.32 14.38 27.79 13.56 20.50 13.22 16.09 9.35 7.50 7.80 **6.94**
+Same
+0.29 0.53 1.18 0.58 0.47 0.58 0.84 0.79 0.65 0.62 0.71
+ENTITY-13 p q p q p q p q p q p q p q p q p q p q p q
+
+28.82 24.03 38.97 22.96 31.66 22.61 25.26 17.11 13.96 14.75 **9.94**
+Novel
+p0.30q p0.55q p1.32q p0.59q p0.54q p0.58q p1.08q p0.84q p0.93q p0.64q p0.78q
+
+
+16.91 14.61 26.84 14.37 18.60 13.11 13.74 8.54 7.94 **7.77** 8.04
+Same
+1.33 1.11 2.15 1.34 1.69 1.30 1.07 1.47 1.38 1.44 1.51
+ENTITY-30 p q p q p q p q p q p q p q p q p q p q p q
+
+28.66 25.83 39.21 25.03 30.95 23.73 23.15 15.57 13.24 12.44 **11.05**
+Novel
+p1.16q p0.88q p2.03q p1.11q p1.64q p1.11q p0.51q p1.44q p1.15q p1.26q p1.13q
+
+17.43 15.95 27.70 15.40 18.06 14.58 16.99 10.79 **10.13** **10.05** 10.29
+Same
+0.90 0.86 0.90 0.69 1.00 0.78 1.25 0.62 0.32 0.46 0.79
+NONLIVING-26 p q p q p q p q p q p q p q p q p q p q p q
+
+29.51 27.75 40.02 26.77 30.36 25.93 27.70 19.64 17.75 16.90 **15.69**
+Novel
+p0.86q p0.82q p0.76q p0.82q p0.95q p0.80q p1.42q p0.68q p0.53q p0.60q p0.83q
+
+14.28 12.21 23.46 11.16 15.22 10.78 10.49 4.92 **4.23** **4.19** 4.73
+Same
+0.96 0.93 1.16 0.90 0.96 0.99 0.97 0.57 0.42 0.35 0.24
+LIVING-17 p q p q p q p q p q p q p q p q p q p q p q
+
+28.91 26.35 38.62 24.91 30.32 24.52 22.49 15.42 13.02 12.29 **10.34**
+Novel
+p0.66q p0.73q p1.01q p0.61q p0.59q p0.74q p0.85q p0.59q p0.53q p0.73q p0.62q
+
+Table 4: Mean Absolute estimation Error (MAE) results for different datasets in our setup grouped
+_by the nature of shift for ResNet model. ‘Same’ refers to same subpopulation shifts and ‘Novel’ refers_
+novel subpopulation shifts. We include details about the target sets considered in each shift in Table 2.
+Post T denotes use of TS calibration on source. Across all datasets, we observe that ATC achieves
+superior performance (lower MAE is better). For GDE post T and pre T estimates match since TS
+doesn’t alter the argmax prediction. Results reported by aggregating MAE numbers over 4 different
+seeds. Values in parenthesis (i.e., p¨q) denote standard deviation values.
+
+
+-----
+

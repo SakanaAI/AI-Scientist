@@ -1,0 +1,1426 @@
+# FEDLITE: A SCALABLE APPROACH FOR FEDERATED LEARNING ON RESOURCE-CONSTRAINED CLIENTS
+
+**Anonymous authors**
+Paper under double-blind review
+
+ABSTRACT
+
+In classical federated learning, the clients contribute to the overall training by
+communicating local updates for the underlying model on their private data to
+a coordinating server. However, updating and communicating the entire model
+becomes prohibitively expensive when resource-constrained clients collectively
+aim to train a large machine learning model. Split learning provides a natural
+solution in such a setting, where only a (small) part of the model is stored and
+trained on clients while the remaining (large) part of the model only stays at
+the servers. Unfortunately, the model partitioning employed in split learning
+significantly increases the communication cost compared to the classical federated
+learning algorithms. This paper addresses this issue by proposing an end-to-end
+training framework that relies on a novel vector quantization scheme accompanied
+by a gradient correction method to reduce the additional communication cost
+associated with split learning. An extensive empirical evaluation on standard
+image and text benchmarks shows that the proposed method can achieve up to
+490× communication cost reduction with minimal drop in accuracy, and enables a
+desirable performance vs. communication trade-off.
+
+1 INTRODUCTION
+
+Federated learning (FL) is an emerging field that collaboratively trains machine learning models on
+decentralized data (Li et al., 2019; Kairouz et al., 2019; Wang et al., 2021). One major advantage of FL
+is that it does not require clients to upload their data which may contain sensitive personal information.
+Instead, clients separately train local models on their private datasets, and the resulting locally trained
+model parameters are infrequently synchronized with the help of a coordinating server (McMahan
+et al., 2017). While the FL framework helps alleviate data-privacy concerns for distributed training,
+most of existing FL algorithms critically assume that the clients have enough compute and storage
+resources to perform local updates on the entire machine learning model. However, this assumption
+does not necessarily hold in many modern applications. For example, classification problems with
+an extremely large number of classes (often in millions and billions) commonly arise in the context
+of recommender systems (Covington et al., 2016), information retrieval (Agrawal et al., 2013), and
+language modeling (Levy & Goldberg, 2014). Here, the classification layer of a neural network itself
+is large enough that a typical FL client, e.g., a mobile or IoT device, cannot even store and locally
+update this single layer, let alone the entire neural network.
+
+Split learning (SL) is a recently proposed technique (Vepakomma et al., 2018; Thapa et al., 2020)
+that naturally addresses the above issue of FL. It splits the underlying model between the clients and
+server such that the first few layers are shared across the clients and the server, while the remaining
+layers are only stored at the server. The reduction of resource requirement at the clients is particularly
+pronounced when the last few dense layers constitute a large portion of the entire model. For instance,
+in a convolutional neural network (Krizhevsky, 2014), the last two fully connected layers take 95%
+parameters of the entire model. In this case, if we allocate the last two layers to the server, then
+the client-side memory usage can be reduced by 20×. Nonetheless, one major limitation of SL is
+that the underlying model partitioning leads to an increased communication cost for the resulting
+framework. Specifically, to train the split neural network, the activations and gradients at the layer
+where the model is split (referred to as cut layer) need to be communicated between the server and
+
+
+-----
+
+Synchronization w/
+help of the server
+
+Codebook + codewords (+ labels)
+
+Client-side model W9Gc/Gu/FhfM5X14zi5hgtwPj6BRBim1s=</latexit>wc Server-side model **_wCm2s=</latexit>_** s
+
+A mini-batch
+of client data Quantizer Decoder
+
+Loss
+
+Grad.
+
+Corrector
+
+**Clients** **Server**
+
+Gradient w.r.t.
+
+quantized activation
+
+**Quantization Layer**
+
+
+Figure 1: Overview of the proposed algorithm. In order to reduce the additional communication
+between the clients and the server, we propose to cluster similar client activations and send the cluster
+centroids to the server instead. This is equivalent to adding a vector quantization layer in split neural
+network training. The success of our method relies on a novel variant of product quantizer and a
+gradient correction technique. We refer the reader to Section 4 for further details.
+
+clients at each iteration. The additional message size is in proportion to the mini-batch size as well as
+the activation size. As a result, the communication cost for the model training can become prohibitive
+whenever the mini-batch size and the activation size of the cut layer are large (e.g. in one of our
+experiments, the additional message size can be 10 times larger than that of the client-side model).
+
+In this paper, we aim to make the split neural network training communication-efficient and enable
+its widespread adoption for FL in resource-constrained settings. Our proposed solution is based on
+the critical observation that, given a mini-batch of data, the client does not need to communicate
+per-example activation vectors if the activation vectors (at the cut layer) for different examples in the
+mini-batch exhibit enough similarity. Thus, we propose a training framework that performs clustering
+of the activation vectors and only communicates the cluster centroids to the server. Interestingly,
+this is equivalent to adding a vector quantization layer in the middle of the split neural network (see
+Figure 1 for an overview of our proposed method). Our main contributions are as follows.
+
+_• We propose an end-to-end communication-efficient neural network splitting-based FL approach_
+for resource-constrained clients (cf. Section 4). The approach employs a novel compression
+scheme that leverages product quantization to effectively compress the activations communicated
+between the clients and server.
+
+_• After applying the activation quantization, the clients can only receive possibly noisy gradients_
+from the server. The inaccurate client-side model updates lead to significant accuracy drops in our
+experiments. In order to mitigate this problem, we propose a gradient correction scheme for the
+backward pass, which plays a critical role in achieving a high compression ratio with minimal
+accuracy loss.
+
+_• We empirically evaluate the performance of our approach on three standard FL datasets (cf. Sec-_
+tion 5). Remarkably, we show that our approach allows for up to 490× communication reduction
+without significant accuracy loss.
+
+_• We present a convergence analysis for the proposed method (cf. Section 4.3), which reveals a_
+trade-off between communication reduction and convergence speed. The analysis further helps
+explain why the proposed gradient correction technique is beneficial.
+
+Here we note that our proposed method has potential applications beyond FL with resourceconstrained clients as it can be applied in any learning framework that can benefit from a quantization
+layer. For instance, it can be used to reduce the communication overhead in two-party vertical
+FL (Romanini et al., 2021), where the model is naturally split across two institutions and the data
+labels are generated on the server. It is also worth mentioning that the proposed method does not
+expose any additional client-side information to the server than vanilla split neural network training
+approach, such as SPLITFED (Thapa et al., 2020). Thus, our method can also leverage existing
+privacy preserving mechanisms such as differential privacy (Wei et al., 2020) or instance-hiding
+schemes (Huang et al., 2020) to provide formal privacy guarantees.
+
+
+-----
+
+2 BACKGROUND AND RELATED WORKS
+
+**Federated Learning (FL). Suppose we have a collection of M clients I = {1, 2, . . ., M** _}._
+Each client i ∈I has a local dataset Di and a corresponding empirical loss function Fi(w) =
+
+_ξ∈Di_ _[f]_ [(][w][;][ ξ][)][/n][i][, where][ w][ denotes the model parameters, and][ n][i][ =][ |][D][i][|][ denotes the number of]
+samples of the local dataset. The goal of FL is to find a shared model w that can minimize the
+
+P
+
+averaged loss over all clients, defined as follows:
+
+
+_piFi(w)_ (1)
+_i=1_
+
+X
+
+
+_F_ (w) =
+
+
+where pi = ni/ _i=1_ _[n][i][ is the relative weight of local loss][ F][i][. Motivated by the data privacy concerns,]_
+under a FL framework, the clients perform local training and only communicate the resulting models
+to a coordinating server as opposed to sharing their raw local data with the server (McMahan et al.,
+
+[P][M]
+2017). In current FL algorithms, the model size is limited by the resource constraints of clients.
+Consequently, these algorithms are not feasible when dealing with large machine learning models that
+cannot fit in clients memory or require large compute. Compared to these vanilla FL algorithms, split
+learning-based approaches enables learning on resource-constrained clients at a cost of additionally
+exposing the label information of clients to the server.
+
+**Large Model Training in FL. To deploy large machine learning models on resource-constrained**
+clients, a few recent works proposed methods to reduce the effective model size on clients. For
+example, Diao et al. (2020) varied the layer width on clients depending on their computational
+capacities; and Horvath et al. (2021) proposed ordered dropout to randomly removing neurons in
+the neural network. These methods are effective in reducing the width of the intermediate layers;
+however, they still place the full classification layer (which is in proportion to the size of the output
+space) on each client to compute the the client update. This may not be feasible for many clients
+as the parameters in the classification layer of a model can dominate the total number of model
+parameters (Krizhevsky, 2014).
+
+**Split Learning (SL). Split learning (SL) is another way of minimizing (1) without explicitly sharing**
+local data on clients (Vepakomma et al., 2018). In particular, SL splits the neural network model
+into two parts on a layer basis. The first few layers (called client-side model parameterized by
+**_wc) are shared across clients and the server, while the remaining layers (called server-side model_**
+parameterized by ws) are only stored and trained on the server. Under this splitting, the original loss
+function for a data sample ξ can be re-written as follows:
+
+_f_ (w; ξ) = h(ws; u(wc; ξ)), _∀ξ ∈_ Di, ∀i ∈I (2)
+
+where u is the client-side function mapping the input data to the activation space and h is the serverside function mapping the activation to a scalar loss value. Training both the client- and server-side
+models requires communicating client activations (i.e., the output of the client-side model, also called
+smashed data in some literature) between the clients and the server. We further elaborate on a concrete
+SL algorithm as a baseline in Section 3.
+
+**Communication-efficient SL and Model Parallel Training. Recently, He et al. (2020); Han et al.**
+(2021) proposed to add a classification layer on the client-side model in SL so that each client can
+locally update its parameters. This can effectively reduce the communication frequency between
+the clients and the server. However, this kind of method is not suitable for the settings where the
+classification layer dominates the entire model size such that the clients may not have enough memory
+space to store the entire classification layer.
+
+Another relevant approach is reducing communication cost in model parallel (MP) training (Dean
+et al., 2012). In MP training the worker nodes (dedicated machines instead of resource-constrained
+client devices) also need to transfer activations of intermediate layers with each other. Gupta et al.
+(2020) proposed to sparsify the activations according to the magnitude of each element and achieved
+up to 20× compression ratio (uncompressed/compressed). However, in practice it might be tricky
+to set the threshold for sparsification. Our proposed method explores an orthogonal dimension of
+sparsification by clustering similar activations within the mini-batches and communicating only
+the cluster centroids. Empirical results show that the proposed method can achieve up to 490×
+compression ratio without a significant drop in the model performance.
+
+
+-----
+
+**Product Quantization. Product quantization (PQ) is a compression method and has been widely**
+used in approximate nearest neighbor search (Jegou et al., 2010; Ge et al., 2013b). Given a batch of
+vectors, PQ divides each vector into multiple chunks and performs K-means clustering separately on
+each chunk. Now, the resulting cluster centroids construct the codebook and the closest codeword
+will be used to represent each vector. Instead of directly computing the distance between two highdimensional vectors, computing the distance between two codewords is orders of magnitude more
+efficient and faster. Note that the previous works used PQ to compress either learned features after
+training (see, e.g., Ge et al., 2013a) or the parameters of a neural network (see, e.g., Chen et al., 2020).
+In this paper, we show that PQ is also effective in compressing the output of intermediate layers and
+present a simple technique to enable backpropagation through the corresponding quantization layer.
+
+3 BASELINE: THE SPLITFED ALGORITHM
+
+In this section, we review a representative FL algorithm based on split learning, namely
+SPLITFED (Thapa et al., 2020), that provides a baseline training approach in resource-constrained
+setting. Each iteration of SPLITFED contains four steps detailed as follows. Wherever it simplifies
+the presentation, we assume that the mini-batch size B on each client is 1 as the derivations hold true
+for arbitrary batch sizes.
+
+1. Client Forward Pass: Let S be a randomly selected subset of clients. For i ∈S, compute the
+output of the client-side model zi = u(wc; ξ), where ξ ∈ Di is a randomly chosen training sample,
+andclient sends zi ∈ R[d] zdenotes the activations of the last layer of the client-side model. Then, each selectedi (together with its corresponding label if necessary) to the server.
+
+2. Server Update: The server treats all the activations (also referred to as smashed data)
+**_zi_** _i_ as inputs to perform one step of gradient descent on the server-side model: ∆ws =
+_{_ _}_ _∈S_
+_ηs_ _i∈S_ _[p][i][∇][w]s_ _[h][(][w][s][;][ z][i][)][/][ P]i∈S_ _[p][i][, where][ η][s][ denotes the server learning rate.][1][ In addition, the]_
+
+server also computes the gradient with respect to the activations **_zi_** _h(ws; zi) and sends it back_
+
+P _∇_
+
+to the corresponding client i.
+
+3. Client Backward Pass: Each selected client computes the gradient with respect to the client-side
+model using the chain rule: gi ≜ _∇wc_ _f = ∇zi_ _h(ws; zi)∇wc_ _u(wc; ξ)._
+
+4. Client-side Model Synchronization: At last, the client-side model is updated by synchronizing
+client gradients ∆wc = ηc _i_ _[p][i][g][i][/][ P]i_ _[p][i][, where][ η][c][ denotes the learning rate for the]_
+_∈S_ _∈S_
+client-side model.
+P
+
+One can easily validate that, with the above four steps, SPLITFED is equivalent to mini-batch
+stochastic gradient descent (SGD) with a total batch size of B × |S|. No matter how the network is
+split, the performance of the algorithm remains unchanged and has the same iteration complexity as
+mini-batch SGD.
+
+Besides, note that, a selected client needs to upload both the activations during “Client Forward
+Pass” and the gradients of the client-side model during “Client-side Model Synchronization”. Thus,
+the communication size per client per iteration can be written as |wc| + Bd. Since the up-link
+communication bandwidth is quite limited for clients in federated learning, when the mini-batch size
+_B or the dimension of the activation d gets large, the up-link communication may become the main_
+bottleneck that limits the scalability of SPLITFED. It is critical to compress the uploaded message
+from clients to the server (Reisizadeh et al., 2019; Li et al., 2019). Next, we present a novel vector
+quantization-based FL training framework that addresses this limitation of SPLITFED to enable
+communication-efficient training in resources-constrained settings.
+
+4 PROPOSED METHOD: FEDLITE
+
+We now introduce our proposed method, FEDerated spLIT learning with vEctor quantization
+(FEDLITE), which can drastically reduce the up-link communication cost on clients in the SPLITFED
+algorithm. The key idea of our method is to compress the redundant information in the client
+activations for each mini-batch. For instance, if we assume that all the activation vectors within a
+
+1The server learning rate here has a different definition from previous FL literature, e.g., Reddi et al. (2020).
+
+
+-----
+
+(i) Divide each vector into  subvectorsq05ZzFzCktwvn4BCXSTmg=</latexit> (ii) Stack subvectorsinto  groupsRit> (iii) Assign each subvectorto a cluster centroid
+
+Original activations **_Z58OJ/z1jUnzmBThfvwGVldI=</latexit>_** Quantized activations **_Z6A+PzB21Cm4o=</latexit>_**
+
+E</latexit>
+_d_ [0, 0, 1, 0, 1, e
+
+_q_ 1, 0, 0, 1, 0]
+
+K-means it>
+
+atexit> _L_
+_qB/R_
+
+OGTjQ=</latexit>d Codebook Codewords
+
+E</latexit>d [1, 0, 1, 1, 0,
+
+K-means _q_ it> 0, 0, 1, 0, 1]
+
+pzTjZzCktwvn4BvzmTaw=</latexit> atexit> _L_
+
+_qB/R_
+
+_B_ pzTjZzCktwvn4BvzmTaw=</latexit>
+
+**Communicated**
+
+_B_
+
+Figure 2: Illustration of our proposed quantizer. Given a mini-batch of activations Z ∈ R[d][×][B], there
+are three steps: (i) divide each activation vector into q subvectors; (ii) stack subvectors into R groups
+based on their indices; (iii) perform K-means clustering to get L centroids for each group. Each
+subvector can be represented by the index of the closest centroid in its corresponding group. On the
+server, by simply rearranging centroids, we can get the quantized activations **_Z._**
+
+mini-batch are nearly identical to each other, then instead of sending all B activation vectors, the[e]
+client needs to send only one representative vector to the server, thereby, reducing the communication
+cost by a factor of B.
+
+Building on the above observation, we let each client input their activations into a clustering algorithm
+to get L centroids. Then, each activation vector is represented by the index of its closest centroid.
+Instead of sending a mini-batch of B vectors, only L centroids and the cluster assignments are
+transmitted to the server. This procedure is equivalent to vector quantization. Here, a simple choice
+of the clustering algorithm is K-means (Krishna & Murty, 1999). However, as we observe in Figure 3,
+vanilla K-means clustering leads to a high quantization error with very limited compression ratio. It
+is non-trivial to design a proper clustering algorithm that can minimize the communication between
+clients and server, while maintaining a low quantization error. In Section 4.1, we design a novel
+variant of product quantizer that can flexibly operate this trade-off.
+
+While the above approach is appealing, it also introduces new challenges. First, note that, in the
+backward pass, due to the additional quantization layer, the server no longer knows the true client
+activations; thus, constraining the server to compute the gradients with respect to the (possibly noisy)
+quantized activations. Furthermore, in order to update the client-side model parameters, the clients
+need to receive the gradients with respect to the original activations, which is not available any more.
+In Section 4.2, we introduce a gradient correction technique to mitigate this gradient mismatch, which
+is critical for our method to achieve a high compression ratio with minimal accuracy loss.
+
+In the following sections, we present the key components of our proposed method and highlight
+how they address the aforementioned challenges. In addition, a convergence analysis is provided in
+Section 4.3. Unless otherwise stated, for the ease of exposition, we will focus on the operations on a
+specific client i and omit the client index. However, it is important to keep in mind that the client-side
+operations happen in parallel on all selected clients.
+
+4.1 FORWARD PASS: COMPRESSING ACTIVATIONS WITH PRODUCT QUANTIZATION
+
+In this subsection, we first present our proposed qunatizer and then elaborate on its advantages. A
+visual illustration is provided in Figure 2.
+
+**The Proposed Compression Scheme.** Suppose a client has computed a batch of activations
+**_Z = [z[(1)], . . ., z[(][B][)]] ∈_** R[d][×][B] using the client-side model wc, where d is the dimension of
+each activation and B denotes the mini-batch size on each client. Our proposed quantizer first
+divides each activation vector z[(][j][)], j ∈ [1, B] into q subvectors with equal dimension d/q. We
+
+
+-----
+
+0.12
+
+0.10
+
+0.08
+
+0.06
+
+0.04
+
+0.02
+
+
+
+Ours (1<R<q)
+PQ (1<R=q)
+K-means (R=q=1)
+
+
+0.00
+
+|L=2|Col2|Col3|
+|---|---|---|
+|L=4|||
+||Increase q||
+|L=8|||
+||||
+|=16|Decreas|e R|
+
+
+10[0] 10[1] 10[2]
+
+L=2
+
+L=4 Increase q
+
+L=8
+
+L=16
+
+Decrease R
+
+Compression ratio
+
+Figure 3: Quantization error (lower is better) versus compression ratio (larger is better). Our proposed
+quantizer achieves a better quantization error vs. compression ratio trade-off as compared to vanilla
+product quantization (PQ) and K-means. In this example, the activation size is d = 9216, and the
+mini-batch size is B = 20. The activations are trained via a two-layer CNN on Federated EMNIST. In
+each curve, we vary the number of clusters L. For green curves, the number of subvectors q takes value
+in {288, 1152, 4608}; for red curves, the number of groups R takes value in {2304, 1152, 384, 1},
+and q is fixed as 4608.
+
+denote the s-th subvector of z[(][j][)] as z[(][j,s][)] _∈_ R[d/q]. Then, the quantizer stacks all subvectors into
+_R groups based on their indices. For example, the first group G[(1)]_ contains all subvectors with
+indices (j, 1), (j, 2), . . . (j, q/R), ∀j ∈ [1, B]; the second group G[(2)] contains all subvectors with
+indices (j, q/R + 1), (j, q/R + 2), . . ., (j, 2q/R), ∀j ∈ [1, B], and so forth. At last, K-means clustering is performed on subvectors within each group G[(][r][)], ∀r ∈ [1, R] to find L cluster centroids
+_C[(][r][)]_ = {c[(][r,][1)], . . ., c[(][r,L][)]} ⊂ R[d/q]. Now each subvector z[(][j,s][)] can be approximated by its closest
+centroid in the corresponding group. Formally, if z[(][j,s][)] _∈G[(][r][)], then_
+
+**_z[(][j,s][)]_** ≜ **_c[(][r,l]∗[(][j,s][)]),_** where l[(][j,s][)] = arg min **_z[(][j,s][)]_** **_c[(][r,l][)]_** (3)
+_∗_ _l∈[1,L]_ _∥_ _−_ _∥[2]_
+
+In the above equation,e **_z[(][j,s][)]_** represents the quantized version of z[(][j,s][)]. By concatenating all quantized
+subvectors, server can get the quantized activations **_Z and use it as input to update the server-side_**
+model. In order to obtain the quantized subvectors, each client needs to send all cluster centroids e
+_r_ [1,R] (referred to as the codebook) and the cluster assignments[e] _l[(][j,s][)]_ _j_ [1,B],s [1,q] (referred
+_{C[(][r][)]}_ _∈_ _{_ _∗_ _}_ _∈_ _∈_
+to as the codewords) to the server. Assuming that each floating-point number occupies φ bits[2], the
+transmitted message size per client is reduced to φdRL/q + Bq log2 L from φdB.
+
+**The Benefit of Subvector Division: Reduced Quantization Error. The first key component of our**
+proposed quantizer is subvector division, i.e., setting the number of subvectors q to be greater than 1.
+When q = 1, the quantizer reduces to vanilla K-means. In this case, the codebook size is φdL and
+each activation vector have L possible choices. When we set q = R > 1, the codebook size is still
+_φdL. However, each activation vector now has L[q]_ possible choices, as each of q subvectors has L
+choices. Thus, the number of quantization levels becomes exponentially larger without any increase
+in memory usage and computation complexity. As illustrated by the green lines in Figure 3, having
+more quantization levels or effective centroid choices can significantly lower the quantization error.
+
+**The Benefit of Subvector Grouping: Improved Compression Ratio. By using subvector division,**
+although the quantization error can be reduced, the codebook size φdL is still pretty large. This is
+because subvectors within one vector are quantized separately using different codebooks. To further
+reduce the communication size, we propose subvector grouping and force subvectors within one
+group to share the same codebook. As a result, the total codebook size can be reduced to φdLR/q.
+When q ≫ _R ≥_ 1, there can be an order of magnitude increase in the compression ratio, as illustrated
+by the red lines in Figure 3. One can also observe that, by changing the value of R, our proposed
+quantizer (red lines) achieves a much better error-versus-compression trade-off than K-means and
+vanilla production quantization scheme.
+
+**Why not Reuse the Codebooks from Previous Iterations? In our proposed scheme, the codebook**
+is reconstructed at each iteration on clients. This is necessary, since in FL, only few stateless clients are
+selected to participate training in at each iteration and they have non-IID data distributions (Kairouz
+et al., 2019). Previous codebooks can be stale and other clients’ codebooks may not be suitable.
+
+
+2When computing the compression ratio in this paper, we always assume φ = 64.
+
+
+-----
+
+Now that we have introduced our product quantization-based compression scheme, we next address
+the issue of performing backpropagation in the presence of the additional quantization layer.
+
+4.2 BACKWARD PASS: GRADIENT CORRECTION
+
+As mentioned at the beginning of Section 4, there is a gradient mismatch problem in the client
+backward pass. While client i needs **_zi_** _h(ws; zi) to update the client-side models, it can only_
+_∇_
+receive ∇zi _[h][(][w]s[;][ e]zi) from the server. A naive solution is to treat ∇zi_ _[h][ as an approximation of][ ∇]zi_ _[h]_
+and update the client-side model bydue to gradient mismatch, this approach can lead to a significant performance drop, as observed in oure _∇zi_ _[h][(][w]s[;][ e]zi)∇wc_ _u(wc; ξ) = (e_ _∂f/∂zi)(∂zi/∂wc). However,_
+experiments (cf. Section 5). In order to address this issue, we propose a gradient correction technique.e
+e
+In particular, we approximate the gradient **_zi_** _h(ws; zi) by its first-order Taylor series expansion:_
+_∇_
+_∇zi_ _[h][(][w]s[;][ e]zi) + ∇z[2]i_ _[h][(][w][s][;][ e]zi) · (zi −_ **_zi). While the higher-order derivative may be expensive to_**
+compute, we use a scalar parameter λI > 0 to replace **_zi_** _[h][(][w][s][;][ e]z)i. Consequently, the gradient of_
+e e _∇[2]_
+the client-side model is defined as follows:e
+e
+
+_∂h(ws;_ **_zi)_** _∂u(wc; ξ)_
+**_gi ≜_** + λ(zi **_zi)_** _._ (4)
+
+_∂zi_ _−_ _∂wc_
+
+ 
+e
+
+In Section 4.3, we will provide a convergence analysis that can help explain the effects of gradiente e
+correction; in Section 5, we will empirically show that setting a strictly positivee _λ is crucial for the_
+success of the proposed method. In the following discussion, we provide an intuitive explanation of
+the correction to further motivate our approach.
+
+**The Effect of Regularization. We show that the client-side gradient in (4) can be considered as a**
+gradient of the following surrogate loss (proof is provided in the Appendix):
+
+**_zi_** **_zˆi_** + _[λ]_ **_zi_** _,_ (5)
+_∥_ _−_ _∥[2]_ 2 _[∥][z][i][ −]_ [e] _∥[2]_
+
+whereand the quantized activation zi = u(wc; ξ) is the activation of the client-side model. Besides,zi are fixed vectors that do not have derivatives when computing the ˆzi ≜ **_zi −∇zi_** _[h][(][w]s[;][ e]zi)/2_
+gradient. Setting λ > 0 is equivalent to having a regularization term, as per (5). The regularizere
+encourages the client-side model wc to move in a direction that can decrease the quantization error
+e
+**_zi_** **_zi_** . Interestingly, using a larger value of λ may let clients put more emphasis on minimizing the
+_∥_ _−_ _∥_
+quantization error and lead to quantization-friendly activations. However, one cannot set a arbitrarily
+large value for λ because the client-side model may output the same activation for all inputs and fail
+e
+to minimize the original loss function.
+
+4.3 CONVERGENCE ANALYSIS
+
+In this subsection, we provide a convergence analysis for FEDLITE. The analysis will highlight how
+the quantization error influences the convergence and how the gradient correction technique helps. In
+particular, the analysis is conducted under standard assumptions for mini-batch SGD. We assume
+the objective function F (w) = F ([wc; ws]) is L-Lipschitz smooth (i.e., ∥∇F (w) −∇F (v)∥≤
+_L ∥w −_ **_v∥), and stochastic gradient g(w) has bounded variance E∥g(w) −∇F_** (w)∥[2] _≤_ _σ[2]/BS,_
+where B is the mini-batch size per client and S is the number of selected clients per iteration. Under
+these assumptions, we have the following theorem.
+
+**Theorem 1 (Convergence of FEDLITE). If the client-side model and server-side model update using**
+_the same learning rate α =_ _BS/T where T is the number of total iterations, then the expected_
+
+_gradient norm of the global functionp_ mint∈[0,T −1] E _∇F_ (w[(][t][)]) _can be bounded by_
+
+4(F (w[(0)]) _Finf)_ _BS_ [2]
+_−_ + [4][Lσ][2] + 4 + 2 (Λ[2]1 [+ (Λ][2] 3[)][κ][2] _._ (6)
+_√BST_ _√BST_ r _T_ ! _[−]_ _[λ][)][2][Λ][2]_
+
+_Opt. error of mini-batch SGD_
+
+_Addnl. error caused by quantization_
+
+_where κ is the maximal quantization error|_ {z } max| **_z_** **_z_** _, λ is the tunable parameter in our gradient{z_ }
+_∥_ _−_ _∥_
+_correction scheme, Finf is the lower bound of function value, and constants Λ1, Λ2, Λ3 are the largest_
+_eigenvalues of matrices ∂[2]h(ws; z)/∂z∂ws, ∂[2]h(ws;e z)/∂z[2], ∂u(wc; ξ)/wc, respectively._
+
+
+-----
+
+Theorem 1 guarantees that the proposed algorithm FEDLITE converges to a neighbourhood around
+the stationary point of the global function. And the size of this neighborhood is in proportion to the
+maximal quantization error κ during the training. When there is no quantization, the error bound (6)
+recovers that of mini-batch SGD. Moreover, one can observe that setting a positive λ can help to
+reduce the additional error caused by adding the quantization layer.
+
+5 EXPERIMENTS
+
+We implement the proposed method FEDLITE using FedJAX (Ro et al., 2021) and evaluate its
+effectiveness on three standard federated datasets provided by the Tensorflow Federated (TFF)
+package (TFF, 2021): (i) image classification on FEMNIST, (ii) tag prediction on StackOverflow
+(referred to as SO Tag) and (iii) next word prediction on StackOverflow (referred to as SO NWP). On
+FEMNIST, the same model architecture as (Reddi et al., 2020) is adopted. We place two convolutional
+layers and two dense layers on the clients and the server, respectively. With this splitting, the client_side model only has about 1.6% trainable parameters of the entire model. Therefore, the client-side_
+resource requirement is significantly reduced. On SO Tag, both the client- and server-side models
+contains only one dense layer. On SO NWP, we place one LSTM layer and one dense layer on the
+clients, and another dense layer on the server. The ratios between the client-side model size and entire
+model size are 83% and 79% on SO Tag and SO NWP, respectively. Here, we note that even though
+the client-side model sizes for SO Tag and SO NWP do not correspond to an ideal setting for the split
+learning-based approaches, we include these two datasets to showcase the utility of our proposed
+method for language-based tasks.
+
+For each task, we select the learning rate that is best for the baseline SPLITFED algorithm. Although
+separately tuning the learning rate for our proposed method can further improve its performance,
+using the same learning rate as SPLITFED already demonstrates the advantages of our method. Unless
+otherwise stated, the number of groups R in our proposed quantizer is set to 1, as it exhibits the best
+trade-off in Figure 3 and experiments.
+
+**Main Results: Effectiveness of FedLite. As discussed in Section 4.1, there is a trade-off between**
+the final performance and compression ratio. Although the additional quantization layer helps reduce
+the communication cost, it also causes performance drop. While utilizing the quantization layer, it is
+important to understand the range of the compression ratio that does not degrade the final performance
+too much. To this end, we vary the number of clusters L and number of subvectors q in our proposed
+method and report the resulting accuracy vs. compression trade-off in Figure 4. Note that we define
+the compression ratio to be the ratio between the original activation size and compressed message
+(codebook + codewords) size.
+
+One can observe that the proposed method can achieve at least 10× compression ratio with almost
+no accuracy loss. Furthermore, if we allow for 5% relative loss compared to SPLITFED, then our
+method can achieve a 490× compression ratio on FEMNIST. This suggests that 99.8% information
+is redundant and can be dropped during the up-link communication. Surprisingly, on SO Tag, the
+Recall@5 even improves when adding the quantization layer. We conjecture that compressing the
+outputs of a intermediate layer might have similar effects to dropout.
+
+**Overall Communication and Computation Efficiencies. Here, we provide a concrete example**
+showing how the proposed method improves the communication and computation efficiencies over
+previous works. On FEMNIST, setting q = 1152 and L = 2 amounts to 490× compression ratio,
+which amounts to a 490× reduction in the additional communication introduced by the network
+splitting. Compared to SPLITFED, the overall up-link commutation cost (including the client-side
+gradients synchronization) is about 10× smaller. Compared to FEDAVG, the up-link communication
+cost per round is reduced by 62×, with 64× less trainable parameters on the clients. We further
+compare the training curves with respect to total communication costs of FEDLITE against SPLITFED
+and FEDAVG in Figure 6 in Appendix. Besides, the overall wall-clock time saving may depend on the
+characteristics of the training system. One can get an estimate using the analytical model in (Agarwal
+et al., 2021).
+
+**Effectiveness of the Gradient Correction. From Figure 4, it is easy to observe that the gradient**
+correction technique (i.e., λ > 0) is crucial for improving performance. Without correction, the
+algorithm can even diverge in the high compression ratio regime. While λ is separately tuned for
+
+
+-----
+
+85
+
+80
+
+75
+
+70
+
+65
+
+60
+
+55
+
+50
+
+
+25
+
+20
+
+15
+
+10
+
+
+60
+
+50
+
+40
+
+30
+
+20
+
+|Ours|Col2|Col3|
+|---|---|---|
+|Ours w/o SplitFed <5% acc.|grad. cor. drop||
+
+|Ours|Col2|Col3|Col4|
+|---|---|---|---|
+|Ours w/o g SplitFed <5% acc.|rad. cor. drop|||
+
+
+|Ours|Col2|Col3|Col4|Col5|
+|---|---|---|---|---|
+|Ours w SplitFe <5% a|/o grad. cor. d cc. drop||||
+|00 101 102 Compression ratio|||103||
+
+
+Ours
+Ours w/o grad. cor.
+SplitFed
+<5% acc. drop
+
+(a) FEMNIST
+
+
+10[0] 10[1] 10[2]
+
+Ours
+Ours w/o grad. cor.
+SplitFed
+<5% acc. drop
+
+Compression ratio
+
+(b) SO Tag
+
+
+10[0] 10[1] 10[2]
+
+Ours
+Ours w/o grad. cor.
+SplitFed
+<5% acc. drop
+
+Compression ratio
+
+(c) SO NWP
+
+
+Figure 4: Trade-off between the accuracy and compression ratio. Our proposed method can achieve
+up to 490×, 247×, and 51× communication reduction with less than 5% accuracy drop on FEMNSIT,
+SO Tag, and SO NWP, respectively. Each curve in the figures corresponds to one value of q (number
+of subvectors); and each point on a curve corresponds to a specific value of L (number of clusters).
+For our method, the number of groups R is fixed as 1.
+
+
+Accuracy 84
+
+83.8 83.8 83.8 83.5 82.7
+
+4608 82
+
+2304 83.6 83.5 83.2 83.0 82.0 80
+
+83.0 82.8 82.2 81.8 80.9 78
+
+1152
+
+576 82.1 81.0 81.1 80.5 78.7 76
+
+288 81.4 79.7 79.8 79.3 77.4 74
+
+q = # Subvectors 72
+
+144 80.732 79.716 78.58 72.84 42.12 70
+
+L = # Clusters
+
+(a) λ = 5 × 10[−][5]
+
+
+Accuracy 84
+
+83.7 83.5 83.5 82.8 81.4
+
+4608 82
+
+2304 83.4 83.1 82.6 80.6 80.5 80
+
+82.6 81.9 80.5 79.5 78.1 78
+
+1152
+
+576 80.7 79.3 75.4 75.6 72.6 76
+
+288 78.1 75.7 68.3 55.7 5.1 74
+
+q = # Subvectors 72
+
+144 76.732 74.216 63.08 5.14 5.12 70
+
+L = # Clusters
+
+(b) λ = 0
+
+
+84
+
+82
+
+80
+
+78
+
+76
+
+
+10[0] 10[1] 10[2] 10[3]
+
+|Col1|Col2|Col3|Col4|
+|---|---|---|---|
+|||||
+|||||
+|Ours Vanilla|PQ|||
+|w/o qu <5% a|antization cc. drop|||
+
+
+Ours
+Vanilla PQ
+w/o quantization
+<5% acc. drop
+
+Compression ratio
+
+(c) Quantizer comparison
+
+
+Figure 5: Ablation studies on FEMNIST. (a) and (b): Validation accuracy on FEMNIST when fixing
+_λ and varying q and L. Setting a small positive value for λ improves accuracy for almost all (q, L)_
+pairs; (c) Thanks to subvector grouping, our proposed quantizer can achieve an order of magnitude
+larger compression ratio as compared to vanilla product quantization scheme.
+
+each point (i.e., each (q, L) pair) in Figure 4, we found that fixing λ for all (q, L) pairs still leads
+to significant improvements. In Figure 5, we report the performance on FEMNIST for various
+choices of q and L. In particular, with q = 288, the accuracy improvement ranges from 3 − 72%.
+Furthermore, we found that a small λ ranging from 10[−][5] to 10[−][3] works well on all training tasks in
+our experiments. Setting a larger λ leads to near-zero quantization error. But the model may have
+poor performance, as it tends to output the same activation for all inputs and becomes meaningless.
+
+**Effectiveness of the Proposed Quantizer. In Section 4.1, we already show that stacking subvectors**
+into groups (i.e., setting R < q) is critical to reach a high compression ratio. But how does it affect
+the model performance? To answer the question, we run the proposed method with R = q > 1
+(vanilla PQ), and report the results in Figure 5c. Observe that the proposed method significantly
+improves the compression ratio with minimal loss of accuracy.
+
+6 CONCLUSION
+
+
+In this paper, we studied the problem of training large machine learning models in federated learning
+setting with resource-constrained clients. Due to limitations on storage and/or compute capacity,
+the clients cannot locally optimize the entire model. This prohibits the usage of previous federated
+learning algorithms. Split neural network is a promising approach to address this issue, as it only
+assigns the first few (small) layers of a neural network to the clients. However, the network splitting
+incurs additional communication. In order to make split neural network training to be communicationefficient, we propose an end-to-end training framework FEDLITE that can compress the additional
+communication by up to 490× with minimal loss of accuracy. The success of our method relies
+on a variant of product quantization scheme and a gradient correction technique. We perform
+theoretical analysis as well as extensive experiments on both vision and language tasks to validate its
+effectiveness.
+
+
+-----
+
+REFERENCES
+
+Saurabh Agarwal, Hongyi Wang, Shivaram Venkataraman, and Dimitris Papailiopoulos. On the
+utility of gradient compression in distributed training systems. arXiv preprint arXiv:2103.00543,
+2021.
+
+Rahul Agrawal, Archit Gupta, Yashoteja Prabhu, and Manik Varma. Multi-label learning with
+millions of labels: Recommending advertiser bid phrases for web pages. In Proceedings of the
+_22nd international conference on World Wide Web, pp. 13–24, 2013._
+
+Ting Chen, Lala Li, and Yizhou Sun. Differentiable product quantization for end-to-end embedding
+compression. In International Conference on Machine Learning, pp. 1617–1626. PMLR, 2020.
+
+Paul Covington, Jay Adams, and Emre Sargin. Deep neural networks for youtube recommendations.
+In Proceedings of the 10th ACM conference on recommender systems, pp. 191–198, 2016.
+
+Jeffrey Dean, Greg Corrado, Rajat Monga, Kai Chen, Matthieu Devin, Mark Mao, Andrew Senior,
+Paul Tucker, Ke Yang, Quoc V Le, et al. Large scale distributed deep networks. In Advances in
+_neural information processing systems, pp. 1223–1231, 2012._
+
+Enmao Diao, Jie Ding, and Vahid Tarokh. Heterofl: Computation and communication efficient federated learning for heterogeneous clients. In International Conference on Learning Representations,
+2020.
+
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and
+stochastic optimization. Journal of machine learning research, 12(7), 2011.
+
+Tiezheng Ge, Kaiming He, Qifa Ke, and Jian Sun. Optimized product quantization for approximate
+nearest neighbor search. In Proceedings of the IEEE Conference on Computer Vision and Pattern
+_Recognition, pp. 2946–2953, 2013a._
+
+Tiezheng Ge, Kaiming He, Qifa Ke, and Jian Sun. Optimized product quantization. IEEE transactions
+_on pattern analysis and machine intelligence, 36(4):744–755, 2013b._
+
+Vipul Gupta, Dhruv Choudhary, Ping Tak Peter Tang, Xiaohan Wei, Xing Wang, Yuzhen Huang,
+Arun Kejariwal, Kannan Ramchandran, and Michael W Mahoney. Fast distributed training of deep
+neural networks: Dynamic communication thresholding for model and data parallelism. arXiv
+_preprint arXiv:2010.08899, 2020._
+
+Dong-Jun Han, Hasnain Irshad Bhatti, Jungmoon Lee, and Jaekyun Moon. Accelerating federated
+learning with split learning on locally generated losses. ICML’21 workshop on federated learning
+_for User Privacy and Data Confidentiality, 2021._
+
+Chaoyang He, Murali Annavaram, and Salman Avestimehr. Group knowledge transfer: Federated
+learning of large cnns at the edge. Advances in Neural Information Processing Systems 33 (NeurIPS
+_2020), 2020._
+
+Samuel Horvath, Stefanos Laskaridis, Mario Almeida, Ilias Leontiadis, Stylianos I Venieris, and
+Nicholas D Lane. Fjord: Fair and accurate federated learning under heterogeneous targets with
+ordered dropout. arXiv preprint arXiv:2102.13451, 2021.
+
+Yangsibo Huang, Zhao Song, Kai Li, and Sanjeev Arora. Instahide: Instance-hiding schemes for
+private distributed learning. In International Conference on Machine Learning, pp. 4507–4518.
+PMLR, 2020.
+
+Herve Jegou, Matthijs Douze, and Cordelia Schmid. Product quantization for nearest neighbor search.
+_IEEE transactions on pattern analysis and machine intelligence, 33(1):117–128, 2010._
+
+Peter Kairouz, H Brendan McMahan, Brendan Avent, Aurelien Bellet, Mehdi Bennis, Arjun Nitin´
+Bhagoji, Keith Bonawitz, Zachary Charles, Graham Cormode, Rachel Cummings, et al. Advances
+and open problems in federated learning. arXiv preprint arXiv:1912.04977, 2019.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+_arXiv:1412.6980, 2014._
+
+
+-----
+
+K Krishna and M Narasimha Murty. Genetic k-means algorithm. IEEE Transactions on Systems,
+_Man, and Cybernetics, Part B (Cybernetics), 29(3):433–439, 1999._
+
+Alex Krizhevsky. One weird trick for parallelizing convolutional neural networks. arXiv preprint
+_arXiv:1404.5997, 2014._
+
+Omer Levy and Yoav Goldberg. Neural word embedding as implicit matrix factorization. Advances
+_in neural information processing systems, 27:2177–2185, 2014._
+
+Tian Li, Anit Kumar Sahu, Ameet Talwalkar, and Virginia Smith. Federated learning: Challenges,
+methods, and future directions. CoRR, 2019.
+
+H Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, et al. Communication-efficient
+learning of deep networks from decentralized data. In Proceedings of the 20th International
+_Conference on Artificial Intelligence and Statistics, 2017._
+
+Sashank Reddi, Zachary Charles, Manzil Zaheer, Zachary Garrett, Keith Rush, Jakub Konecnˇ y,`
+Sanjiv Kumar, and H Brendan McMahan. Adaptive federated optimization. arXiv preprint
+_arXiv:2003.00295, 2020._
+
+Amirhossein Reisizadeh, Aryan Mokhtari, Hamed Hassani, Ali Jadbabaie, and Ramtin Pedarsani.
+Fedpaq: A communication-efficient federated learning method with periodic averaging and quantization. arXiv preprint arXiv:1909.13014, 2019.
+
+Jae Hun Ro, Ananda Theertha Suresh, and Ke Wu. Fedjax: Federated learning simulation with jax.
+_arXiv preprint arXiv:2108.02117, 2021._
+
+Daniele Romanini, Adam James Hall, Pavlos Papadopoulos, Tom Titcombe, Abbas Ismail, Tudor
+Cebere, Robert Sandmann, Robin Roehm, and Michael A Hoeh. Pyvertical: A vertical federated
+learning framework for multi-headed splitnn. arXiv preprint arXiv:2104.00489, 2021.
+
+TFF. TensorFlow Federated: machine learning on decentralized data. [https://www.](https://www.tensorflow.org/federated)
+[tensorflow.org/federated, 2021. Accessed: 30 September 2021.](https://www.tensorflow.org/federated)
+
+Chandra Thapa, Mahawaga Arachchige Pathum Chamikara, and Seyit Camtepe. Splitfed: When
+federated learning meets split learning. arXiv preprint arXiv:2004.12088, 2020.
+
+Praneeth Vepakomma, Otkrist Gupta, Tristan Swedish, and Ramesh Raskar. Split learning for health:
+Distributed deep learning without sharing raw patient data. arXiv preprint arXiv:1812.00564,
+2018.
+
+Jianyu Wang, Zachary Charles, Zheng Xu, Gauri Joshi, H Brendan McMahan, Maruan Al-Shedivat,
+Galen Andrew, Salman Avestimehr, Katharine Daly, Deepesh Data, et al. A field guide to federated
+optimization. arXiv preprint arXiv:2107.06917, 2021.
+
+Kang Wei, Jun Li, Ming Ding, Chuan Ma, Howard H Yang, Farhad Farokhi, Shi Jin, Tony QS Quek,
+and H Vincent Poor. Federated learning with differential privacy: Algorithms and performance
+analysis. IEEE Transactions on Information Forensics and Security, 15:3454–3469, 2020.
+
+
+-----
+
+A DETAILED EXPLANATION FOR THE EFFECTS OF REGULARIZATION
+
+In Section 4.2, we argue that the client-side gradient is a gradient of the following surrogate loss
+function
+
+_s(wc) =_ **_zi_** **_zˆi_** + _[λ]_ **_zi_** (7)
+_∥_ _−_ _∥[2]_ 2 _[∥][z][i][ −]_ [e] _∥[2]_
+
+wherederivatives when computing the gradient. Here, we are going to provide a formal proof to support ˆzi ≜ **_zi −∇zi_** _[h][(][w]s[;][ e]zi)/2 and the quantized activation_ **_zi are fixed vectors that do not have_**
+this argument. Directly taking the derivative, we havee
+e
+_∂s(wc)_
+
+=2(zi **_zˆi)_** _[∂][z][i]_ + λ(zi **_zi)_** _[∂][z][i]_ (8)
+_∂wc_ _−_ _∂wc_ _−_ _∂wc_
+
+= ( **_zi_** _[h][(][w]s[;][ e]zi) + λ(zi_ **_zei))_** _[∂][z][i]_ _._ (9)
+_∇_ _−_ _∂wc_
+
+The above equation is exactly the same as the client-side gradient we defined in (4).e
+
+e
+
+B PROOF OF THEOREM 1
+
+B.1 PRELIMINARIES
+
+Without loss of generality, we define w = [wc; ws]. Then, the gradient of the original loss function
+can be decomposed into two parts:
+_F_ (w) = [ **_wc_** _F_ (w); **_ws_** _F_ (w)] (10)
+_∇_ _∇_ _∇_
+Similarly, we denote the stochastic gradients as follows:
+**_g(w) = [gc(w); gs(w)]_** (11)
+where E[gc(w)] = ∇wc _F_ (w) and E[gs(w)] = ∇ws _F_ (w). In addition, we assume the stochastic
+gradients with a mini-batch size of BS have bounded variance:
+
+
+E ∥g(w) −∇F (w)∥[2] _≤_ _BS [σ][2]_ _[.]_ (12)
+
+
+That is equivalent to
+
+
+E **_gc(w)_** **_wc_** _F_ (w) + E **_gs(w)_** **_ws_** _F_ (w) (13)
+_∥_ _−∇_ _∥[2]_ _∥_ _−∇_ _∥[2]_ _≤_ _BS[σ][2]_
+
+Then, we denote the client- and server-side gradients in the presence of the quantization layer as
+follows:
+**_gc(w) = gc(w) + δc(w)_** (14)
+**_gs(w) = gs(w) + δs(w)._** (15)
+The concrete expressions of δc and δes will be derived later.
+e
+
+B.2 MAIN PROOF
+
+With the above notation, according to the Lipschitz smoothness of the loss function, we have
+
+
+E[F (w[(][t][+1)])] − _F_ (w[(][t][)]) ≤− _α_ _∇wc_ _F_ (w[(][t][)]), E[gc(w[(][t][)])] _−_ _α_ _∇ws_ _F_ (w[(][t][)]), E[gs(w[(][t][)])]
+D 2 E D 2 E
+
++ _[α][2][L]_ **_gc(w[(][t][)])_** e+ _[α][2][L]_ **_gs(w[(][t][)])_** e (16)
+
+2 [E] 2 [E]
+
+For the first term on the right-hand side of (16), we have
+
+e e
+
+_−_ _∇wc_ _F_ (w[(][t][)]), ∇wc _F_ (w[(][t][)]) + E[δc(w[(][t][)])]
+D 2 2 E 2
+
+**_wc_** _F_ (w[(][t][)]) + [1] **_wc_** _F_ (w[(][t][)]) + _[ϵ]_ E[δc(w[(][t][)])] (17)
+_≤−_ _∇_ 2ϵ _∇_ 2
+
+2 2
+
+_≤−_ (1 − 2[1]ϵ [)] _∇wc_ _F_ (w[(][t][)]) + 2[ϵ] [E] **_δc(w[(][t][)])_** (18)
+
+2 2
+
+= − 2[1] _∇wc_ _F_ (w[(][t][)]) + [1]2 [E] **_δc(w[(][t][)])_** (19)
+
+
+-----
+
+where (17) uses Young’s Inequality, and ϵ > 0 is an arbitrary positive number. We set ϵ = 1 right
+after (17). For the third term on the right-hand side of (16), we have
+
+2 2 2
+E **_gc(w[(][t][)]) + δc(w[(][t][)])_** _≤2E_ **_gc(w[(][t][)])_** + 2E **_δc(w[(][t][)])_** (20)
+
+For the server-side gradients **_gs, we can repeat the same process. Combining them together, it follows_**
+that
+
+2 2
+
+e
+
+E[F (w[(][t][+1)])] _F_ (w[(][t][)]) _F_ (w[(][t][)]) + α[2]LE **_g(w[(][t][)])_**
+_−_ _≤−_ _[α]2_ _∇_
+
++ 2α[2]L(χ[2]c [+][ χ]s[2][) +][ α]2 [(][χ]c[2] [+][ χ]s[2][)] (21)
+
+
+where
+
+_χ[2]c_ [= max][ E][ ∥][δ][c][(][w][)][∥][2][,] (22)
+
+_χ[2]s_ [= max][ E][ ∥][δ][s][(][w][)][∥][2][ .] (23)
+
+Using the assumption that the stochastic gradient has bounded variance, we obtain that
+
+
+2
+
+E[F (w[(][t][+1)])] _F_ (w[(][t][)]) _α(_ [1] _F_ (w[(][t][)]) + _[α][2][Lσ][2]_
+_−_ _≤−_ 2 _[−]_ _[αL][)]_ _∇_ _BS_
+
++ 2α[2]L(χ[2]c [+][ χ]s[2][) +][ α]2 [(][χ]c[2] [+][ χ]s[2][)][.] (24)
+
+When αL ≤ 1/4, we have
+
+
+2
+
+E[F (w[(][t][+1)])] _F_ (w[(][t][)]) _F_ (w[(][t][)]) + _[α][2][Lσ][2]_ + 2α[2]L(χ[2]c [+][ χ]s[2][)]
+_−_ _≤−_ _[α]4_ _∇_ _BS_
+
++ _[α]2 [(][χ]c[2]_ [+][ χ]s[2][)][.] (25)
+
+With minor rearranging and taking the total expectation, it follows that
+
+
+2
+E _F_ (w[(][t][)]) + [4][αLσ][2] + (2 + 4αL)(χ[2]c [+][ χ]s[2][)][.] (26)
+_∇_ _≤_ [4][E][[][F] [(][w][(][t][)][)][ −]α _[F]_ [(][w][(][t][+1)][)]] _BS_
+
+Taking the average from t = 0 to t = T − 1, obtain that
+
+
+_T_ 1
+_−_ 2
+
+E _F_ (w[(][t][)]) + [4][αLσ][2] + (2 + 4αL)(χ[2]c [+][ χ]s[2][)][.] (27)
+_∇_ _≤_ [4(][F] [(][w][(0)]αT[)][ −] _[F]_ [(][w][∗][))] _BS_
+_t=0_
+
+X
+
+_BS/T_, then
+
+p
+
+
+If α =
+
+
+_T_ 1
+
+1 _−_ 2 4√BSL
+
+_T_ _t=0_ E _∇F_ (w[(][t][)]) _≤_ [4(][F] [(][w]√[(0)]BST[)][ −] _[F]_ [(][w][∗][))] + √[4]BST[Lσ][2] + _√T_ + 2! (χ[2]c [+][ χ]s[2][)][.][ (28)]
+
+X
+
+Next we are going to show how χc, χs relate to the quantization error. Suppose that _i_ denotes the
+_B[(][t][)]_
+randomly sampled mini-batch on client i. Then according to the definition of server-side gradient, we
+have
+
+
+_∂h(ws; Q(u(wc; ξ)))_
+
+_∂ws_
+
+
+(29)
+
+_._
+
+
+
+
+(30)
+
+
+**_gs(w) =_**
+
+_|S_ [(][t][)]|
+
+e
+
+
+_i_
+_|B[(][t][)][|]_
+
+
+_i∈S_ [(][t][)]
+
+
+_ξ_ _i_
+_∈B[(][t][)]_
+
+
+_∂h(ws; Q(u(wc; ξ)))_
+
+_∂ws_ _−_ _[∂h][(][w][s]∂[;][ u]w[(]s[w][c][;][ ξ][))]_
+
+
+
+
+=gs(w) +
+
+
+_|S_ [(][t][)]|
+
+
+_i_
+_|B[(][t][)][|]_
+
+
+_i∈S_ [(][t][)]
+
+
+_ξ_ _i_
+_∈B[(][t][)]_
+
+
+-----
+
+where Q represents the quantizer and maps the original activation to its quantized version. As a
+consequence,
+
+
+_∂h(ws; Q(u(wc; ξ)))_
+
+_∂ws_ _−_ _[∂h][(][w][s]∂[;][ u]w[(]s[w][c][;][ ξ][))]_
+
+
+
+
+(31)
+
+(32)
+
+
+**_δs(w) =_**
+
+_|S_ [(][t][)]|
+
+
+_i_
+_|B[(][t][)][|]_
+
+
+_i∈S_ [(][t][)]
+
+
+_ξ_ _i_
+_∈B[(][t][)]_
+
+
+and
+
+
+_∂h(ws; Q(u(wc; ξ)))_
+
+_∂ws_ _−_ _[∂h][(][w][s]∂[;][ u]w[(]s[w][c][;][ ξ][))]_
+
+
+**_δs(w)_** max
+_∥_ _∥[2]_ _≤_ _ξ∈Di,i∈I_
+
+
+For the ease of writing, we denote z = u(wc; ξ) and **_z = Q(u(wc; ξ)). Using mean value theorem,_**
+we have
+
+2
+
+_∂[2]h( ews; u)_
+**_δs(w)_** max (z **_z)_** (33)
+_∥_ _∥[2]_ _≤_ _∂u∂ws_ _−_
+
+Λ[2]1[κ][2] (34)
+_≤_ e
+
+where u = tz + (1 − _t)z for some 0 < t < 1, constant Λ1 is the largest eigenvalue of matrix_
+_∂[2]h(ws; u)/∂u∂ws, and κ = max ∥z −_ **_z∥_** denotes the maximal quantization error.
+
+Using the same technique, for the client-side gradients, we havee
+
+e
+
+1 1 _∂h(ws;_ (u(wc; ξ))) _∂u(wc; ξ)_
+**_δc(w) =_** _Q_
+
+ _∂_ (u(wc; ξ)) _−_ _[∂h][(]∂u[w][s]([;]w[ u]c[(];[w] ξ[c]))[;][ ξ][))]_ _∂wc_ 
+
+_|S_ [(][t][)]| _i∈SX[(][t][)]_  _|Bi[(][t][)][|]_ _ξ∈BXi[(][t][)]_  _Q_  
+
+ 
+
+
+_λ(u(wc; ξ)_ (u(wc; ξ))) _[∂u][(][w][c][;][ ξ][)]_
+_−Q_ _∂wc_
+
+
+_._ (35)
+
+
+
+
+_|S_ [(][t][)]|
+
+
+_i_
+_|B[(][t][)][|]_
+
+
+_i∈S_ [(][t][)]
+
+
+_ξ_ _i_
+_∈B[(][t][)]_
+
+
+Accordingly,
+
+
+2
+
+_∂h(ws;_ **_z)_** _∂z_
+
+**_δs(w)_** max + λ(z **_z)_** (36)
+_∥_ _∥[2]_ _≤_ _∂z_ _−_ _[∂h][(]∂[w]z[s][;][ z][)]_ _−_ _∂wc_
+
+ 
+
+2 e 2
+_∂_ _h(ws; u)_ e
+
+= max _λ_ (z **_z)_** _[∂][z]_ (37)
+
+e
+
+_∂u[2]_ _−_ _−_ _∂wc_
+
+ 
+
+(Λ2 _λ)[2]Λ[2]3[κ][2]_ (38)
+_≤_ _−_ e
+
+where Λ2 and Λ3 are the largest eigenvalues of matrices ∂[2]h(ws; u)/∂u[2] and ∂z/∂wc, respectively.
+Substituting the above bounds (34) and (38) on δc, δs into (28), we have
+
+_T_ 1
+
+1 _−_ 2
+
+_T_ _t=0_ E _∇F_ (w[(][t][)]) _≤_ [4(][F] [(][w]√[(0)]BST[)][ −] _[F]_ [(][w][∗][))] + √[4]BST[Lσ][2]
+
+X
+
+4√BS
+
++ + 2 (Λ[2]1 [+ (Λ][2] 3[) max][ ∥][z][ −] **_z[e]_** _._ (39)
+
+_√T_ ! _[−]_ _[λ][)][2][Λ][2]_ _∥[2]_
+
+Here we complete the proof.
+
+C MORE EXPERIMENTAL DETAILS
+
+C.1 ADDITIONAL RESULTS
+
+We additionally report the training curves of FedAvg, FedLite and SplitFed on EMNIST in Figure 6.
+It can be observed that in terms of communication cost, FedLite is significantly faster than other two
+baselines. We also need to highlight that FedLite and SplitFed have lower memory and computation
+requirements on clients than FedAvg.
+
+
+-----
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+
+10[1] 10[2] 10[3] 10[4]
+
+|Col1|Col2|Col3|Col4|Col5|Col6|
+|---|---|---|---|---|---|
+|||||||
+|||||||
+|||||s||
+||||Our|s||
+||||Fed Spli|Avg tFed||
+|||||||
+
+
+Communication size (MB)
+
+
+Figure 6: Training curves for different algorithms on FEMNIST. Although split learning-based
+approaches (SplitFed and ours FedLite) communicate at every iteration, they communicate much less
+than FedAvg.
+
+C.2 HYPER-PARAMETER CHOICES
+
+
+Here, we summarize all the hyper-parameters on three training tasks.
+
+FEMNIST
+
+
+
+_• Best learning rate: 10[−][1][.][5]_
+
+_• Optimizer: SGD_
+
+_• Mini-batch size per client B: 20_
+
+_• Activation size d: 9216_
+
+_• Number of clients per iteration: 10_
+
+_• Ranges of q: {4608, 2304, 1152, 576, 288, 144}_
+
+_• Ranges of L: {32, 16, 8, 4, 2}_
+
+_• Ranges of λ: {0, 10[−][5], 5 × 10[−][5], 10[−][4], 5 × 10[−][4]}_
+
+_• Client-side model: Same as the first five layers of the neural network used in (Reddi et al.,_
+
+2020): Conv2d + Conv2d + MaxPool2d + Dropout + Flatten. Model size: 18, 816 × 64 bits.
+
+_• Server-side model: Same as the last three layers of the neural network used in (Reddi et al.,_
+
+2020): Dense + Dropout + Dense. Model size: 1, 187, 774 × 64 bits.
+
+
+SO NWP
+
+_• Best learning rate: 0.01_
+
+_• Optimizer: Adam (Kingma & Ba, 2014)_
+
+_• Mini-batch size per client B: 128. Each sample contains 30 words. So the effective batch_
+size is 3840.
+
+_• Activation size d: 96_
+
+_• Number of clients per iteration: 50_
+
+_• Ranges of q: {48, 24, 12, 6, 3}_
+
+_• Ranges of L: {960, 480, 240, 120, 60, 30}_
+
+_• Ranges of λ: {0, 5 × 10[−][4], 10[−][3], 5 × 10[−][3], 10[−][2]}_
+
+_• Client-side model: Same as the first three layers of the neural network used in (Reddi et al.,_
+
+2020): Embedding + LSTM + Dense. Model size: 3, 680, 360 × 64 bits.
+
+_• Server-side model: Same as the last layer of the neural network used in (Reddi et al., 2020):_
+Dense. Model size: 970, 388 × 64 bits.
+
+
+SO Tag
+
+_• Best learning rate: 10[−][0][.][5]_
+
+
+-----
+
+_• Optimizer: AdaGrad (Duchi et al., 2011)_
+
+_• Mini-batch size per client B: 100._
+
+_• Activation size d: 2000_
+
+_• Number of clients per iteration: 10_
+
+_• Ranges of q: {1000, 500, 250, 200, 125, 25}_
+
+_• Ranges of L: {100, 60, 40, 20, 10}_
+
+_• Ranges of λ: {0, 10[−][3], 5 × 10[−][3], 10[−][2], 5 × 10[−][2]}_
+
+_• Client-side model: One dense layer. Model size: 5000 × 2000 × 64 bits._
+
+_• Server-side model: One dense layer. Model size: 2000 × 1000 × 64 bits._
+
+
+-----
+
