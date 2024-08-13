@@ -79,11 +79,13 @@ python data/text8/prepare.py
 
 ```
 # Set up NanoGPT baseline run
+# NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
 ```
+# NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
 ```
 
