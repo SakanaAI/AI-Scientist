@@ -159,7 +159,7 @@ python iclr_analysis.py --num_reviews 500  --batch_size 100 --num_fs_examples 1 
 
 ## Making your own Template
 
-If there is an area of study you would like the AI Scientist to explore, it should be very easy to create your own templates. In general, follow the structure of the existing templates, which consists of:
+If there is an area of study you would like **The AI Scientist** to explore, it should be very easy to create your own templates. In general, follow the structure of the existing templates, which consists of:
 
 - `experiment.py` -- This is a single file where the 'meat' of the content is. It takes in an argument for `out_dir`, which is where it should create the folder and save the relevant information from the run.
 - `plot.py` -- This should take in the information from the `run` folders and create plots. The code should be clear and easy to edit.
@@ -177,9 +177,9 @@ The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tan
 
 The Grokking template used code from [Sea-Snell/grokking](https://github.com/Sea-Snell/grokking) and [danielmamay/grokking](https://github.com/danielmamay/grokking).
 
-## Citing `The AI-Scientist` ✏️
+## Citing **The AI Scientist** ✏️
 
-If you use `The AI-Scientist` in your research, please cite it as follows:
+If you use **The AI Scientist** in your research, please cite it as follows:
 
 ```
 @article{lu2024aiscientist,
