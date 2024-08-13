@@ -528,6 +528,7 @@ if __name__ == "__main__":
             "gpt-4o-2024-05-13",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
+            "llama3-70b-8192",
         ],
         help="Model to use for AI Scientist.",
     )
@@ -538,6 +539,12 @@ if __name__ == "__main__":
         print(f"Using Anthropic API with model {args.model}.")
         client_model = "claude-3-5-sonnet-20240620"
         client = anthropic.Anthropic()
+    elif args.model == "llama3-70b-8192":
+        from groq import Groq
+        print(f"Using Groq API with {args.model}.")
+        client_model = "llama3-70b-8192"
+        client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    
     elif args.model == "gpt-4o-2024-05-13" or args.model == "hybrid":
         import openai
 
@@ -586,6 +593,8 @@ if __name__ == "__main__":
         main_model = Model("deepseek/deepseek-coder")
     elif args.model == "llama3.1-405b":
         main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+    elif args.model == "llama3-70b-8192":
+        main_model = Model("groq/llama3-70b-8192")
     else:
         main_model = Model(model)
     coder = Coder.create(

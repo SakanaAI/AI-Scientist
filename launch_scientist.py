@@ -25,7 +25,8 @@ def print_time():
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Run AI scientist experiments")
+    parser = argparse.ArgumentParser(
+        description="Run AI scientist experiments")
     parser.add_argument(
         "--skip-idea-generation",
         action="store_true",
@@ -47,7 +48,10 @@ def parse_arguments():
         "--model",
         type=str,
         default="claude-3-5-sonnet-20240620",
-        choices=["claude-3-5-sonnet-20240620", "gpt-4o-2024-05-13", "deepseek-coder-v2-0724", "llama3.1-405b"],
+        choices=[
+            "claude-3-5-sonnet-20240620", "gpt-4o-2024-05-13",
+            "deepseek-coder-v2-0724", "llama3.1-405b", "llama3-70b-8192"
+        ],
         help="Model to use for AI Scientist.",
     )
     parser.add_argument(
@@ -72,7 +76,8 @@ def parse_arguments():
         "--gpus",
         type=str,
         default=None,
-        help="Comma-separated list of GPU IDs to use (e.g., '0,1,2'). If not specified, all available GPUs will be used.",
+        help=
+        "Comma-separated list of GPU IDs to use (e.g., '0,1,2'). If not specified, all available GPUs will be used.",
     )
     parser.add_argument(
         "--num-ideas",
@@ -89,23 +94,36 @@ def get_available_gpus(gpu_ids=None):
     return list(range(torch.cuda.device_count()))
 
 
-def worker(queue, base_dir, results_dir, model, client, client_model, writeup, improvement, gpu_id):
+def worker(queue, base_dir, results_dir, model, client, client_model, writeup,
+           improvement, gpu_id):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     print(f"Worker {gpu_id} started.")
     while True:
         idea = queue.get()
         if idea is None:
             break
-        success = do_idea(
-            base_dir, results_dir, idea, model, client, client_model, writeup, improvement, log_file=True
-        )
+        success = do_idea(base_dir,
+                          results_dir,
+                          idea,
+                          model,
+                          client,
+                          client_model,
+                          writeup,
+                          improvement,
+                          log_file=True)
         print(f"Completed idea: {idea['Name']}, Success: {success}")
     print(f"Worker {gpu_id} finished.")
 
 
-def do_idea(
-        base_dir, results_dir, idea, model, client, client_model, writeup, improvement, log_file=False
-):
+def do_idea(base_dir,
+            results_dir,
+            idea,
+            model,
+            client,
+            client_model,
+            writeup,
+            improvement,
+            log_file=False):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     idea_name = f"{timestamp}_{idea['Name']}"
@@ -137,23 +155,30 @@ def do_idea(
         print(f"*Starting idea: {idea_name}*")
         ## PERFORM EXPERIMENTS
         fnames = [exp_file, vis_file, notes]
-        io = InputOutput(yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
+        io = InputOutput(
+            yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
         if model == "hybrid":
             main_model = Model("claude-3-5-sonnet-20240620")
         elif model == "deepseek-coder-v2-0724":
             main_model = Model("deepseek/deepseek-coder")
         elif model == "llama3.1-405b":
             main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        elif model == "llama3-70b-8192":
+            main_model = Model("llama3-70b-8192")
         else:
             main_model = Model(model)
-        coder = Coder.create(
-            main_model=main_model, fnames=fnames, io=io, stream=False, use_git=False, edit_format="diff"
-        )
+        coder = Coder.create(main_model=main_model,
+                             fnames=fnames,
+                             io=io,
+                             stream=False,
+                             use_git=False,
+                             edit_format="diff")
 
         print_time()
         print(f"*Starting Experiments*")
         try:
-            success = perform_experiments(idea, folder_name, coder, baseline_results)
+            success = perform_experiments(idea, folder_name, coder,
+                                          baseline_results)
         except Exception as e:
             print(f"Error during experiments: {e}")
             print(f"Experiments failed for idea {idea_name}")
@@ -174,12 +199,18 @@ def do_idea(
             elif model == "deepseek-coder-v2-0724":
                 main_model = Model("deepseek/deepseek-coder")
             elif model == "llama3.1-405b":
-                main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+                main_model = Model(
+                    "openrouter/meta-llama/llama-3.1-405b-instruct")
+            elif model == "llama3-70b-8192":
+                main_model = Model("groq/llama3-70b-8192")
             else:
                 main_model = Model(model)
-            coder = Coder.create(
-                main_model=main_model, fnames=fnames, io=io, stream=False, use_git=False, edit_format="diff"
-            )
+            coder = Coder.create(main_model=main_model,
+                                 fnames=fnames,
+                                 io=io,
+                                 stream=False,
+                                 use_git=False,
+                                 edit_format="diff")
             try:
                 perform_writeup(idea, folder_name, coder, client, client_model)
             except Exception as e:
@@ -217,8 +248,10 @@ def do_idea(
             print(f"*Starting Improvement*")
             try:
                 perform_improvement(review, coder)
-                generate_latex(coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf")
-                paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
+                generate_latex(coder, folder_name,
+                               f"{folder_name}/{idea['Name']}_improved.pdf")
+                paper_text = load_paper(
+                    f"{folder_name}/{idea['Name']}_improved.pdf")
                 review = perform_review(
                     paper_text,
                     model="gpt-4o-2024-05-13",
@@ -229,7 +262,8 @@ def do_idea(
                     temperature=0.1,
                 )
                 # Store the review in separate review.txt file
-                with open(osp.join(folder_name, "review_improved.txt"), "w") as f:
+                with open(osp.join(folder_name, "review_improved.txt"),
+                          "w") as f:
                     f.write(json.dumps(review))
             except Exception as e:
                 print(f"Failed to perform improvement: {e}")
@@ -277,19 +311,20 @@ if __name__ == "__main__":
 
         print(f"Using OpenAI API with {args.model}.")
         client_model = "deepseek-coder-v2-0724"
-        client = openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url="https://api.deepseek.com"
-        )
+        client = openai.OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"],
+                               base_url="https://api.deepseek.com")
     elif args.model == "llama3.1-405b":
         import openai
 
         print(f"Using OpenAI API with {args.model}.")
         client_model = "meta-llama/llama-3.1-405b-instruct"
-        client = openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1"
-        )
+        client = openai.OpenAI(api_key=os.environ["OPENROUTER_API_KEY"],
+                               base_url="https://openrouter.ai/api/v1")
+    elif args.model == "llama3-70b-8192":
+        from groq import Groq
+        print(f"Using Groq API with {args.model}.")
+        client_model = "llama3-70b-8192"
+        client = Groq(api_key=os.environ["GROQ_API_KEY"])
     else:
         raise ValueError(f"Model {args.model} not supported.")
 
@@ -325,20 +360,18 @@ if __name__ == "__main__":
         processes = []
         for i in range(args.parallel):
             gpu_id = available_gpus[i % len(available_gpus)]
-            p = multiprocessing.Process(
-                target=worker,
-                args=(
-                    queue,
-                    base_dir,
-                    results_dir,
-                    args.model,
-                    client,
-                    client_model,
-                    args.writeup,
-                    args.improvement,
-                    gpu_id,
-                )
-            )
+            p = multiprocessing.Process(target=worker,
+                                        args=(
+                                            queue,
+                                            base_dir,
+                                            results_dir,
+                                            args.model,
+                                            client,
+                                            client_model,
+                                            args.writeup,
+                                            args.improvement,
+                                            gpu_id,
+                                        ))
             p.start()
             time.sleep(150)
             processes.append(p)

@@ -43,7 +43,7 @@ conda create -n ai_scientist python=3.11
 conda activate ai_scientist
 
 # LLM APIs
-pip install anthropic aider-chat backoff openai
+pip install anthropic aider-chat backoff openai groq
 # Viz
 pip install matplotlib pypdf pymupdf4llm
 # Install pdflatex
@@ -55,7 +55,7 @@ pip install torch numpy transformers datasets tiktoken wandb tqdm
 
 We use the following environment variables for the different API providers for different models:
 
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`
 
 Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher throughput [if you have one](https://www.semanticscholar.org/product/api), though in principle it should work without it.
 
@@ -115,6 +115,7 @@ conda activate ai_scientist
 # Run the paper generation.
 python launch_scientist.py --model "gpt-4o-2024-05-13" --experiment nanoGPT_lite --num-ideas 2
 python launch_scientist.py --model "claude-3-5-sonnet-20240620" --experiment nanoGPT_lite --num-ideas 2
+python launch_scientist.py --model "llama3-70b-8192" --experiment nanoGPT_lite --num-ideas 2
 ```
 
 ## Getting an LLM Generated Paper Review
