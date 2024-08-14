@@ -74,7 +74,7 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif model == "claude-3-5-sonnet-20240620":
+    elif "claude" in model:
         content, new_msg_history = [], []
         for _ in range(n_responses):
             c, hist = get_response_from_llm(
