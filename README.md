@@ -125,7 +125,7 @@ python launch_scientist.py --model "claude-3-5-sonnet-20240620" --experiment nan
 
 ```python
 import openai
-from ai_scientist.perform_review import load_paper, get_llm_review
+from ai_scientist.perform_review import load_paper, perform_review
 
 client = openai.OpenAI()
 model = "gpt-4o-2024-05-13"
@@ -133,7 +133,7 @@ model = "gpt-4o-2024-05-13"
 # Load paper from pdf file (raw text)
 paper_txt = load_paper("report.pdf")
 # Get the review dict of the review
-review = get_llm_review(
+review = perform_review(
     paper_txt,
     model,
     client,
