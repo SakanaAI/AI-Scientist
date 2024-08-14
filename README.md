@@ -212,4 +212,8 @@ The AI Scientist finishes an idea with a success rate that depends on both the t
 ### What is the cost of each idea generated?
 Typically less than $15 per paper with Claude Sonnet 3.5.
 
+### How do I change the base conference format associated with the write-ups?
+Change the base `template.tex` files contained within each template.
 
+### How do I run The AI Scientist for different subject fields?
+Please refer to the instructions for different templates. In this current iteration, this is restricted to ideas that can be expressed in code. However, lifting this restriction would represent exciting future work! :)
