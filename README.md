@@ -203,6 +203,8 @@ If you use **The AI Scientist** in your research, please cite it as follows:
 
 ## FAQ
 
+We recommend reading our paper in the first instance for any questions you have on The AI Scientist.
+
 ### Why am I missing files when running The AI Scientist?
 Make sure you have completed all the setup and preparation steps before the main experiment script.
 
