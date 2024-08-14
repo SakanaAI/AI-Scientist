@@ -42,6 +42,11 @@ def parse_arguments():
             "gpt-4o-2024-05-13",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
+            # Anthropic Claude models via Amazon Bedrock
+            "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+            "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            "bedrock/anthropic.claude-3-opus-20240229-v1:0"
         ],
         help="Model to use for AI Scientist.",
     )
