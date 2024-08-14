@@ -42,6 +42,7 @@ We further provide all runs and data from our paper [here](https://drive.google.
 4. [Making your own Template](#making-your-own-template)
 5. [Template Resources](#template-resources)
 6. [Citing The AI Scientist](#citing-the-ai-scientist)
+7. [Frequently Asked Questions](#faq)
 
 ## Requirements
 
@@ -185,6 +186,8 @@ The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tan
 
 The Grokking template used code from [Sea-Snell/grokking](https://github.com/Sea-Snell/grokking) and [danielmamay/grokking](https://github.com/danielmamay/grokking).
 
+We would like to thank the developers of the open-source models and packages for their contributions and for making their work available.
+
 ## Citing The AI Scientist
 
 If you use **The AI Scientist** in your research, please cite it as follows:
@@ -198,4 +201,15 @@ If you use **The AI Scientist** in your research, please cite it as follows:
 }
 ```
 
-We would like to thank the developers of the open-source models and packages for their contributions and for making their work available.
+## FAQ
+
+### Why am I missing files when running The AI Scientist?
+Make sure you have completed all the setup and preparation steps before the main experiment script.
+
+### Why has a PDF not been generated?
+The AI Scientist finishes an idea with a success rate that depends on both the template, the base foundation model, and the complexity of the idea. We advise referring to our main paper. The highest success rates are observed with Claude Sonnet 3.5.
+
+### What is the cost of each idea generated?
+Typically less than $15 per paper with Claude Sonnet 3.5.
+
+
