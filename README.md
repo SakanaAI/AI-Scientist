@@ -34,6 +34,15 @@ We further provide all runs and data from our paper [here](https://drive.google.
   <a href="https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/adaptive_dual_scale_denoising/adaptive_dual_scale_denoising.pdf"><img src="https://github.com/SakanaAI/AI-Scientist/blob/main/docs/anim-ai-scientist.gif" alt="Adaptive Dual Scale Denoising" width="80%" />
 </p>
 
+## Table of Contents
+
+1. [Requirements](#requirements)
+2. [Run AI Scientist Paper Generation Experiments](#run-ai-scientist-paper-generation-experiments)
+3. [Getting an LLM Generated Paper Review](#getting-an-llm-generated-paper-review)
+4. [Making your own Template](#making-your-own-template)
+5. [Template Resources](#template-resources)
+6. [Citing The AI Scientist](#citing-the-ai-scientist)
+
 ## Requirements
 
 ### Installation
@@ -176,7 +185,7 @@ The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tan
 
 The Grokking template used code from [Sea-Snell/grokking](https://github.com/Sea-Snell/grokking) and [danielmamay/grokking](https://github.com/danielmamay/grokking).
 
-## Citing **The AI Scientist** ✏️
+## Citing The AI Scientist
 
 If you use **The AI Scientist** in your research, please cite it as follows:
 
