@@ -194,8 +194,8 @@ If you use **The AI Scientist** in your research, please cite it as follows:
 
 ```
 @article{lu2024aiscientist,
-  title={The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery},
-  author={Chris Lu and Cong Lu and Robert Tjarko Lange and Jakob Foerster and Jeff Clune and David Ha},
+  title={The {AI} {S}cientist: Towards Fully Automated Open-Ended Scientific Discovery},
+  author={Lu, Chris and Lu, Cong and Lange, Robert Tjarko and Foerster, Jakob and Clune, Jeff and Ha, David},
   journal={arXiv preprint arXiv:2408.06292},
   year={2024}
 }
@@ -212,7 +212,7 @@ Make sure you have completed all the setup and preparation steps before the main
 The AI Scientist finishes an idea with a success rate that depends on both the template, the base foundation model, and the complexity of the idea. We advise referring to our main paper. The highest success rates are observed with Claude Sonnet 3.5.
 
 ### What is the cost of each idea generated?
-Typically less than $15 per paper with Claude Sonnet 3.5.
+Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek coder for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
 
 ### How do I change the base conference format associated with the write-ups?
 Change the base `template.tex` files contained within each template.
