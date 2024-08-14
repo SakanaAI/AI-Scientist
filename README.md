@@ -192,7 +192,7 @@ If you use **The AI Scientist** in your research, please cite it as follows:
 ```
 @article{lu2024aiscientist,
   title={The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery},
-  author={Lu, Chris and Lu, Cong and Lange, Robert and Foerster, Jakob N and Clune, Jeff and Ha, David},
+  author={Chris Lu and Cong Lu and Robert Tjarko Lange and Jakob Foerster and Jeff Clune and David Ha},
   journal={arXiv preprint arXiv:2408.06292},
   year={2024}
 }
