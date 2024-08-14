@@ -212,7 +212,7 @@ Make sure you have completed all the setup and preparation steps before the main
 The AI Scientist finishes an idea with a success rate that depends on both the template, the base foundation model, and the complexity of the idea. We advise referring to our main paper. The highest success rates are observed with Claude Sonnet 3.5.
 
 ### What is the cost of each idea generated?
-Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek coder for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
+Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek Coder V2 for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
 
 ### How do I change the base conference format associated with the write-ups?
 Change the base `template.tex` files contained within each template.
