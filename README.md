@@ -67,7 +67,7 @@ We use the following environment variables for the different API providers for d
 
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`
 
-For Claude models provided by [Vertex AI Model Garden](https://cloud.google.com/model-garden?hl=en), please set up a valid authentication for a [Google Cloud project](https://cloud.google.com/vertex-ai/docs/authentication):
+For Claude models provided by [Vertex AI Model Garden](https://cloud.google.com/model-garden?hl=en), please set up a valid authentication for a [Google Cloud project](https://cloud.google.com/vertex-ai/docs/authentication).
 
 Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher throughput [if you have one](https://www.semanticscholar.org/product/api), though in principle it should work without it.
 
