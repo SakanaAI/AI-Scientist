@@ -490,6 +490,14 @@ if __name__ == "__main__":
         print(f"Using Anthropic API with model {args.model}.")
         client_model = "claude-3-5-sonnet-20240620"
         client = anthropic.Anthropic()
+    elif args.model.startswith("vertexai") and "claude" in args.model:
+        import anthropic
+
+        # Expects: vertexai/<MODEL_ID>
+        client_model = args.model.split("/")[-1]
+
+        print(f"Using Vertex AI with model {client_model}.")
+        client = anthropic.AnthropicVertex()
     elif args.model == "gpt-4o-2024-05-13" or args.model == "hybrid":
         import openai
 

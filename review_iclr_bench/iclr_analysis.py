@@ -241,6 +241,12 @@ def review_single_paper(
         import anthropic
 
         client = anthropic.Anthropic()
+    elif args.model.startswith("vertexai") and "claude" in args.model:
+        import anthropic
+
+        # Expects: vertexai/<MODEL_ID>
+        model = args.model.split("/")[-1]
+        client = anthropic.AnthropicVertex()
     elif model in [
         "gpt-4o-2024-05-13",
         "gpt-4o-mini-2024-07-18",
