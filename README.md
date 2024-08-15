@@ -208,8 +208,9 @@ We recommend reading our paper in the first instance for any questions you have 
 ### Why am I missing files when running The AI Scientist?
 Make sure you have completed all the setup and preparation steps before the main experiment script.
 
-### Why has a PDF not been generated?
+### Why has a PDF or a review not been generated?
 The AI Scientist finishes an idea with a success rate that depends on both the template, the base foundation model, and the complexity of the idea. We advise referring to our main paper. The highest success rates are observed with Claude Sonnet 3.5.
+Reviews are best done with GPT-4o, all other models have issues with positivity bias or failure to conform to required outputs.
 
 ### What is the cost of each idea generated?
 Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek Coder V2 for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
