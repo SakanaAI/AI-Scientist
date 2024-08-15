@@ -52,15 +52,11 @@ We further provide all runs and data from our paper [here](https://drive.google.
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
 
-# LLM APIs
-pip install anthropic aider-chat backoff openai
-# Viz
-pip install matplotlib pypdf pymupdf4llm
+# Install pypi requirements
+pip install -r requirements.txt
+
 # Install pdflatex
 sudo apt-get install texlive-full
-
-# Common Requirements
-pip install torch numpy transformers datasets tiktoken wandb tqdm
 ```
 
 We use the following environment variables for the different API providers for different models:
@@ -71,7 +67,7 @@ Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for h
 
 Be sure to provide the key for the model used for your runs, e.g.
 
-```
+```bash
 export OPENAI_API_KEY="YOUR KEY HERE"
 export S2_API_KEY="YOUR KEY HERE"
 ```
@@ -87,14 +83,15 @@ python data/text8/prepare.py
 
 #### Create baseline runs (machine dependent)
 
-```
+```bash
 # Set up NanoGPT baseline run
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
-```
+
+```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
 ```
@@ -102,12 +99,6 @@ cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot
 ### Setup 2D Diffusion
 
 ```bash
-# Set up 2D Diffusion
-git clone https://github.com/gregversteeg/NPEET.git
-cd NPEET
-pip install .
-pip install scikit-learn
-
 # Set up 2D Diffusion baseline run
 cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot.py
 ```
@@ -192,7 +183,7 @@ We would like to thank the developers of the open-source models and packages for
 
 If you use **The AI Scientist** in your research, please cite it as follows:
 
-```
+```bibtex
 @article{lu2024aiscientist,
   title={The {AI} {S}cientist: Towards Fully Automated Open-Ended Scientific Discovery},
   author={Lu, Chris and Lu, Cong and Lange, Robert Tjarko and Foerster, Jakob and Clune, Jeff and Ha, David},
