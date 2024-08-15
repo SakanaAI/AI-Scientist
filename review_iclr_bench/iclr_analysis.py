@@ -241,10 +241,10 @@ def review_single_paper(
         import anthropic
 
         client = anthropic.Anthropic()
-    elif args.model.startswith("vertexai") and "claude" in args.model:
+    elif args.model.startswith("vertex_ai") and "claude" in args.model:
         import anthropic
 
-        # Expects: vertexai/<MODEL_ID>
+        # Expects: vertex_ai/<MODEL_ID>
         model = args.model.split("/")[-1]
         client = anthropic.AnthropicVertex()
     elif model in [

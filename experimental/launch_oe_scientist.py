@@ -331,10 +331,10 @@ if __name__ == "__main__":
         print(f"Using OpenAI API with model {args.model}.")
         client_model = "gpt-4o-2024-05-13"
         client = openai.OpenAI()
-    elif args.model.startswith("vertexai") and "claude" in args.model:
+    elif args.model.startswith("vertex_ai") and "claude" in args.model:
         import anthropic
 
-        # Expects: vertexai/<MODEL_ID>
+        # Expects: vertex_ai/<MODEL_ID>
         client_model = args.model.split("/")[-1]
 
         print(f"Using Vertex AI with model {client_model}.")
