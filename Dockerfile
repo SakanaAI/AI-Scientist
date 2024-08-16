@@ -1,5 +1,5 @@
-# Use texlive/texlive as the base image which already has TeX Live installed
-FROM texlive/texlive:latest
+# Use Python 3.11 as the base image
+FROM python:3.11-bullseye
 
 # Avoid prompts from apt
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,9 +7,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies including texlive-full
 RUN apt-get update && apt-get install -y \
     wget \
+    git \
     build-essential \
     libssl-dev \
     zlib1g-dev \
@@ -23,25 +24,14 @@ RUN apt-get update && apt-get install -y \
     libxmlsec1-dev \
     libffi-dev \
     liblzma-dev \
-    git \
+    texlive-full \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and install Python 3.11
-RUN wget https://www.python.org/ftp/python/3.11.4/Python-3.11.4.tgz \
-    && tar xzf Python-3.11.4.tgz \
-    && cd Python-3.11.4 \
-    && ./configure --enable-optimizations \
-    && make altinstall \
-    && cd .. \
-    && rm -rf Python-3.11.4 Python-3.11.4.tgz
-
-# Update alternatives to set Python 3.11 as the default
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/pip3 pip3 /usr/local/bin/pip3.11 1
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
 
 # Install Python packages
-RUN pip3 install --no-cache-dir --upgrade pip \
-    && pip3 install --no-cache-dir \
+RUN pip install --no-cache-dir \
     anthropic \
     aider-chat \
     backoff \
@@ -57,13 +47,12 @@ RUN pip3 install --no-cache-dir --upgrade pip \
     wandb \
     tqdm \
     scikit-learn \
-    python-dotenv \
     einops
 
 # Clone and install NPEET
 RUN git clone https://github.com/gregversteeg/NPEET.git \
     && cd NPEET \
-    && pip3 install .
+    && pip install .
 
 # Clone the AI-Scientist repository
 RUN git clone https://github.com/SakanaAI/AI-Scientist.git
@@ -72,9 +61,16 @@ RUN git clone https://github.com/SakanaAI/AI-Scientist.git
 WORKDIR /app/AI-Scientist
 
 # Prepare NanoGPT data
-RUN python3 data/enwik8/prepare.py \
-    && python3 data/shakespeare_char/prepare.py \
-    && python3 data/text8/prepare.py
+RUN python data/enwik8/prepare.py \
+    && python data/shakespeare_char/prepare.py \
+    && python data/text8/prepare.py
+
+# Set up baseline runs
+RUN for dir in templates/*/; do \
+    if [ -f "${dir}experiment.py" ]; then \
+        cd "$dir" && python experiment.py --out_dir run_0 && python plot.py && cd /app/AI-Scientist; \
+    fi \
+done
 
 # Set the default command to open a bash shell
 CMD ["/bin/bash"]
