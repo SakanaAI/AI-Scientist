@@ -116,6 +116,7 @@ cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot
 
 ```bash
 # Set up Grokking baseline run
+pip install einops
 cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
 ```
 
