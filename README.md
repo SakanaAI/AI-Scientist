@@ -185,7 +185,7 @@ We provide 3 templates, which heavily use code from other repositories, which we
 
 The NanoGPT template used code from [NanoGPT](https://github.com/karpathy/nanoGPT) and this [PR](https://github.com/karpathy/nanoGPT/pull/254).
 
-The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tanelp/tiny-diffusion) and [ema-pytorch](https://github.com/lucidrains/ema-pytorch).
+The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tanelp/tiny-diffusion), [ema-pytorch](https://github.com/lucidrains/ema-pytorch), and [Datasaur](https://www.research.autodesk.com/publications/same-stats-different-graphs/).
 
 The Grokking template used code from [Sea-Snell/grokking](https://github.com/Sea-Snell/grokking) and [danielmamay/grokking](https://github.com/danielmamay/grokking).
 
