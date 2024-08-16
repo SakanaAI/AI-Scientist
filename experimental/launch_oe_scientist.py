@@ -42,6 +42,7 @@ def parse_arguments():
             "gpt-4o-2024-05-13",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
+            "llama3-70b-8192",
         ],
         help="Model to use for AI Scientist.",
     )
@@ -189,6 +190,8 @@ def do_idea(
             main_model = Model("deepseek/deepseek-coder")
         elif model == "llama3.1-405b":
             main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        elif model == "llama3-70b-8192":
+            main_model = Model("groq/llama3-70b-8192")
         else:
             main_model = Model(model)
         coder = Coder.create(
@@ -225,6 +228,8 @@ def do_idea(
                 main_model = Model("deepseek/deepseek-coder")
             elif model == "llama3.1-405b":
                 main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+            elif model == "llama3-70b-8192":
+                main_model = Model("llama3-70b-8192")
             else:
                 main_model = Model(model)
             coder = Coder.create(
@@ -348,6 +353,11 @@ if __name__ == "__main__":
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1",
         )
+    elif args.model == "llama3-70b-8192":
+        from groq import Groq
+        print(f"Using Groq API with {args.model}.")
+        client_model = "llama3-70b-8192"
+        client = Groq(api_key=os.environ["GROQ_API_KEY"])
     else:
         raise ValueError(f"Model {args.model} not supported.")
 

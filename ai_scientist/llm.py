@@ -1,7 +1,8 @@
 import backoff
 import openai
 import json
-
+import os
+from groq import Groq
 
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
@@ -57,23 +58,29 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif model == "llama-3-1-405b-instruct":
+    elif model in ["llama-3-1-405b-instruct", "llama3-70b-8192"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=3000,
-            n=n_responses,
-            stop=None,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
+        if model == "llama-3-1-405b-instruct":
+            model_name = "meta-llama/llama-3.1-405b-instruct"
+        else:
+            model_name = "llama3-70b-8192"
+            client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+        content = []
+        new_msg_history = []
+        for _ in range(n_responses):
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *new_msg_history,
+                ],
+                temperature=temperature,
+                max_tokens=3000,
+                stop=None,
+            )
+            content.append(response.choices[0].message.content)
+            new_msg_history.append(new_msg_history + [{"role": "assistant", "content": content[-1]}])
     elif model == "claude-3-5-sonnet-20240620":
         content, new_msg_history = [], []
         for _ in range(n_responses):
@@ -89,7 +96,6 @@ def get_batch_responses_from_llm(
             content.append(c)
             new_msg_history.append(hist)
     else:
-        # TODO: This is only supported for GPT-4 in our reviewer pipeline.
         raise ValueError(f"Model {model} not supported.")
 
     if print_debug:
@@ -184,10 +190,16 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct"]:
+    elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct", "llama3-70b-8192"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        if model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct"]:
+            model_name = "meta-llama/llama-3.1-405b-instruct"
+        else:
+            model_name = "llama3-70b-8192"
+            client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
         response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
+            model=model_name,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
