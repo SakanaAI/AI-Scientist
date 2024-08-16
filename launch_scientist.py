@@ -47,7 +47,17 @@ def parse_arguments():
         "--model",
         type=str,
         default="claude-3-5-sonnet-20240620",
-        choices=["claude-3-5-sonnet-20240620", "gpt-4o-2024-05-13", "deepseek-coder-v2-0724", "llama3.1-405b"],
+        choices=[
+            "claude-3-5-sonnet-20240620",
+            "gpt-4o-2024-05-13",
+            "deepseek-coder-v2-0724",
+            "llama3.1-405b",
+            # Anthropic Claude models via Amazon Bedrock
+            "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+            "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            "bedrock/anthropic.claude-3-opus-20240229-v1:0"
+        ],
         help="Model to use for AI Scientist.",
     )
     parser.add_argument(
@@ -266,6 +276,14 @@ if __name__ == "__main__":
         print(f"Using Anthropic API with model {args.model}.")
         client_model = "claude-3-5-sonnet-20240620"
         client = anthropic.Anthropic()
+    elif args.model.startswith("bedrock") and "claude" in args.model:
+        import anthropic
+
+        # Expects: bedrock/<MODEL_ID>
+        client_model = args.model.split("/")[-1]
+
+        print(f"Using Amazon Bedrock with model {client_model}.")
+        client = anthropic.AnthropicBedrock()
     elif args.model == "gpt-4o-2024-05-13" or args.model == "hybrid":
         import openai
 
