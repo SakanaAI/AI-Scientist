@@ -51,17 +51,14 @@ We further provide all runs and data from our paper [here](https://drive.google.
 ```bash
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
-
-# LLM APIs
-pip install anthropic[bedrock] aider-chat backoff openai
-# Viz
-pip install matplotlib pypdf pymupdf4llm
 # Install pdflatex
 sudo apt-get install texlive-full
 
-# Common Requirements
-pip install torch numpy transformers datasets tiktoken wandb tqdm
+# Install pypi requirements
+pip install -r requirements.txt
 ```
+
+When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.com/questions/956006/pregenerating-context-markiv-format-this-may-take-some-time-takes-forever).
 
 ### API Keys
 
@@ -91,7 +88,7 @@ Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for h
 
 Be sure to provide the key for the model used for your runs, e.g.
 
-```
+```bash
 export OPENAI_API_KEY="YOUR KEY HERE"
 export S2_API_KEY="YOUR KEY HERE"
 ```
@@ -107,14 +104,14 @@ python data/text8/prepare.py
 
 #### Create baseline runs (machine dependent)
 
-```
+```bash
 # Set up NanoGPT baseline run
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
-```
+```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
 ```
