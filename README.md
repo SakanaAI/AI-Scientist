@@ -53,7 +53,7 @@ conda create -n ai_scientist python=3.11
 conda activate ai_scientist
 
 # LLM APIs
-pip install anthropic aider-chat backoff openai
+pip install anthropic[bedrock] aider-chat backoff openai
 # Viz
 pip install matplotlib pypdf pymupdf4llm
 # Install pdflatex
@@ -63,9 +63,29 @@ sudo apt-get install texlive-full
 pip install torch numpy transformers datasets tiktoken wandb tqdm
 ```
 
-We use the following environment variables for the different API providers for different models:
+### API Keys
 
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`
+#### OpenAI API (GPT-4)
+
+By default, this uses the `OPENAI_API_KEY` environment variable.
+
+#### Anthropic API (Claude Sonnet 3.5)
+
+By default, this uses the `ANTHROPIC_API_KEY` environment variable.
+
+For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
+
+(*required*) `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, (*optional*) `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`
+
+#### DeepSeek API (DeepSeek-Coder-V2)
+
+By default, this uses the `DEEPSEEK_API_KEY` environment variable.
+
+#### OpenRouter API (Llama3.1)
+
+By default, this uses the `OPENROUTER_API_KEY` environment variable.
+
+#### Semantic Scholar API (Literature Search)
 
 Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher throughput [if you have one](https://www.semanticscholar.org/product/api), though in principle it should work without it.
 
@@ -115,6 +135,9 @@ cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot
 ### Setup Grokking
 
 ```bash
+# Set up Grokking
+pip install einops
+
 # Set up Grokking baseline run
 cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
 ```
@@ -182,7 +205,7 @@ We provide 3 templates, which heavily use code from other repositories, which we
 
 The NanoGPT template used code from [NanoGPT](https://github.com/karpathy/nanoGPT) and this [PR](https://github.com/karpathy/nanoGPT/pull/254).
 
-The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tanelp/tiny-diffusion) and [ema-pytorch](https://github.com/lucidrains/ema-pytorch).
+The 2D Diffusion template used code from [tiny-diffusion](https://github.com/tanelp/tiny-diffusion), [ema-pytorch](https://github.com/lucidrains/ema-pytorch), and [Datasaur](https://www.research.autodesk.com/publications/same-stats-different-graphs/).
 
 The Grokking template used code from [Sea-Snell/grokking](https://github.com/Sea-Snell/grokking) and [danielmamay/grokking](https://github.com/danielmamay/grokking).
 
@@ -194,8 +217,8 @@ If you use **The AI Scientist** in your research, please cite it as follows:
 
 ```
 @article{lu2024aiscientist,
-  title={The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery},
-  author={Chris Lu and Cong Lu and Robert Tjarko Lange and Jakob Foerster and Jeff Clune and David Ha},
+  title={The {AI} {S}cientist: Towards Fully Automated Open-Ended Scientific Discovery},
+  author={Lu, Chris and Lu, Cong and Lange, Robert Tjarko and Foerster, Jakob and Clune, Jeff and Ha, David},
   journal={arXiv preprint arXiv:2408.06292},
   year={2024}
 }
@@ -208,11 +231,12 @@ We recommend reading our paper in the first instance for any questions you have 
 ### Why am I missing files when running The AI Scientist?
 Make sure you have completed all the setup and preparation steps before the main experiment script.
 
-### Why has a PDF not been generated?
+### Why has a PDF or a review not been generated?
 The AI Scientist finishes an idea with a success rate that depends on both the template, the base foundation model, and the complexity of the idea. We advise referring to our main paper. The highest success rates are observed with Claude Sonnet 3.5.
+Reviews are best done with GPT-4o, all other models have issues with positivity bias or failure to conform to required outputs.
 
 ### What is the cost of each idea generated?
-Typically less than $15 per paper with Claude Sonnet 3.5.
+Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek Coder V2 for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
 
 ### How do I change the base conference format associated with the write-ups?
 Change the base `template.tex` files contained within each template.

@@ -241,6 +241,11 @@ def review_single_paper(
         import anthropic
 
         client = anthropic.Anthropic()
+    elif model.startswith("bedrock") and "claude" in model:
+        import anthropic
+
+        model = model.split("/")[-1]
+        client = anthropic.AnthropicBedrock()
     elif model in [
         "gpt-4o-2024-05-13",
         "gpt-4o-mini-2024-07-18",
