@@ -243,3 +243,4 @@ Please refer to the instructions for different templates. In this current iterat
 
 ### How do I add support for a new foundation model?
 Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
+We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
