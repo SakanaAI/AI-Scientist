@@ -72,7 +72,7 @@ By default, this uses the `ANTHROPIC_API_KEY` environment variable.
 
 For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
 
-(_required_) `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, (_optional_) `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`
+(*required*) `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, (*optional*) `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`
 
 ##### Utilising Claude models via Vertex AI
 
