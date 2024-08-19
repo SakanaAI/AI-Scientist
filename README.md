@@ -122,7 +122,6 @@ cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
-
 ```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
@@ -150,6 +149,7 @@ pip install einops
 # Set up Grokking baseline run
 cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
 ```
+
 
 ## Run AI Scientist Paper Generation Experiments
 
@@ -206,7 +206,7 @@ If there is an area of study you would like **The AI Scientist** to explore, it 
 - `prompt.json` -- Put information about your template here.
 - `seed_ideas.json` -- Put example ideas here. You can also try to generate ideas without any examples, and then pick the best one or two to put here.
 - `latex/template.tex` -- We recommend using our latex folder, but be sure to replace the pre-loaded citations with ones that you would expect to be more relevant.
-
+   
 ## Template Resources
 
 We provide 3 templates, which heavily use code from other repositories, which we credit below. (Normally, we would do this in the files themselves, but it's unclear how this would affect The AI Scientist since it would be visible).
@@ -237,27 +237,21 @@ If you use **The AI Scientist** in your research, please cite it as follows:
 We recommend reading our paper in the first instance for any questions you have on The AI Scientist.
 
 ### Why am I missing files when running The AI Scientist?
-
 Make sure you have completed all the setup and preparation steps before the main experiment script.
 
 ### Why has a PDF or a review not been generated?
-
 The AI Scientist finishes an idea with a success rate that depends on both the template, the base foundation model, and the complexity of the idea. We advise referring to our main paper. The highest success rates are observed with Claude Sonnet 3.5.
 Reviews are best done with GPT-4o, all other models have issues with positivity bias or failure to conform to required outputs.
 
 ### What is the cost of each idea generated?
-
 Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek Coder V2 for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
 
 ### How do I change the base conference format associated with the write-ups?
-
 Change the base `template.tex` files contained within each template.
 
 ### How do I run The AI Scientist for different subject fields?
-
 Please refer to the instructions for different templates. In this current iteration, this is restricted to ideas that can be expressed in code. However, lifting this restriction would represent exciting future work! :)
 
 ### How do I add support for a new foundation model?
-
 Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
 We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
