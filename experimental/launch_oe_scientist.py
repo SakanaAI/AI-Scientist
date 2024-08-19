@@ -188,9 +188,7 @@ def do_idea(
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
-        if model == "hybrid":
-            main_model = Model("claude-3-5-sonnet-20240620")
-        elif model == "deepseek-coder-v2-0724":
+        if model == "deepseek-coder-v2-0724":
             main_model = Model("deepseek/deepseek-coder")
         elif model == "llama3.1-405b":
             main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
@@ -224,9 +222,7 @@ def do_idea(
         if writeup == "latex":
             writeup_file = osp.join(folder_name, "latex", "template.tex")
             fnames = [exp_file, writeup_file, notes]
-            if model == "hybrid":
-                main_model = Model("gpt-4o-2024-05-13")
-            elif model == "deepseek-coder-v2-0724":
+            if model == "deepseek-coder-v2-0724":
                 main_model = Model("deepseek/deepseek-coder")
             elif model == "llama3.1-405b":
                 main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
@@ -346,7 +342,7 @@ if __name__ == "__main__":
 
         print(f"Using Vertex AI with model {client_model}.")
         client = anthropic.AnthropicVertex()
-    elif args.model == "gpt-4o-2024-05-13" or args.model == "hybrid":
+    elif args.model == "gpt-4o-2024-05-13":
         import openai
 
         print(f"Using OpenAI API with model {args.model}.")

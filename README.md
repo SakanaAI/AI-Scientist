@@ -274,7 +274,7 @@ We do not advise any model that is significantly weaker than GPT-4 level for The
 
 ## Containerization
 
-We include a [community-contributed](https://github.com/SakanaAI/AI-Scientist/pull/21) Docker image that may assist with your containerization efforts in `Dockerfile`.
+We include a [community-contributed](https://github.com/SakanaAI/AI-Scientist/pull/21) Docker image that may assist with your containerization efforts in `experimental/Dockerfile`.
 
 You can use this image like this:
 

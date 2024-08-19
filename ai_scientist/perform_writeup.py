@@ -564,7 +564,7 @@ if __name__ == "__main__":
 
         print(f"Using Vertex AI with model {client_model}.")
         client = anthropic.AnthropicVertex()
-    elif args.model == "gpt-4o-2024-05-13" or args.model == "hybrid":
+    elif args.model == "gpt-4o-2024-05-13":
         import openai
 
         print(f"Using OpenAI API with model {args.model}.")
