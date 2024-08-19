@@ -247,7 +247,7 @@ Please refer to the instructions for different templates. In this current iterat
 
 ## Containerization
 
-We provide a [community-contributed Docker](https://github.com/SakanaAI/AI-Scientist/pull/21) image that may assist with your containerization efforts in `Dockerfile`.
+We include a [community-contributed Docker](https://github.com/SakanaAI/AI-Scientist/pull/21) image that may assist with your containerization efforts in `Dockerfile`.
 
 You can use this image like this:
 
