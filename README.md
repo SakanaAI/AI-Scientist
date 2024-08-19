@@ -28,7 +28,7 @@ We further provide all runs and data from our paper [here](https://drive.google.
 10. [Grokking Through Compression: Unveiling Sudden Generalization via Minimal Description Length](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/mdl_grokking_correlation.pdf)
 11. [Accelerating Mathematical Insight: Boosting Grokking Through Strategic Data Augmentation](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/data_augmentation_grokking.pdf)
 
-**Note**: Caution! This codebase will execute LLM-written code. There are various risks and challenges associated with this autonomy. This includes e.g. the use of potentially dangerous packages, web access, and potential spawning of processes. Use at your own discretion. Please make sure to containerize and restrict web access appropriately.
+**Note**: Caution! This codebase will execute LLM-written code. There are various risks and challenges associated with this autonomy. This includes e.g. the use of potentially dangerous packages, web access, and potential spawning of processes. Use at your own discretion. Please make sure to [containerize](#containerization) and restrict web access appropriately.
 
 <p align="center">
   <a href="https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/adaptive_dual_scale_denoising/adaptive_dual_scale_denoising.pdf"><img src="https://github.com/SakanaAI/AI-Scientist/blob/main/docs/anim-ai-scientist.gif" alt="Adaptive Dual Scale Denoising" width="80%" />
@@ -43,6 +43,7 @@ We further provide all runs and data from our paper [here](https://drive.google.
 5. [Template Resources](#template-resources)
 6. [Citing The AI Scientist](#citing-the-ai-scientist)
 7. [Frequently Asked Questions](#faq)
+8. [Containerization](#containerization)
 
 ## Requirements
 
@@ -270,3 +271,24 @@ Please refer to the instructions for different templates. In this current iterat
 ### How do I add support for a new foundation model?
 Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
 We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
+
+## Containerization
+
+We include a [community-contributed](https://github.com/SakanaAI/AI-Scientist/pull/21) Docker image that may assist with your containerization efforts in `Dockerfile`.
+
+You can use this image like this:
+
+```bash
+# Endpoint Script
+docker run -e OPENAI_API_KEY=$OPENAI_API_KEY <AI_SCIENTIST_IMAGE> \
+       --model “gpt-4o-2024-05-13” \
+       --experiment 2d_diffusion \
+       --num-ideas 1
+```
+
+```bash
+# Interactive
+docker run -it -e OPENAI_API_KEY=$OPENAI_API_KEY \
+  --entrypoint /bin/bash \
+  <AI_SCIENTIST_IMAGE>
+```
