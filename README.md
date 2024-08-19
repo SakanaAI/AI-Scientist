@@ -52,19 +52,16 @@ We further provide all runs and data from our paper [here](https://drive.google.
 ```bash
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
-
-# LLM APIs
-pip install anthropic[bedrock] aider-chat backoff openai
-# Viz
-pip install matplotlib pypdf pymupdf4llm
 # Install pdflatex
 sudo apt-get install texlive-full
 
-# Common Requirements
-pip install torch numpy transformers datasets tiktoken wandb tqdm
+# Install pypi requirements
+pip install -r requirements.txt
 ```
 
-### API Keys
+When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.com/questions/956006/pregenerating-context-markiv-format-this-may-take-some-time-takes-forever).
+
+### Supported Models and API Keys
 
 #### OpenAI API (GPT-4)
 
@@ -74,9 +71,35 @@ By default, this uses the `OPENAI_API_KEY` environment variable.
 
 By default, this uses the `ANTHROPIC_API_KEY` environment variable.
 
-For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
+##### Claude models via Bedrock
+
+For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please install these additional packages:
+
+```bash
+pip install anthropic[bedrock]
+```
+
+Next, specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
 
 (*required*) `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, (*optional*) `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`
+
+##### Claude models via Vertex AI
+
+For Claude models provided by [Vertex AI Model Garden](https://cloud.google.com/model-garden?hl=en), please install these additional packages:
+
+```bash
+pip install google-cloud-aiplatform
+pip install anthropic[vertex]
+```
+
+Next, set up a valid authentication for a [Google Cloud project](https://cloud.google.com/vertex-ai/docs/authentication), for example by providing region and project ID like so:
+
+```bash
+export CLOUD_ML_REGION="REGION" # for Model Garden call
+export ANTHROPIC_VERTEX_PROJECT_ID="PROJECT_ID" # for Model Garden call
+export VERTEXAI_LOCATION="REGION" # for Aider/LiteLLM call, as per https://docs.litellm.ai/docs/providers/vertex#set-vertex-project--vertex-location
+export VERTEXAI_PROJECT="PROJECT_ID" # for Aider/LiteLLM call as per https://docs.litellm.ai/docs/providers/vertex#set-vertex-project--vertex-location
+```
 
 #### DeepSeek API (DeepSeek-Coder-V2)
 
@@ -92,7 +115,7 @@ Our code can also optionally use a Semantic Scholar API Key (`S2_API_KEY`) for h
 
 Be sure to provide the key for the model used for your runs, e.g.
 
-```
+```bash
 export OPENAI_API_KEY="YOUR KEY HERE"
 export S2_API_KEY="YOUR KEY HERE"
 ```
@@ -108,14 +131,14 @@ python data/text8/prepare.py
 
 #### Create baseline runs (machine dependent)
 
-```
+```bash
 # Set up NanoGPT baseline run
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
-```
+```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
 ```
@@ -244,6 +267,10 @@ Change the base `template.tex` files contained within each template.
 
 ### How do I run The AI Scientist for different subject fields?
 Please refer to the instructions for different templates. In this current iteration, this is restricted to ideas that can be expressed in code. However, lifting this restriction would represent exciting future work! :)
+ 
+### How do I add support for a new foundation model?
+Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
+We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
 
 ## Containerization
 

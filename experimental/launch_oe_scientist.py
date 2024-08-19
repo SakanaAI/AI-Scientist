@@ -338,6 +338,14 @@ if __name__ == "__main__":
 
         print(f"Using Amazon Bedrock with model {client_model}.")
         client = anthropic.AnthropicBedrock()
+    elif args.model.startswith("vertex_ai") and "claude" in args.model:
+        import anthropic
+
+        # Expects: vertex_ai/<MODEL_ID>
+        client_model = args.model.split("/")[-1]
+
+        print(f"Using Vertex AI with model {client_model}.")
+        client = anthropic.AnthropicVertex()
     elif args.model == "gpt-4o-2024-05-13" or args.model == "hybrid":
         import openai
 
