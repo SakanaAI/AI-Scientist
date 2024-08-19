@@ -246,6 +246,12 @@ def review_single_paper(
 
         model = model.split("/")[-1]
         client = anthropic.AnthropicBedrock()
+    elif args.model.startswith("vertex_ai") and "claude" in args.model:
+        import anthropic
+
+        # Expects: vertex_ai/<MODEL_ID>
+        model = args.model.split("/")[-1]
+        client = anthropic.AnthropicVertex()
     elif model in [
         "gpt-4o-2024-05-13",
         "gpt-4o-mini-2024-07-18",
