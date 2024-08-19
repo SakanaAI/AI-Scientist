@@ -267,14 +267,14 @@ Change the base `template.tex` files contained within each template.
 
 ### How do I run The AI Scientist for different subject fields?
 Please refer to the instructions for different templates. In this current iteration, this is restricted to ideas that can be expressed in code. However, lifting this restriction would represent exciting future work! :)
- 
+
 ### How do I add support for a new foundation model?
 Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
 We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
 
 ## Containerization
 
-We include a [community-contributed Docker](https://github.com/SakanaAI/AI-Scientist/pull/21) image that may assist with your containerization efforts in `Dockerfile`.
+We include a [community-contributed](https://github.com/SakanaAI/AI-Scientist/pull/21) Docker image that may assist with your containerization efforts in `Dockerfile`.
 
 You can use this image like this:
 
