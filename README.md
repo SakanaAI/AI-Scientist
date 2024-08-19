@@ -76,6 +76,8 @@ For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/),
 
 ##### Utilising Claude models via Vertex AI
 
+Make sure to install Google Vertex AI platform via `pip install google-cloud-aiplatform`
+
 For Claude models provided by [Vertex AI Model Garden](https://cloud.google.com/model-garden?hl=en), please set up a valid authentication for a [Google Cloud project](https://cloud.google.com/vertex-ai/docs/authentication), for example by providing region and project ID like so:
 
 ```
