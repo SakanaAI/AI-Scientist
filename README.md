@@ -60,7 +60,7 @@ pip install -r requirements.txt
 
 When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.com/questions/956006/pregenerating-context-markiv-format-this-may-take-some-time-takes-forever).
 
-### API Keys
+### Supported Models and API Keys
 
 #### OpenAI API (GPT-4)
 
