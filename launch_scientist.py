@@ -61,7 +61,7 @@ def parse_arguments():
             "vertex_ai/claude-3-opus@20240229",
             "vertex_ai/claude-3-5-sonnet@20240620",
             "vertex_ai/claude-3-sonnet@20240229",
-            "vertex_ai/claude-3-haiku@20240307"
+            "vertex_ai/claude-3-haiku@20240307",
         ],
         help="Model to use for AI Scientist.",
     )
@@ -100,11 +100,21 @@ def parse_arguments():
 
 def get_available_gpus(gpu_ids=None):
     if gpu_ids is not None:
-        return [int(gpu_id) for gpu_id in gpu_ids.split(',')]
+        return [int(gpu_id) for gpu_id in gpu_ids.split(",")]
     return list(range(torch.cuda.device_count()))
 
 
-def worker(queue, base_dir, results_dir, model, client, client_model, writeup, improvement, gpu_id):
+def worker(
+    queue,
+    base_dir,
+    results_dir,
+    model,
+    client,
+    client_model,
+    writeup,
+    improvement,
+    gpu_id,
+):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     print(f"Worker {gpu_id} started.")
     while True:
@@ -112,14 +122,30 @@ def worker(queue, base_dir, results_dir, model, client, client_model, writeup, i
         if idea is None:
             break
         success = do_idea(
-            base_dir, results_dir, idea, model, client, client_model, writeup, improvement, log_file=True
+            base_dir,
+            results_dir,
+            idea,
+            model,
+            client,
+            client_model,
+            writeup,
+            improvement,
+            log_file=True,
         )
         print(f"Completed idea: {idea['Name']}, Success: {success}")
     print(f"Worker {gpu_id} finished.")
 
 
 def do_idea(
-        base_dir, results_dir, idea, model, client, client_model, writeup, improvement, log_file=False
+    base_dir,
+    results_dir,
+    idea,
+    model,
+    client,
+    client_model,
+    writeup,
+    improvement,
+    log_file=False,
 ):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -152,7 +178,9 @@ def do_idea(
         print(f"*Starting idea: {idea_name}*")
         ## PERFORM EXPERIMENTS
         fnames = [exp_file, vis_file, notes]
-        io = InputOutput(yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
+        io = InputOutput(
+            yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
+        )
         if model == "deepseek-coder-v2-0724":
             main_model = Model("deepseek/deepseek-coder")
         elif model == "llama3.1-405b":
@@ -160,7 +188,12 @@ def do_idea(
         else:
             main_model = Model(model)
         coder = Coder.create(
-            main_model=main_model, fnames=fnames, io=io, stream=False, use_git=False, edit_format="diff"
+            main_model=main_model,
+            fnames=fnames,
+            io=io,
+            stream=False,
+            use_git=False,
+            edit_format="diff",
         )
 
         print_time()
@@ -189,7 +222,12 @@ def do_idea(
             else:
                 main_model = Model(model)
             coder = Coder.create(
-                main_model=main_model, fnames=fnames, io=io, stream=False, use_git=False, edit_format="diff"
+                main_model=main_model,
+                fnames=fnames,
+                io=io,
+                stream=False,
+                use_git=False,
+                edit_format="diff",
             )
             try:
                 perform_writeup(idea, folder_name, coder, client, client_model)
@@ -228,7 +266,9 @@ def do_idea(
             print(f"*Starting Improvement*")
             try:
                 perform_improvement(review, coder)
-                generate_latex(coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf")
+                generate_latex(
+                    coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf"
+                )
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
                 review = perform_review(
                     paper_text,
@@ -284,7 +324,11 @@ if __name__ == "__main__":
         client_model = args.model.split("/")[-1]
 
         print(f"Using Amazon Bedrock with model {client_model}.")
-        client = anthropic.AnthropicBedrock()
+        client = anthropic.AnthropicBedrock(
+            aws_access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            aws_region=os.getenv("AWS_REGION_NAME"),
+        )
     elif args.model.startswith("vertex_ai") and "claude" in args.model:
         import anthropic
 
@@ -305,8 +349,7 @@ if __name__ == "__main__":
         print(f"Using OpenAI API with {args.model}.")
         client_model = "deepseek-coder-v2-0724"
         client = openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url="https://api.deepseek.com"
+            api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com"
         )
     elif args.model == "llama3.1-405b":
         import openai
@@ -315,7 +358,7 @@ if __name__ == "__main__":
         client_model = "meta-llama/llama-3.1-405b-instruct"
         client = openai.OpenAI(
             api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1"
+            base_url="https://openrouter.ai/api/v1",
         )
     else:
         raise ValueError(f"Model {args.model} not supported.")
@@ -364,7 +407,7 @@ if __name__ == "__main__":
                     args.writeup,
                     args.improvement,
                     gpu_id,
-                )
+                ),
             )
             p.start()
             time.sleep(150)
