@@ -81,7 +81,7 @@ pip install anthropic[bedrock]
 
 Next, specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
 
-(*required*) `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, (*optional*) `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`
+Set these environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION_NAME`.
 
 ##### Claude models via Vertex AI
 
