@@ -152,13 +152,13 @@ python data/text8/prepare.py
 ```bash
 # Set up NanoGPT baseline run
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
-cd templates/nanoGPT && python experiment.py --out_dir run_0 --device mac && python plot.py && cd ../..
+cd templates/nanoGPT && python experiment.py --out_dir run_0 -is_mac && python plot.py && cd ../..
 ```
 
 for mac user, add `-is_mac` as an argument
 ```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
-cd templates/nanoGPT && python experiment.py --out_dir run_0 --device mac && python plot.py && cd ../..
+cd templates/nanoGPT && python experiment.py --out_dir run_0 -is_mac && python plot.py && cd ../..
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
@@ -171,7 +171,7 @@ for mac user, add `-is_mac` as an argument
 
 ```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
-cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 --device mac && python plot.py && cd ../..
+cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 -is_mac && python plot.py && cd ../..
 ```
 
 ### Setup 2D Diffusion
