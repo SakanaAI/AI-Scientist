@@ -280,10 +280,10 @@ You can use this image like this:
 
 ```bash
 # Endpoint Script
-docker run -e OPENAI_API_KEY=$OPENAI_API_KEY <AI_SCIENTIST_IMAGE> \
-       --model “gpt-4o-2024-05-13” \
-       --experiment 2d_diffusion \
-       --num-ideas 1
+docker run -e OPENAI_API_KEY=$OPENAI_API_KEY -v `pwd`/templates:/app/AI-Scientist/templates <AI_SCIENTIST_IMAGE> \
+  --model gpt-4o-2024-05-13 \
+  --experiment 2d_diffusion \
+  --num-ideas 2
 ```
 
 ```bash
