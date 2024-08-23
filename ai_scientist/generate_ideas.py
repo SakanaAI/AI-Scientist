@@ -22,6 +22,7 @@ Here are the ideas that you have already generated:
 '''
 
 Come up with the next impactful and creative idea for research experiments and directions you can feasibly investigate with the code provided.
+You think step-by-step before you conclude correctly.
 Note that you will not have access to any additional resources or datasets.
 Make sure any idea is not overfit the specific training dataset or model, and has wider significance.
 
@@ -310,6 +311,7 @@ def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
 
 novelty_system_msg = """You are an ambitious AI PhD student who is looking to publish a paper that will contribute significantly to the field.
 You have an idea and you want to check if it is novel or not. I.e., not overlapping significantly with existing literature or already well explored.
+You think step-by-step before you conclude correctly.
 Be a harsh critic for novelty, ensure there is a sufficient contribution in the idea for a new conference or workshop paper.
 You will be given access to the Semantic Scholar API, which you may use to survey the literature and find relevant papers to help you make your decision.
 The top 10 results for any search query will be presented to you with the abstracts.
