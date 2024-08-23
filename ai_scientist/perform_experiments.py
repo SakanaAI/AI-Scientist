@@ -67,7 +67,7 @@ def run_experiment(folder_name, run_num, timeout=7200):
 {results}
 
 Decide if you need to re-plan your experiments given the result (you often will not need to).
-
+You think step-by-step before you conclude correctly.
 Someone else will be using `notes.txt` to perform a writeup on this in the future.
 Please include *all* relevant information for the writeup on Run {run_num}, including an experiment description and the run number. Be as verbose as necessary.
 
