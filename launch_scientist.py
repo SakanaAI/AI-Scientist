@@ -338,13 +338,11 @@ if __name__ == "__main__":
         print(f"Using Vertex AI with model {client_model}.")
         client = anthropic.AnthropicVertex()
     elif args.model == "gpt-4o-2024-05-13":
-        import openai
 
         print(f"Using OpenAI API with model {args.model}.")
         client_model = "gpt-4o-2024-05-13"
         client = openai.OpenAI()
     elif args.model == "deepseek-coder-v2-0724":
-        import openai
 
         print(f"Using OpenAI API with {args.model}.")
         client_model = "deepseek-coder-v2-0724"
@@ -352,7 +350,6 @@ if __name__ == "__main__":
             api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com"
         )
     elif args.model == "llama3.1-405b":
-        import openai
 
         print(f"Using OpenAI API with {args.model}.")
         client_model = "meta-llama/llama-3.1-405b-instruct"
