@@ -196,7 +196,7 @@ error_list = """- Unenclosed math symbols
 refinement_prompt = (
     """Great job! Now criticize and refine only the {section} that you just wrote.
 Make this complete in this pass, do not leave any placeholders.
-
+You think step-by-step before you conclude correctly.
 Pay particular attention to fixing any errors such as:
 """
     + error_list
