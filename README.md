@@ -272,6 +272,9 @@ Please refer to the instructions for different templates. In this current iterat
 Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
 We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
 
+### Why do I need to run the baseline runs myself?
+These appear as `run_0` and should be run per machine you execute The AI Scientist on for accurate run-time comparisons due to hardware differences.
+
 ## Containerization
 
 We include a [community-contributed](https://github.com/SakanaAI/AI-Scientist/pull/21) Docker image that may assist with your containerization efforts in `experimental/Dockerfile`.
