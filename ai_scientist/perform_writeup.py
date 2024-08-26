@@ -528,6 +528,9 @@ if __name__ == "__main__":
             "gpt-4o-2024-05-13",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
+            # Gemini models
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
             # Anthropic Claude models via Amazon Bedrock
             "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
             "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -587,6 +590,18 @@ if __name__ == "__main__":
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1",
         )
+    elif args.model == "gemini-1.5-flash":
+        import google.generativeai
+
+        print(f"Using Gemini API with model {args.model}.")
+        client_model = "gemini-1.5-flash"
+        client = google.generativeai.GenerativeModel("gemini-1.5-flash")
+    elif args.model == "gemini-1.5-pro":
+        import google.generativeai
+
+        print(f"Using Gemini API with model {args.model}.")
+        client_model = "gemini-1.5-pro"
+        client = google.generativeai.GenerativeModel("gemini-1.5-pro")
     else:
         raise ValueError(f"Model {args.model} not recognized.")
     print("Make sure you cleaned the Aider logs if re-generating the writeup!")

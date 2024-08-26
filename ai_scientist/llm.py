@@ -1,5 +1,6 @@
 import backoff
 import openai
+import google.generativeai
 import json
 
 
@@ -75,6 +76,20 @@ def get_batch_responses_from_llm(
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
     elif "claude" in model:
+        content, new_msg_history = [], []
+        for _ in range(n_responses):
+            c, hist = get_response_from_llm(
+                msg,
+                client,
+                model,
+                system_message,
+                print_debug=False,
+                msg_history=None,
+                temperature=temperature,
+            )
+            content.append(c)
+            new_msg_history.append(hist)
+    elif "gemini" in model:
         content, new_msg_history = [], []
         for _ in range(n_responses):
             c, hist = get_response_from_llm(
@@ -199,6 +214,17 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif "gemini" in model:
+        new_msg_history = msg_history + [{"role": "user", "parts": msg}]
+        response = client.generate_content(
+            new_msg_history,
+            generation_config=google.generativeai.types.GenerationConfig(
+            max_output_tokens=3000,
+            temperature=temperature
+        )
+        )
+        content = response.text
+        new_msg_history = new_msg_history + [{"role": "model", "parts": content}]
     else:
         raise ValueError(f"Model {model} not supported.")
 
