@@ -71,6 +71,10 @@ By default, this uses the `OPENAI_API_KEY` environment variable.
 
 By default, this uses the `ANTHROPIC_API_KEY` environment variable.
 
+#### Google API (Gemini-1.5-Flash and Gem)
+
+By default, this uses the `GOOGLE_API_KEY` environment variable.
+
 ##### Claude models via Bedrock
 
 For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please install these additional packages:
