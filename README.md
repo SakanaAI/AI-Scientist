@@ -65,7 +65,7 @@ When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.c
 
 For Mac:
 
-Install `MacTex`: [Link]("https://www.tug.org/mactex/)
+Install `MacTex`: [Link](https://mirror.ctan.org/systems/mac/mactex/MacTeX.pkg)
 ```bash
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
