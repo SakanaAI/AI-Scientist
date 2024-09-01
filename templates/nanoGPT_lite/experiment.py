@@ -681,7 +681,7 @@ args = parser.parse_args()
 
 if __name__ == "__main__":
     num_seeds = {
-        "shakespeare_char": 1,
+        "shakespeare_char": 2,
     }
 
     out_dir = args.out_dir
