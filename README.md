@@ -126,6 +126,8 @@ export S2_API_KEY="YOUR KEY HERE"
 
 ### Setup NanoGPT
 
+Here, and below, we give instructions for setting up the data and baseline evaluations for each template. You can only run setup steps for templates you are interested in. This is necessary to run on your machine as training times may vary depending on your hardware.
+
 ```bash
 # Prepare NanoGPT data
 python data/enwik8/prepare.py
