@@ -226,7 +226,8 @@ Feel free to add more cites to a particular point if there is only one or two re
 Ensure no paper is cited without a corresponding reference in the `references.bib` file.
 Ensure each paragraph of the related work has sufficient background, e.g. a few papers cited.
 You will be given access to the Semantic Scholar API, only add citations that you have found using the API.
-Add at least 5 new cites!
+Aim to discuss a broad range of relevant papers, not just the most popular ones.
+Make sure not to copy verbatim from prior literature to avoid plagiarism.
 
 You will be prompted to give a precise description of where and how to add the cite, and a search query for the paper to be cited.
 Finally, you will select the most relevant cite from the search results (top 10 results will be shown).
