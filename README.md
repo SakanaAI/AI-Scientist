@@ -47,7 +47,7 @@ We further provide all runs and data from our paper [here](https://drive.google.
 
 ## Requirements
 
-This code was designed for NVIDIA GPUs with CUDA using PyTorch. Support for other GPU architectures may be possible by following [PyTorch guidelines](https://pytorch.org/get-started/locally/). Current templates would likely take an infeasible amount of time on CPU-only machines.
+This code was designed for NVIDIA GPUs with CUDA using PyTorch. Support for other GPU architectures may be possible by following [PyTorch guidelines](https://pytorch.org/get-started/locally/). Current templates would likely take an infeasible amount of time on CPU-only machines. All code is designed to be run on Linux, other operating systems will likely require major adjustments.
 
 ### Installation
 
