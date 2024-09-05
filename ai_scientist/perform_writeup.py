@@ -256,7 +256,7 @@ RESPONSE:
 ```
 
 In <THOUGHT>, first briefly reason over the paper and identify where citations should be added.
-If there are more citations needed, add "No more citations needed" to your thoughts.
+If no more citations are needed, add "No more citations needed" to your thoughts.
 Do not add "No more citations needed" if you are adding citations this round.
 
 In <JSON>, respond in JSON format with the following fields:
