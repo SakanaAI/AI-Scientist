@@ -71,6 +71,16 @@ We support a wide variety of models including open-weight and API-only models. I
 
 By default, this uses the `OPENAI_API_KEY` environment variable.
 
+##### OpenAI Models via Azure OpenAI Service
+
+This setup uses the OpenAI API directly, so no additional packages are required.
+
+Three environment variables are necessary: `AZURE_API_KEY`, `AZURE_API_BASE`, and `AZURE_API_VERSION`. These follow the naming convention specified in [Aider's documentation](https://aider.chat/docs/llms/azure.html).
+
+When accessing models via Azure OpenAI Service, the deployment name is used instead of the underlying model name in API calls. Ensure that your deployment is named like a standard OpenAI model (e.g., `gpt-4o-2024-08-06`). For more information, check [this link](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/switching-endpoints).
+
+If bypassing SSL certificate verification is required, add `--no-verify-ssl` in the argument list when executing your Python code.
+
 #### Anthropic API (Claude Sonnet 3.5)
 
 By default, this uses the `ANTHROPIC_API_KEY` environment variable.

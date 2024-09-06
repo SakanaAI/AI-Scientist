@@ -37,8 +37,28 @@ def parse_arguments():
             "llama-3-1-405b-instruct",
             "deepseek-coder-v2-0724",
             "claude-3-5-sonnet-20240620",
+            # Anthropic Claude models via Amazon Bedrock
+            "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+            "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            "bedrock/anthropic.claude-3-opus-20240229-v1:0",
+            # Anthropic Claude models Vertex AI
+            "vertex_ai/claude-3-opus@20240229",
+            "vertex_ai/claude-3-5-sonnet@20240620",
+            "vertex_ai/claude-3-sonnet@20240229",
+            "vertex_ai/claude-3-haiku@20240307",
+            # OpenAI models via Azure
+            "azure/gpt-4o-2024-08-06",
+            "azure/gpt-4o-2024-05-13",
         ],
         help="Model to use for AI Scientist.",
+    )
+
+    parser.add_argument(
+        "--verify-ssl", # implemented only for Azure OpenAI API
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Verify SSL certificate when connecting to model API (default: True)", 
     )
 
     parser.add_argument(
@@ -235,6 +255,7 @@ def review_single_paper(
     reviewer_system_prompt,
     review_instruction_form,
     num_paper_pages,
+    verify_ssl,
 ):
     # Setup client for LLM model
     if model == "claude-3-5-sonnet-20240620":
@@ -266,6 +287,20 @@ def review_single_paper(
         client = openai.OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com"
         )
+    elif args.model.startswith("azure") and "gpt" in args.model:
+        import openai
+        if not verify_ssl: import httpx
+
+        # Expects: azure/<DEPLOYMENT_NAME>
+        model = args.model.split("/")[-1]
+
+        print(f"Using Azure with model {model}.")
+        client = openai.AzureOpenAI(
+                api_key=os.getenv("AZURE_API_KEY"),
+                api_version=os.getenv("AZURE_API_VERSION"),
+                azure_endpoint=os.getenv("AZURE_API_BASE"),
+                http_client=httpx.Client(verify=False) if not verify_ssl else None,
+            )
     elif model == "llama-3-1-405b-instruct":
         import openai
 
@@ -339,6 +374,7 @@ def open_review_validate(
     num_paper_pages=None,
     data_seed=1,
     balanced_val=False,
+    verify_ssl=True,
 ):
     ore_ratings = prep_open_review_data(
         data_seed=data_seed,
@@ -387,6 +423,7 @@ def open_review_validate(
                     reviewer_system_prompt,
                     review_instruction_form,
                     num_paper_pages,
+                    verify_ssl,
                 ]
             )
         for _ in range(batch_size):
@@ -449,7 +486,7 @@ if __name__ == "__main__":
     args = parse_arguments()
     # Create client - float temp as string
     temperature = str(args.temperature).replace(".", "_")
-    rating_fname = f"llm_reviews/{args.model}_temp_{temperature}"
+    rating_fname = f"llm_reviews/{args.model.replace('/','_')}_temp_{temperature}"
     pathlib.Path("llm_reviews/").mkdir(parents=True, exist_ok=True)
 
     if args.num_fs_examples > 0:
@@ -485,4 +522,5 @@ if __name__ == "__main__":
         reviewer_form_prompt,
         num_paper_pages,
         balanced_val=False,
+        verify_ssl=args.verify_ssl,
     )
