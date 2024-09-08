@@ -213,8 +213,22 @@ def do_idea(
         print(f"*Starting Writeup*")
         ## PERFORM WRITEUP
         if writeup == "latex":
-            writeup_file = osp.join(folder_name, "latex", "template.tex")
-            fnames = [exp_file, writeup_file, notes]
+            writeup_file = osp.join(folder_name, "latex", "template_segments.tex")
+            TITLE_file = osp.join(folder_name, "latex", "TITLE_HERE.tex")
+            ABSTRACT_file = osp.join(folder_name, "latex", "ABSTRACT_HERE.tex")
+
+
+            INTRO_file = osp.join(folder_name, "latex", "INTRO_HERE.tex")
+            RELATED_WORK_file = osp.join(folder_name, "latex", "RELATED_WORK_HERE.tex")
+            BACKGROUND_file = osp.join(folder_name, "latex", "BACKGROUND_HERE.tex")
+            METHOD_file = osp.join(folder_name, "latex", "METHOD_HERE.tex")
+            EXPERIMENTAL_SETUP_file = osp.join(folder_name, "latex", "EXPERIMENTAL_SETUP_HERE.tex")
+            RESULTS_file = osp.join(folder_name, "latex", "RESULTS_HERE.tex")
+            CONCLUSIONS_file = osp.join(folder_name, "latex", "CONCLUSIONS_HERE.tex")
+
+            fnames = [exp_file, writeup_file, notes,\
+                      TITLE_file, ABSTRACT_file, INTRO_file, RELATED_WORK_file, BACKGROUND_file,\
+                      METHOD_file, EXPERIMENTAL_SETUP_file, RESULTS_file, CONCLUSIONS_file]
             if model == "deepseek-coder-v2-0724":
                 main_model = Model("deepseek/deepseek-coder")
             elif model == "llama3.1-405b":

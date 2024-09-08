@@ -3,7 +3,10 @@ import os
 import os.path as osp
 import shutil
 import subprocess
+
 from typing import Optional, Tuple
+
+
 from ai_scientist.generate_ideas import search_for_papers
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers
 import re
@@ -14,7 +17,7 @@ import json
 def generate_latex(coder, folder_name, pdf_file, timeout=30, num_error_corrections=5):
     folder = osp.abspath(folder_name)
     cwd = osp.join(folder, "latex")  # Fixed potential issue with path
-    writeup_file = osp.join(cwd, "template.tex")
+    writeup_file = osp.join(cwd, "template_segments.tex")
 
     # Check all references are valid and in the references.bib file
     with open(writeup_file, "r") as f:
@@ -26,7 +29,7 @@ def generate_latex(coder, folder_name, pdf_file, timeout=30, num_error_correctio
         re.DOTALL,
     )
     if references_bib is None:
-        print("No references.bib found in template.tex")
+        print("No references.bib found in template_segments.tex")
         return
     bib_text = references_bib.group(1)
     cites = [cite.strip() for item in cites for cite in item.split(",")]
@@ -34,7 +37,7 @@ def generate_latex(coder, folder_name, pdf_file, timeout=30, num_error_correctio
         if cite not in bib_text:
             print(f"Reference {cite} not found in references.")
             prompt = f"""Reference {cite} not found in references.bib. Is this included under a different name?
-If so, please modify the citation in template.tex to match the name in references.bib at the top. Otherwise, remove the cite."""
+If so, please modify the citation in template_segments.tex to match the name in references.bib at the top. Otherwise, remove the cite."""
             coder.run(prompt)
 
     # Check all included figures are actually in the directory.
@@ -78,7 +81,7 @@ If duplicated, identify the best location for the section header and remove any 
         # Filter trivial bugs in chktex
         check_output = os.popen(f"chktex {writeup_file} -q -n2 -n24 -n13 -n1").read()
         if check_output:
-            prompt = f"""Please fix the following LaTeX errors in `template.tex` guided by the output of `chktek`:
+            prompt = f"""Please fix the following LaTeX errors in `template_segments.tex` guided by the output of `chktek`:
 {check_output}.
 
 Make the minimal fix required and do not remove or change any packages.
@@ -94,10 +97,10 @@ def compile_latex(cwd, pdf_file, timeout=30):
     print("GENERATING LATEX")
 
     commands = [
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
+        ["pdflatex", "-interaction=nonstopmode", "template_segments.tex"],
         ["bibtex", "template"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
+        ["pdflatex", "-interaction=nonstopmode", "template_segments.tex"],
+        ["pdflatex", "-interaction=nonstopmode", "template_segments.tex"],
     ]
 
     for command in commands:
@@ -121,7 +124,7 @@ def compile_latex(cwd, pdf_file, timeout=30):
 
     # Attempt to move the PDF to the desired location
     try:
-        shutil.move(osp.join(cwd, "template.pdf"), pdf_file)
+        shutil.move(osp.join(cwd, "template_segments.pdf"), pdf_file)
     except FileNotFoundError:
         print("Failed to rename PDF.")
 
@@ -400,18 +403,48 @@ Ensure the citation is well-integrated into the text.'''
 def perform_writeup(
     idea, folder_name, coder, cite_client, cite_model, num_cite_rounds=20
 ):
+    dic_section_files = {"TITLE": "TITLE_HERE.tex",
+                         "ABSTRACT" : "ABSTRACT_HERE.tex",
+                        "Introduction" : "INTRO_HERE.tex",
+                        "Background" : "BACKGROUND_HERE.tex",
+                        "Related work" : "RELATED_WORK_HERE.tex",
+                        "Method" : "METHOD_HERE.tex",
+                        "Experimental Setup" : "EXPERIMENTAL_SETUP_HERE.tex",
+                        "Results" : "RESULTS_HERE.tex",
+                        "Conclusion": "CONCLUSIONS_HERE.tex",
+                         }
+
+    title_prompt = f"""We've provided the file to the project. 
+         We will be filling it in section by section. Every section is located in a separate file. 
+
+    First, please fill the "Title" sections of the writeup in file {dic_section_files["TITLE"]}.
+
+    Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment.
+
+    Be sure to first name the file and then filling.
+    """
+    coder_out = coder.run(title_prompt)
+    coder_out = coder.run(
+        refinement_prompt.format(section="Title")
+        .replace(r"{{", "{")
+        .replace(r"}}", "}")
+    )
+
     # CURRENTLY ASSUMES LATEX
-    abstract_prompt = f"""We've provided the `latex/template.tex` file to the project. We will be filling it in section by section.
+    abstract_prompt = f"""We've provided the `latex/template_segments.tex` file to the project. 
+     We will be filling it in section by section. Every section is located in a separate file. 
 
-First, please fill in the "Title" and "Abstract" sections of the writeup.
+    First, please fill the "Abstract" sections of the writeup in file {dic_section_files["ABSTRACT"]}.
+    
+    Some tips are provided below:
+    {per_section_tips["Abstract"]}
+    
+    Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment.
+    
+    Be sure to first name the file and then filling.
+    """
 
-Some tips are provided below:
-{per_section_tips["Abstract"]}
 
-Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment.
-
-Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
-"""
     coder_out = coder.run(abstract_prompt)
     coder_out = coder.run(
         refinement_prompt.format(section="Abstract")
@@ -426,7 +459,7 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
         "Results",
         "Conclusion",
     ]:
-        section_prompt = f"""Please fill in the {section} of the writeup. Some tips are provided below:
+        section_prompt = f"""Please fill in the {section} of the writeup in file {dic_section_files[section]}. Some tips are provided below:
 {per_section_tips[section]}
 
 Be sure to use \cite or \citet where relevant, referring to the works provided in the file.
@@ -437,7 +470,7 @@ In this pass, do not reference anything in later sections of the paper.
 
 Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment.
 
-Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
+Be sure to first name the file and then filling.
 """
         coder_out = coder.run(section_prompt)
         coder_out = coder.run(
@@ -447,7 +480,7 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
         )
 
     # SKETCH THE RELATED WORK
-    section_prompt = f"""Please fill in the Related Work of the writeup. Some tips are provided below:
+    section_prompt = f"""Please fill in the Related Work of the writeup in file {dic_section_files['Related work']}. Some tips are provided below:
 
 {per_section_tips["Related Work"]}
 
@@ -456,13 +489,13 @@ Do this all in LaTeX comments using %.
 The related work should be concise, only plan to discuss the most relevant work.
 Do not modify `references.bib` to add any new citations, this will be filled in at a later stage.
 
-Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
+Be sure to first name the file and then filling.
 """
     coder_out = coder.run(section_prompt)
 
     # Fill paper with cites.
     for _ in range(num_cite_rounds):
-        with open(osp.join(folder_name, "latex", "template.tex"), "r") as f:
+        with open(osp.join(folder_name, "latex", "template_segments.tex"), "r") as f:
             draft = f.read()
         prompt, done = get_citation_aider_prompt(
             cite_client, cite_model, draft, _, num_cite_rounds
@@ -475,7 +508,7 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
             # insert this into draft before the "\end{filecontents}" line
             search_str = r"\end{filecontents}"
             draft = draft.replace(search_str, f"{bibtex_string}{search_str}")
-            with open(osp.join(folder_name, "latex", "template.tex"), "w") as f:
+            with open(osp.join(folder_name, "latex", "template_segments.tex"), "w") as f:
                 f.write(draft)
             coder_out = coder.run(prompt)
 
@@ -597,7 +630,7 @@ if __name__ == "__main__":
     vis_file = osp.join(folder_name, "plot.py")
     notes = osp.join(folder_name, "notes.txt")
     model = args.model
-    writeup_file = osp.join(folder_name, "latex", "template.tex")
+    writeup_file = osp.join(folder_name, "latex", "template_segments.tex")
     ideas_file = osp.join(folder_name, "ideas.json")
     with open(ideas_file, "r") as f:
         ideas = json.load(f)
@@ -621,7 +654,7 @@ if __name__ == "__main__":
         io=io,
         stream=False,
         use_git=False,
-        edit_format="diff",
+        edit_format="whole",
     )
     if args.no_writing:
         generate_latex(coder, args.folder, f"{args.folder}/test.pdf")
