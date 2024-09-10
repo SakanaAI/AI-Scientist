@@ -278,8 +278,16 @@ def on_backoff(details):
     )
 
 
+# @backoff.on_exception(
+#     backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff
+# )
 @backoff.on_exception(
-    backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff
+    backoff.constant,
+    requests.exceptions.HTTPError,
+    interval=5,
+    jitter=backoff.full_jitter,
+    on_backoff=on_backoff,
+    # max_tries=10,
 )
 def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
     if not query:
@@ -447,7 +455,6 @@ def check_idea_novelty(
 
 
 if __name__ == "__main__":
-    MAX_NUM_GENERATIONS = 32
     NUM_REFLECTIONS = 5
     import argparse
 
@@ -468,8 +475,33 @@ if __name__ == "__main__":
             "gpt-4o-2024-05-13",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
+            # Anthropic Claude models via Amazon Bedrock
+            "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+            "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            "bedrock/anthropic.claude-3-opus-20240229-v1:0",
+            # Anthropic Claude models Vertex AI
+            "vertex_ai/claude-3-opus@20240229",
+            "vertex_ai/claude-3-5-sonnet@20240620",
+            "vertex_ai/claude-3-sonnet@20240229",
+            "vertex_ai/claude-3-haiku@20240307",
+            # OpenAI models via Azure
+            "azure/gpt-4o-2024-08-06",
+            "azure/gpt-4o-2024-05-13",
         ],
         help="Model to use for AI Scientist.",
+    )
+    parser.add_argument(
+        "--verify-ssl", # implemented only for Azure OpenAI API
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Verify SSL certificate when connecting to model API (default: True)", 
+    )
+    parser.add_argument(
+        "--num-ideas",
+        type=int,
+        default=50,
+        help="Number of ideas to generate",
     )
     parser.add_argument(
         "--skip-idea-generation",
@@ -482,7 +514,6 @@ if __name__ == "__main__":
         help="Check novelty of ideas.",
     )
     args = parser.parse_args()
-
     # Create client
     if args.model == "claude-3-5-sonnet-20240620":
         import anthropic
@@ -512,6 +543,20 @@ if __name__ == "__main__":
         print(f"Using OpenAI API with model {args.model}.")
         client_model = "gpt-4o-2024-05-13"
         client = openai.OpenAI()
+    elif args.model.startswith("azure") and "gpt" in args.model:
+        import openai
+        if not args.verify_ssl: import httpx
+
+        # Expects: azure/<DEPLOYMENT_NAME>
+        client_model = args.model.split("/")[-1]
+
+        print(f"Using Azure with model {client_model}.")
+        client = openai.AzureOpenAI(
+                api_key=os.getenv("AZURE_API_KEY"),
+                api_version=os.getenv("AZURE_API_VERSION"),
+                azure_endpoint=os.getenv("AZURE_API_BASE"),
+                http_client = httpx.Client(verify=False) if not args.verify_ssl else None,
+            )
     elif args.model == "deepseek-coder-v2-0724":
         import openai
 
@@ -539,7 +584,7 @@ if __name__ == "__main__":
         client=client,
         model=client_model,
         skip_generation=args.skip_idea_generation,
-        max_num_generations=MAX_NUM_GENERATIONS,
+        max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
     )
     if args.check_novelty:

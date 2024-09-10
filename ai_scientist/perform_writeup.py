@@ -533,16 +533,33 @@ if __name__ == "__main__":
             "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
             "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
-            "bedrock/anthropic.claude-3-opus-20240229-v1:0"
+            "bedrock/anthropic.claude-3-opus-20240229-v1:0",
             # Anthropic Claude models Vertex AI
             "vertex_ai/claude-3-opus@20240229",
             "vertex_ai/claude-3-5-sonnet@20240620",
             "vertex_ai/claude-3-sonnet@20240229",
-            "vertex_ai/claude-3-haiku@20240307"
+            "vertex_ai/claude-3-haiku@20240307",
+            # OpenAI models via Azure
+            "azure/gpt-4o-2024-08-06",
+            "azure/gpt-4o-2024-05-13",
         ],
         help="Model to use for AI Scientist.",
     )
+    parser.add_argument(
+        "--verify-ssl", # implemented only for Azure OpenAI API
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Verify SSL certificate when connecting to model API (default: True)", 
+    )
+
     args = parser.parse_args()
+    # [--no-verify-ssl] Disable SSL verification for aider's litellm calls
+    if not args.verify_ssl:
+        from aider.llm import litellm
+        import httpx
+        litellm._load_litellm()
+        litellm._lazy_module.client_session = httpx.Client(verify=False)
+    # Create client
     if args.model == "claude-3-5-sonnet-20240620":
         import anthropic
 
@@ -571,6 +588,19 @@ if __name__ == "__main__":
         print(f"Using OpenAI API with model {args.model}.")
         client_model = "gpt-4o-2024-05-13"
         client = openai.OpenAI()
+    elif args.model.startswith("azure") and "gpt" in args.model:
+        import openai
+
+        # Expects: azure/<DEPLOYMENT_NAME>
+        client_model = args.model.split("/")[-1]
+
+        print(f"Using Azure with model {client_model}.")
+        client = openai.AzureOpenAI(
+                api_key=os.getenv("AZURE_API_KEY"),
+                api_version=os.getenv("AZURE_API_VERSION"),
+                azure_endpoint=os.getenv("AZURE_API_BASE"),
+                http_client=httpx.Client(verify=False) if not args.verify_ssl else None,
+            )
     elif args.model == "deepseek-coder-v2-0724":
         import openai
 
