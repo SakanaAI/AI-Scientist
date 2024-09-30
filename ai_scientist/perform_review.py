@@ -1,14 +1,49 @@
-import os
-import numpy as np
 import json
-from pypdf import PdfReader
+import os
+
+import numpy as np
 import pymupdf
 import pymupdf4llm
+from pypdf import PdfReader
+from strictjson import strict_json
+
 from ai_scientist.llm import (
-    get_response_from_llm,
-    get_batch_responses_from_llm,
     extract_json_between_markers,
+    get_batch_responses_from_llm,
+    get_response_from_llm,
+    llm_json_auto_correct,
 )
+
+
+# Format the content in JSON
+def format_llm_review_json(text):
+    res = strict_json(
+        system_prompt="You are a JSON formatter",
+        user_prompt=text,
+        return_as_json=True,
+        output_format={
+            "Summary": "A summary of the paper content and its contributions.",
+            "Strengths": "A list of strengths of the paper, type: list",
+            "Weaknesses": "A list of weaknesses of the paper, type: list",
+            "Originality": "A rating from 1 to 4 (low, medium, high, very high), type: int",
+            "Quality": "A rating from 1 to 4 (low, medium, high, very high), type: int",
+            "Clarity": "A rating from 1 to 4 (low, medium, high, very high), type: int",
+            "Significance": "A rating from 1 to 4 (low, medium, high, very high), type: int",
+            "Questions": "A set of clarifying questions to be answered by the paper authors, type: list",
+            "Limitations": "A set of limitations and potential negative societal impacts of the work, type: str",
+            "Ethical Concerns": "A boolean value indicating whether there are ethical concerns, type: bool",
+            "Soundness": "A rating from 1 to 4 (poor, fair, good, excellent), type: int",
+            "Presentation": "A rating from 1 to 4 (poor, fair, good, excellent), type: int",
+            "Contribution": "A rating from 1 to 4 (poor, fair, good, excellent), type: int",
+            "Overall": "A rating from 1 to 10 (very strong reject to award quality), type: int",
+            "Confidence": "A rating from 1 to 5 (low, medium, high, very high, absolute), type: int",
+            "Decision": "A decision that has to be Accept or Reject, type: str",
+        },
+        llm=llm_json_auto_correct,
+    )
+    text = json.loads(res)
+    return text
+
 
 reviewer_system_prompt_base = (
     "You are an AI researcher who is reviewing a paper that was submitted to a prestigious ML venue."
@@ -163,16 +198,17 @@ Here is the paper you are asked to review:
         parsed_reviews = []
         for idx, rev in enumerate(llm_review):
             try:
-                parsed_reviews.append(extract_json_between_markers(rev))
+                parsed_reviews.append(format_llm_review_json(rev))
             except Exception as e:
                 print(f"Ensemble review {idx} failed: {e}")
         parsed_reviews = [r for r in parsed_reviews if r is not None]
         review = get_meta_review(model, client, temperature, parsed_reviews)
-
+        ## Format the content in JSON
+        review = format_llm_review_json(review)
         # take first valid in case meta-reviewer fails
         if review is None:
             review = parsed_reviews[0]
-
+        # print(parsed_reviews, "\n\n\n", review) # debug
         # Replace numerical scores with the average of the ensemble.
         for score, limits in [
             ("Originality", (1, 4)),
@@ -217,7 +253,7 @@ REVIEW JSON:
             msg_history=msg_history,
             temperature=temperature,
         )
-        review = extract_json_between_markers(llm_review)
+        review = format_llm_review_json(llm_review)
 
     if num_reflections > 1:
         for j in range(num_reflections - 1):
@@ -230,7 +266,7 @@ REVIEW JSON:
                 msg_history=msg_history,
                 temperature=temperature,
             )
-            review = extract_json_between_markers(text)
+            review = format_llm_review_json(text)
             assert review is not None, "Failed to extract JSON from LLM output"
 
             if "I am done" in text:
@@ -379,7 +415,7 @@ Review {i + 1}/{len(reviews)}:
         msg_history=None,
         temperature=temperature,
     )
-    meta_review = extract_json_between_markers(llm_review)
+    meta_review = format_llm_review_json(llm_review)
     return meta_review
 
 

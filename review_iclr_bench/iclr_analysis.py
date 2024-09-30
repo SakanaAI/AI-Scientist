@@ -6,22 +6,25 @@ import sys
 
 sys.path.append("../")
 
+import argparse
+import multiprocessing as mp
+import os
+import pathlib
+import time
+
+import numpy as np
+import pandas as pd
+import requests
+from sklearn.metrics import confusion_matrix, f1_score, roc_auc_score
+from sklearn.utils import shuffle
+
+from ai_scientist.llm import allchoices
 from ai_scientist.perform_review import (
     load_paper,
+    neurips_form,
     perform_review,
     reviewer_system_prompt_neg,
-    neurips_form,
 )
-import pathlib
-import pandas as pd
-import numpy as np
-import requests
-import argparse
-import os
-import time
-import multiprocessing as mp
-from sklearn.utils import shuffle
-from sklearn.metrics import f1_score, roc_auc_score, confusion_matrix
 
 
 def parse_arguments():
@@ -30,14 +33,7 @@ def parse_arguments():
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=[
-            "gpt-4o-mini-2024-07-18",
-            "gpt-4o-2024-05-13",
-            "gpt-4o-2024-08-06",
-            "llama-3-1-405b-instruct",
-            "deepseek-coder-v2-0724",
-            "claude-3-5-sonnet-20240620",
-        ],
+        choices=allchoices,
         help="Model to use for AI Scientist.",
     )
 
@@ -272,6 +268,13 @@ def review_single_paper(
         client = openai.OpenAI(
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1",
+        )
+    elif args.model.startswith("ollama"):
+        import openai
+
+        client = openai.OpenAI(
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
         )
     else:
         raise ValueError(f"Model {model} not supported.")
