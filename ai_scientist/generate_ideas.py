@@ -323,7 +323,6 @@ def search_for_papers(query, result_limit=10, engine="semanticscholar") -> Union
                 if location["source"] is not None:
                     venue = location["source"]["display_name"]
                     if venue != "":
-                        # print(f"[DEBUG] {i=} {venue=} found!")
                         break
             title = work["title"]
             abstract = work["abstract"]
