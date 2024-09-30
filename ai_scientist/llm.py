@@ -6,7 +6,8 @@ import openai
 # Ollama
 ollama_choices = [
     "mistral-nemo",
-    "llama3.1",
+    "mistral-small",
+    "llama3.1:70b",
 ]
 
 allchoices = [
