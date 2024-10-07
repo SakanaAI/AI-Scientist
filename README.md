@@ -149,6 +149,12 @@ cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
 ```
 
+### Setup MobileNetV3-small
+
+```bash
+
+cd templates/mobilenetV3 && python experiment.py && python plot.py
+```
 ### Setup 2D Diffusion
 
 ```bash
