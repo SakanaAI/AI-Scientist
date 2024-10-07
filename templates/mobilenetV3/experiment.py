@@ -13,6 +13,9 @@ import argparse
 from functools import partial
 from typing import Callable, List, Optional, Union, Any, Sequence, Tuple
 
+import random
+import numpy as np
+
 # _make_divisible function from torchvision
 def _make_divisible(v: float, divisor: int, min_value: Optional[int] = None) -> int:
     """
@@ -338,6 +341,7 @@ def mobilenet_v3_small(pretrained=False, progress=True, **kwargs):
 class Config:
     # data
     data_path: str = './data'
+    dataset: str = 'cifar10'    
     num_classes: int = 10
     # model
     model: str = 'mobilenet_v3_small'
@@ -354,31 +358,63 @@ class Config:
     eval_interval: int = 1000
     # output
     out_dir: str = 'run_0'
+    seed: int = 0              
     # compile for SPEED!
-    compile_model: bool = False #TODO: Make it work for 
+    compile_model: bool = False
 
-def get_cifar10_loaders(config):
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
 
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
+def get_data_loaders(config):
+    if config.dataset == 'cifar10':
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
 
-    train_dataset = datasets.CIFAR10(root=config.data_path, train=True, download=True, transform=transform_train)
-    test_dataset = datasets.CIFAR10(root=config.data_path, train=False, download=True, transform=transform_test)
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+
+        train_dataset = datasets.CIFAR10(root=config.data_path, train=True, download=True, transform=transform_train)
+        test_dataset = datasets.CIFAR10(root=config.data_path, train=False, download=True, transform=transform_test)
+    elif config.dataset == 'cifar100':
+        # Placeholder for CIFAR-100 (for future use)
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                 (0.2675, 0.2565, 0.2761)),
+        ])
+
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                 (0.2675, 0.2565, 0.2761)),
+        ])
+
+        train_dataset = datasets.CIFAR100(root=config.data_path, train=True, download=True, transform=transform_train)
+        test_dataset = datasets.CIFAR100(root=config.data_path, train=False, download=True, transform=transform_test)
+        config.num_classes = 100  # Update number of classes for CIFAR-100
+    else:
+        raise ValueError(f"Unknown dataset: {config.dataset}")
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers)
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers)
 
     return train_loader, test_loader
 
+
 def train(config):
+    # Set random seeds
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed)
+    random.seed(config.seed)
+    if config.device == 'cuda':
+        torch.cuda.manual_seed_all(config.seed)
+
     model = mobilenet_v3_small(pretrained=False, progress=True, num_classes=config.num_classes).to(config.device)
 
     if config.compile_model:
@@ -389,7 +425,7 @@ def train(config):
     optimizer = optim.SGD(model.parameters(), lr=config.learning_rate, momentum=0.9, weight_decay=config.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs)
 
-    train_loader, test_loader = get_cifar10_loaders(config)
+    train_loader, test_loader = get_data_loaders(config)
 
     best_acc = 0.0
     train_log_info = []
@@ -471,7 +507,7 @@ def test(config):
         print("Compiling the model for testing...")
         model = torch.compile(model)
     model.load_state_dict(torch.load(os.path.join(config.out_dir, 'best_model.pth')))
-    _, test_loader = get_cifar10_loaders(config)
+    _, test_loader = get_data_loaders(config)
     criterion = nn.CrossEntropyLoss()
     
     test_loss, test_acc = evaluate(model, test_loader, criterion, config)
@@ -479,49 +515,84 @@ def test(config):
     return test_loss, test_acc
 
 def main():
-    parser = argparse.ArgumentParser(description="Train MobileNetV3 for Image Classification on CIFAR-10")
-    parser.add_argument("--data_path", type=str, default="./data", help="Path to save/load the CIFAR-10 dataset")
+    parser = argparse.ArgumentParser(description="Train MobileNetV3 for Image Classification")
+    parser.add_argument("--data_path", type=str, default="./data", help="Path to save/load the dataset")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
     parser.add_argument("--learning_rate", type=float, default=0.01, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=30, help="Number of epochs to train")
     parser.add_argument("--out_dir", type=str, default="run_0", help="Output directory")
     args = parser.parse_args()
 
-    config = Config(
-        data_path=args.data_path,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        epochs=args.epochs,
-        out_dir=args.out_dir,
-    )
-    os.makedirs(config.out_dir, exist_ok=True)
-    print(f"Outputs will be saved to {config.out_dir}")
+    os.makedirs(args.out_dir, exist_ok=True)
+    print(f"Outputs will be saved to {args.out_dir}")
 
-    
-    start_time = time.time()
-    train_log_info, val_log_info, best_acc = train(config)
-    total_time = time.time() - start_time
-
-    test_loss, test_acc = test(config)
-
-    final_info = {
-        "best_val_acc": best_acc,
-        "test_acc": test_acc,
-        "total_train_time": total_time,
-        "config": vars(config)
+    # Define datasets and number of seeds per dataset
+    datasets = ['cifar10']  # For now, only CIFAR-10; can add 'cifar100' in the future
+    num_seeds = {
+        'cifar10': 1  # Change the number of seeds as desired
     }
 
-    with open(os.path.join(config.out_dir, "mobilenetv3_cifar10_results.json"), "w") as f:
-        json.dump({
-            "final_info": final_info,
-            "train_log_info": train_log_info,
-            "val_log_info": val_log_info
-        }, f, indent=2)
+    all_results = {}
+    final_infos = {}
 
-    print(f"Training completed. Best validation accuracy: {best_acc:.2f}%")
-    print(f"Test accuracy: {test_acc:.2f}%")
-    print(f"Total training time: {total_time / 60:.2f} minutes")
-    print(f"Results saved to {os.path.join(config.out_dir, 'mobilenetv3_cifar10_results.json')}")
+    for dataset in datasets:
+        final_info_list = []
+        for seed_offset in range(num_seeds[dataset]):
+            # Update the config for each run
+            config = Config(
+                data_path=args.data_path,
+                dataset=dataset,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                epochs=args.epochs,
+                out_dir=args.out_dir,
+                seed=seed_offset  # Set the seed
+            )
+            os.makedirs(config.out_dir, exist_ok=True)
+            print(f"Starting training for {dataset} with seed {seed_offset}")
+            start_time = time.time()
+            train_log_info, val_log_info, best_acc = train(config)
+            total_time = time.time() - start_time
+
+            # Run test after training
+            test_loss, test_acc = test(config)
+
+            # Prepare final_info dictionary
+            final_info = {
+                "best_val_acc": best_acc,
+                "test_acc": test_acc,
+                "total_train_time": total_time,
+                "config": vars(config)
+            }
+            final_info_list.append(final_info)
+
+            # Store results in all_results
+            key_prefix = f"{dataset}_{seed_offset}"
+            all_results[f"{key_prefix}_final_info"] = final_info
+            all_results[f"{key_prefix}_train_log_info"] = train_log_info
+            all_results[f"{key_prefix}_val_log_info"] = val_log_info
+
+            print(f"Training completed for {dataset} seed {seed_offset}. Best validation accuracy: {best_acc:.2f}%, Test accuracy: {test_acc:.2f}%")
+
+        # Aggregate results over seeds
+        final_info_dict = {k: [d[k] for d in final_info_list if k in d] for k in final_info_list[0].keys()}
+        means = {f"{k}_mean": np.mean(v) for k, v in final_info_dict.items() if isinstance(v[0], (int, float, float))}
+        stderrs = {f"{k}_stderr": np.std(v)/np.sqrt(len(v)) for k, v in final_info_dict.items() if isinstance(v[0], (int, float, float))}
+        final_infos[dataset] = {
+            "means": means,
+            "stderrs": stderrs,
+            "final_info_dict": final_info_dict
+        }
+
+    # Save final_infos to final_info.json
+    with open(os.path.join(args.out_dir, "final_info.json"), "w") as f:
+        json.dump(final_infos, f, indent=2)
+
+    # Save all_results to all_results.npy
+    with open(os.path.join(args.out_dir, "all_results.npy"), "wb") as f:
+        np.save(f, all_results)
+
+    print(f"All results saved to {args.out_dir}")
 
 if __name__ == "__main__":
     main()
