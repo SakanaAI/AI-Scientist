@@ -1,10 +1,11 @@
-import backoff
 import json
 import os
 import os.path as osp
-import requests
 import time
 from typing import List, Dict, Union
+
+import backoff
+import requests
 
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
 
