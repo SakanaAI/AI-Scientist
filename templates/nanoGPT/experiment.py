@@ -313,7 +313,7 @@ class GPT(nn.Module):
 
 
 # --- END model.py ---
-def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
+def train(dataset="shakespeare_char", out_dir="run_0", is_mac=True, seed_offset=0):
     # -----------------------------------------------------------------------------
     # default config values designed to train a gpt2 (124M) on OpenWebText
     # data
@@ -348,13 +348,14 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
     # DDP settings
     backend = "nccl"  # 'nccl', 'gloo', etc.
     # system
-    device = "cuda"  # Always use CUDA
+    device =  "mps" if is_mac else "cuda"  # Always use CUDA
+    # device = "cuda"  # Always use CUDA
     dtype = (
         "bfloat16"
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         else "float16"
     )  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-    compile = True  # do not torch compile the model on macbooks
+    compile = not is_mac  # do not torch compile the model on macbooks
 
     # various inits, derived attributes, I/O setup
     # if not ddp, we are running on a single gpu, and one process
@@ -679,6 +680,8 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
 
 parser = argparse.ArgumentParser(description="Run experiment")
 parser.add_argument("--out_dir", type=str, default="run_0", help="Output directory")
+parser.add_argument('-is_mac', action='store_true', help="Indicate that you are using a Mac")
+
 args = parser.parse_args()
 
 if __name__ == "__main__":
@@ -689,12 +692,15 @@ if __name__ == "__main__":
     }
 
     out_dir = args.out_dir
+
+    is_mac = args.is_mac
+
     all_results = {}
     final_infos = {}
     for dataset in ["shakespeare_char", "enwik8", "text8"]:
         final_info_list = []
         for seed_offset in range(num_seeds[dataset]):
-            final_info, train_info, val_info = train(dataset, out_dir, seed_offset)
+            final_info, train_info, val_info = train(dataset, out_dir, is_mac, seed_offset)
             all_results[f"{dataset}_{seed_offset}_final_info"] = final_info
             all_results[f"{dataset}_{seed_offset}_train_info"] = train_info
             all_results[f"{dataset}_{seed_offset}_val_info"] = val_info

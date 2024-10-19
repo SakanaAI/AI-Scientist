@@ -51,6 +51,7 @@ This code was designed for NVIDIA GPUs with CUDA using PyTorch. Support for othe
 
 ### Installation
 
+For Linux:
 ```bash
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
@@ -60,8 +61,17 @@ sudo apt-get install texlive-full
 # Install pypi requirements
 pip install -r requirements.txt
 ```
-
 When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.com/questions/956006/pregenerating-context-markiv-format-this-may-take-some-time-takes-forever).
+
+For Mac:
+
+Install `MacTex`: [Link](https://mirror.ctan.org/systems/mac/mactex/MacTeX.pkg)
+```bash
+conda create -n ai_scientist python=3.11
+conda activate ai_scientist
+pip install -r requirements.txt
+pip install --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+```
 
 ### Supported Models and API Keys
 
@@ -71,9 +81,17 @@ We support a wide variety of models including open-weight and API-only models. I
 
 By default, this uses the `OPENAI_API_KEY` environment variable.
 
+```bash
+export OPENAI_API_KEY="YOUR KEY HERE"
+```
+
 #### Anthropic API (Claude Sonnet 3.5)
 
 By default, this uses the `ANTHROPIC_API_KEY` environment variable.
+
+```bash
+export ANTHROPIC_API_KEY="YOUR KEY HERE"
+```
 
 ##### Claude models via Bedrock
 
@@ -140,13 +158,26 @@ python data/text8/prepare.py
 ```bash
 # Set up NanoGPT baseline run
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
-cd templates/nanoGPT && python experiment.py --out_dir run_0 && python plot.py
+cd templates/nanoGPT && python experiment.py --out_dir run_0 -is_mac && python plot.py && cd ../..
+```
+
+for mac user, add `-is_mac` as an argument
+```bash
+# NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
+cd templates/nanoGPT && python experiment.py --out_dir run_0 -is_mac && python plot.py && cd ../..
 ```
 
 #### Create NanoGPT_lite baseline run. We use this for sanity-checking
 ```bash
 # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
 cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 && python plot.py
+```
+
+for mac user, add `-is_mac` as an argument
+
+```bash
+# NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
+cd templates/nanoGPT_lite && python experiment.py --out_dir run_0 -is_mac && python plot.py && cd ../..
 ```
 
 ### Setup 2D Diffusion
@@ -159,7 +190,7 @@ pip install .
 pip install scikit-learn
 
 # Set up 2D Diffusion baseline run
-cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot.py
+cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot.py && cd ../..
 ```
 
 ### Setup Grokking
@@ -169,7 +200,7 @@ cd templates/2d_diffusion && python experiment.py --out_dir run_0 && python plot
 pip install einops
 
 # Set up Grokking baseline run
-cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
+cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py && cd ../..
 ```
 
 
