@@ -526,7 +526,9 @@ if __name__ == "__main__":
         default="gpt-4o-2024-05-13",
         choices=[
             "claude-3-5-sonnet-20240620",
+            "gpt-4o-mini-2024-07-18",
             "gpt-4o-2024-05-13",
+            "gpt-4o-2024-08-06",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
             # Anthropic Claude models via Amazon Bedrock
@@ -538,7 +540,7 @@ if __name__ == "__main__":
             "vertex_ai/claude-3-opus@20240229",
             "vertex_ai/claude-3-5-sonnet@20240620",
             "vertex_ai/claude-3-sonnet@20240229",
-            "vertex_ai/claude-3-haiku@20240307"
+            "vertex_ai/claude-3-haiku@20240307",
         ],
         help="Model to use for AI Scientist.",
     )
@@ -565,11 +567,11 @@ if __name__ == "__main__":
 
         print(f"Using Vertex AI with model {client_model}.")
         client = anthropic.AnthropicVertex()
-    elif args.model == "gpt-4o-2024-05-13":
+    elif 'gpt' in args.model:
         import openai
 
         print(f"Using OpenAI API with model {args.model}.")
-        client_model = "gpt-4o-2024-05-13"
+        client_model = args.model
         client = openai.OpenAI()
     elif args.model == "deepseek-coder-v2-0724":
         import openai
