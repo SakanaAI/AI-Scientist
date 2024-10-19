@@ -4,6 +4,8 @@ import json
 import re
 
 
+MAX_NUM_TOKENS = 4096
+
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_batch_responses_from_llm(
@@ -32,7 +34,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
             seed=0,
@@ -50,7 +52,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
         )
@@ -67,7 +69,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
         )
@@ -75,7 +77,7 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif "claude" in model:
+    else:
         content, new_msg_history = [], []
         for _ in range(n_responses):
             c, hist = get_response_from_llm(
@@ -89,9 +91,6 @@ def get_batch_responses_from_llm(
             )
             content.append(c)
             new_msg_history.append(hist)
-    else:
-        # TODO: This is only supported for GPT-4 in our reviewer pipeline.
-        raise ValueError(f"Model {model} not supported.")
 
     if print_debug:
         # Just print the first one.
@@ -133,7 +132,7 @@ def get_response_from_llm(
         ]
         response = client.messages.create(
             model=model,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             temperature=temperature,
             system=system_message,
             messages=new_msg_history,
@@ -163,7 +162,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
             seed=0,
@@ -179,7 +178,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -194,7 +193,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
