@@ -1,22 +1,41 @@
 import backoff
-import openai
 import json
+import openai
 import re
 
-
 MAX_NUM_TOKENS = 4096
+
+AVAILABLE_LLMS = [
+    "claude-3-5-sonnet-20240620",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-4o-2024-05-13",
+    "gpt-4o-2024-08-06",
+    "deepseek-coder-v2-0724",
+    "llama3.1-405b",
+    # Anthropic Claude models via Amazon Bedrock
+    "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+    "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    "bedrock/anthropic.claude-3-opus-20240229-v1:0",
+    # Anthropic Claude models Vertex AI
+    "vertex_ai/claude-3-opus@20240229",
+    "vertex_ai/claude-3-5-sonnet@20240620",
+    "vertex_ai/claude-3-sonnet@20240229",
+    "vertex_ai/claude-3-haiku@20240307",
+]
+
 
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_batch_responses_from_llm(
-    msg,
-    client,
-    model,
-    system_message,
-    print_debug=False,
-    msg_history=None,
-    temperature=0.75,
-    n_responses=1,
+        msg,
+        client,
+        model,
+        system_message,
+        print_debug=False,
+        msg_history=None,
+        temperature=0.75,
+        n_responses=1,
 ):
     if msg_history is None:
         msg_history = []
@@ -107,13 +126,13 @@ def get_batch_responses_from_llm(
 
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_response_from_llm(
-    msg,
-    client,
-    model,
-    system_message,
-    print_debug=False,
-    msg_history=None,
-    temperature=0.75,
+        msg,
+        client,
+        model,
+        system_message,
+        print_debug=False,
+        msg_history=None,
+        temperature=0.75,
 ):
     if msg_history is None:
         msg_history = []
@@ -240,3 +259,34 @@ def extract_json_between_markers(llm_output):
                 continue  # Try next match
 
     return None  # No valid JSON found
+
+
+def create_client(model):
+    if model == "claude-3-5-sonnet-20240620":
+        print(f"Using Anthropic API with model {model}.")
+        return anthropic.Anthropic(), model
+    elif model.startswith("bedrock") and "claude" in model:
+        client_model = model.split("/")[-1]
+        print(f"Using Amazon Bedrock with model {client_model}.")
+        return anthropic.AnthropicBedrock(), client_model
+    elif model.startswith("vertex_ai") and "claude" in model:
+        client_model = model.split("/")[-1]
+        print(f"Using Vertex AI with model {client_model}.")
+        return anthropic.AnthropicVertex(), client_model
+    elif 'gpt' in model:
+        print(f"Using OpenAI API with model {model}.")
+        return openai.OpenAI(), model
+    elif model == "deepseek-coder-v2-0724":
+        print(f"Using OpenAI API with {model}.")
+        return openai.OpenAI(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com"
+        ), model
+    elif model == "llama3.1-405b":
+        print(f"Using OpenAI API with {model}.")
+        return openai.OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url="https://openrouter.ai/api/v1"
+        ), "meta-llama/llama-3.1-405b-instruct"
+    else:
+        raise ValueError(f"Model {model} not supported.")
