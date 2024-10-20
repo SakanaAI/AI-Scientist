@@ -13,6 +13,7 @@ AVAILABLE_LLMS = [
     "gpt-4o-mini-2024-07-18",
     "gpt-4o-2024-05-13",
     "gpt-4o-2024-08-06",
+    "o1-mini",
     "deepseek-coder-v2-0724",
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -59,6 +60,24 @@ def get_batch_responses_from_llm(
             max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
+            seed=0,
+        )
+        content = [r.message.content for r in response.choices]
+        new_msg_history = [
+            new_msg_history + [{"role": "assistant", "content": c}] for c in content
+        ]
+    elif model == "o1-mini":
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=1, #o1 only support temperature=1 at this time
+            max_completion_tokens=MAX_NUM_TOKENS,  #max token is replaced by max completion tokens
+            n=n_responses,
+            #stop=None,
             seed=0,
         )
         content = [r.message.content for r in response.choices]
@@ -191,6 +210,22 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif model == "o1-mini":
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=1,
+            max_completion_tokens=MAX_NUM_TOKENS,
+            n=1,
+            #stop=None,
+            seed=0,
+        )
+        content = response.choices[0].message.content
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif model == "deepseek-coder-v2-0724":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
@@ -277,6 +312,9 @@ def create_client(model):
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
     elif 'gpt' in model:
+        print(f"Using OpenAI API with model {model}.")
+        return openai.OpenAI(), model
+    elif model == "o1-mini":
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
     elif model == "deepseek-coder-v2-0724":
