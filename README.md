@@ -65,9 +65,9 @@ When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.c
 
 ### Supported Models and API Keys
 
-We support a wide variety of models including open-weight and API-only models. In general, we recommend only using frontier models above the capability of the original GPT-4.
+We support a wide variety of models including open-weight and API-only models. In general, we recommend only using frontier models above the capability of the original GPT-4. To see a full list of models, see [here](https://github.com/SakanaAI/AI-Scientist/blob/main/ai_scientist/llm.py).
 
-#### OpenAI API (GPT-4)
+#### OpenAI API (GPT-4o, GPT-4o-mini, o1 models)
 
 By default, this uses the `OPENAI_API_KEY` environment variable.
 
