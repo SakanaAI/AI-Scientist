@@ -1,3 +1,5 @@
+# This file trains a Sketch RNN (https://arxiv.org/abs/1704.03477).
+
 import argparse
 from dataclasses import dataclass
 import json
