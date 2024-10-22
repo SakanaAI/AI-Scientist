@@ -232,6 +232,7 @@ If there is an area of study you would like **The AI Scientist** to explore, it 
 - `latex/template.tex` -- We recommend using our latex folder, but be sure to replace the pre-loaded citations with ones that you would expect to be more relevant.
 
 Please see [this PR](https://github.com/SakanaAI/AI-Scientist/pull/141) for an example of a new template for computer vision.
+The key to making new templates work is matching the base file names and output JSONs to the existing format, all else is free to change.
    
 ## Template Resources
 
