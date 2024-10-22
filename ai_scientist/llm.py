@@ -67,24 +67,6 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif model in ["o1-preview-2024-09-12", "o1-mini-2024-09-12"]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=1, #o1 only support temperature=1 at this time
-            max_completion_tokens=MAX_NUM_TOKENS,  #max token is replaced by max completion tokens
-            n=n_responses,
-            #stop=None,
-            seed=0,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
     elif model == "deepseek-coder-v2-0724":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
