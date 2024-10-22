@@ -10,6 +10,7 @@ MAX_NUM_TOKENS = 4096
 
 AVAILABLE_LLMS = [
     "claude-3-5-sonnet-20240620",
+    "claude-3-5-sonnet-20241022",
     "gpt-4o-mini-2024-07-18",
     "gpt-4o-2024-05-13",
     "gpt-4o-2024-08-06",
@@ -142,7 +143,7 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if "claude" in model:
+    if model.startswith("claude-"):
         new_msg_history = msg_history + [
             {
                 "role": "user",
@@ -283,7 +284,7 @@ def extract_json_between_markers(llm_output):
 
 
 def create_client(model):
-    if model == "claude-3-5-sonnet-20240620":
+    if model.startswith("claude-"):
         print(f"Using Anthropic API with model {model}.")
         return anthropic.Anthropic(), model
     elif model.startswith("bedrock") and "claude" in model:
