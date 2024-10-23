@@ -3,10 +3,11 @@ import os
 import os.path as osp
 import time
 from typing import List, Dict, Union
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers
 
-import requests
 import backoff
+import requests
+
+from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -73,12 +74,12 @@ ONLY INCLUDE "I am done" IF YOU ARE MAKING NO MORE CHANGES."""
 
 # GENERATE IDEAS
 def generate_ideas(
-    base_dir,
-    client,
-    model,
-    skip_generation=False,
-    max_num_generations=20,
-    num_reflections=5,
+        base_dir,
+        client,
+        model,
+        skip_generation=False,
+        max_num_generations=20,
+        num_reflections=5,
 ):
     if skip_generation:
         # Load existing ideas from file
@@ -149,7 +150,7 @@ def generate_ideas(
                     ## PARSE OUTPUT
                     json_output = extract_json_between_markers(text)
                     assert (
-                        json_output is not None
+                            json_output is not None
                     ), "Failed to extract JSON from LLM output"
                     print(json_output)
 
@@ -175,12 +176,12 @@ def generate_ideas(
 
 # GENERATE IDEAS OPEN-ENDED
 def generate_next_idea(
-    base_dir,
-    client,
-    model,
-    prev_idea_archive=[],
-    num_reflections=5,
-    max_attempts=10,
+        base_dir,
+        client,
+        model,
+        prev_idea_archive=[],
+        num_reflections=5,
+        max_attempts=10,
 ):
     idea_archive = prev_idea_archive
     original_archive_size = len(idea_archive)
@@ -248,7 +249,7 @@ Scores of 0 indicate the idea failed either during experimentation, writeup or r
                         ## PARSE OUTPUT
                         json_output = extract_json_between_markers(text)
                         assert (
-                            json_output is not None
+                                json_output is not None
                         ), "Failed to extract JSON from LLM output"
                         print(json_output)
 
@@ -358,11 +359,11 @@ This JSON will be automatically parsed, so ensure the format is precise.'''
 
 
 def check_idea_novelty(
-    ideas,
-    base_dir,
-    client,
-    model,
-    max_num_iterations=10,
+        ideas,
+        base_dir,
+        client,
+        model,
+        max_num_iterations=10,
 ):
     with open(osp.join(base_dir, "experiment.py"), "r") as f:
         code = f.read()
@@ -463,12 +464,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=[
-            "claude-3-5-sonnet-20240620",
-            "gpt-4o-2024-05-13",
-            "deepseek-coder-v2-0724",
-            "llama3.1-405b",
-        ],
+        choices=AVAILABLE_LLMS,
         help="Model to use for AI Scientist.",
     )
     parser.add_argument(
@@ -484,53 +480,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Create client
-    if args.model == "claude-3-5-sonnet-20240620":
-        import anthropic
-
-        print(f"Using Anthropic API with model {args.model}.")
-        client_model = "claude-3-5-sonnet-20240620"
-        client = anthropic.Anthropic()
-    elif args.model.startswith("bedrock") and "claude" in args.model:
-        import anthropic
-
-        # Expects: bedrock/<MODEL_ID>
-        client_model = args.model.split("/")[-1]
-
-        print(f"Using Amazon Bedrock with model {client_model}.")
-        client = anthropic.AnthropicBedrock()
-    elif args.model.startswith("vertex_ai") and "claude" in args.model:
-        import anthropic
-
-        # Expects: vertex_ai/<MODEL_ID>
-        client_model = args.model.split("/")[-1]
-
-        print(f"Using Vertex AI with model {client_model}.")
-        client = anthropic.AnthropicVertex()
-    elif args.model == "gpt-4o-2024-05-13":
-        import openai
-
-        print(f"Using OpenAI API with model {args.model}.")
-        client_model = "gpt-4o-2024-05-13"
-        client = openai.OpenAI()
-    elif args.model == "deepseek-coder-v2-0724":
-        import openai
-
-        print(f"Using OpenAI API with {args.model}.")
-        client_model = "deepseek-coder-v2-0724"
-        client = openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com"
-        )
-    elif args.model == "llama3.1-405b":
-        import openai
-
-        print(f"Using OpenAI API with {args.model}.")
-        client_model = "meta-llama/llama-3.1-405b-instruct"
-        client = openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1",
-        )
-    else:
-        raise ValueError(f"Model {args.model} not supported.")
+    client, client_model = create_client(args.model)
 
     base_dir = osp.join("templates", args.experiment)
     results_dir = osp.join("results", args.experiment)

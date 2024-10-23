@@ -65,9 +65,9 @@ When installing `texlive-full`, you may need to [hold Enter](https://askubuntu.c
 
 ### Supported Models and API Keys
 
-We support a wide variety of models including open-weight and API-only models. In general, we recommend only using frontier models above the capability of the original GPT-4.
+We support a wide variety of models including open-weight and API-only models. In general, we recommend only using frontier models above the capability of the original GPT-4. To see a full list of models, see [here](https://github.com/SakanaAI/AI-Scientist/blob/main/ai_scientist/llm.py).
 
-#### OpenAI API (GPT-4)
+#### OpenAI API (GPT-4o, GPT-4o-mini, o1 models)
 
 By default, this uses the `OPENAI_API_KEY` environment variable.
 
@@ -181,7 +181,7 @@ cd templates/grokking && python experiment.py --out_dir run_0 && python plot.py
 conda activate ai_scientist
 # Run the paper generation.
 python launch_scientist.py --model "gpt-4o-2024-05-13" --experiment nanoGPT_lite --num-ideas 2
-python launch_scientist.py --model "claude-3-5-sonnet-20240620" --experiment nanoGPT_lite --num-ideas 2
+python launch_scientist.py --model "claude-3-5-sonnet-20241022" --experiment nanoGPT_lite --num-ideas 2
 ```
 
 If you have more than 1 GPU, use the `parallel` option to parallelize ideas across multiple GPUs.
@@ -230,6 +230,9 @@ If there is an area of study you would like **The AI Scientist** to explore, it 
 - `prompt.json` -- Put information about your template here.
 - `seed_ideas.json` -- Put example ideas here. You can also try to generate ideas without any examples, and then pick the best one or two to put here.
 - `latex/template.tex` -- We recommend using our latex folder, but be sure to replace the pre-loaded citations with ones that you would expect to be more relevant.
+
+Please see [this PR](https://github.com/SakanaAI/AI-Scientist/pull/141) for an example of a new template for computer vision.
+The key to making new templates work is matching the base file names and output JSONs to the existing format, all else is free to change.
    
 ## Template Resources
 
@@ -277,8 +280,7 @@ Change the base `template.tex` files contained within each template.
 Please refer to the instructions for different templates. In this current iteration, this is restricted to ideas that can be expressed in code. However, lifting this restriction would represent exciting future work! :)
 
 ### How do I add support for a new foundation model?
-Please see this [PR](https://github.com/SakanaAI/AI-Scientist/pull/7) for an example of how to add a new model, e.g. this time for Claude via Bedrock.
-We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
+You may modify `ai_scientist/llm.py` to add support for a new foundation model. We do not advise any model that is significantly weaker than GPT-4 level for The AI Scientist.
 
 ### Why do I need to run the baseline runs myself?
 These appear as `run_0` and should be run per machine you execute The AI Scientist on for accurate run-time comparisons due to hardware differences.
