@@ -48,8 +48,10 @@ if __name__ == "__main__":
     }
 
     final_info = {
-        "means": means,  # means is used in the experiment
-        "solution": solution.tolist(),  # solution is used in the visualization
+        "SEIR": {
+            "means": means,  # means is used in the experiment
+            "solution": solution.tolist(),  # solution is used in the visualization
+        }
     }
     with open(os.path.join(out_dir, "final_info.json"), "w") as f:
         json.dump(final_info, f)

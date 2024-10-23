@@ -20,14 +20,14 @@ labels = {
 
 for i, run in enumerate(final_results.keys()):
     plt.figure(figsize=(10, 6))
-    solution = np.array(final_results[run]["solution"])
+    solution = np.array(final_results[run]["SEIR"]["solution"])
     susceptible = solution[:, 0]
     exposed = solution[:, 1]
     infectious = solution[:, 2]
     recovered = solution[:, 3]
-    infected_peak_day = final_results[run]["means"]["infected_peak_day"]
-    infected_peak = final_results[run]["means"]["infected_peak"]
-    tolal_infected = final_results[run]["means"]["total_infected"]
+    infected_peak_day = final_results[run]["SEIR"]["means"]["infected_peak_day"]
+    infected_peak = final_results[run]["SEIR"]["means"]["infected_peak"]
+    tolal_infected = final_results[run]["SEIR"]["means"]["total_infected"]
     plt.plot(susceptible, label="Susceptible", color="blue")
     plt.plot(exposed, label="Exposed", color="orange")
     plt.plot(infectious, label="Infectious", color="red")
