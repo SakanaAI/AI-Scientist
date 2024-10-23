@@ -25,15 +25,15 @@ for i, run in enumerate(final_results.keys()):
     exposed = solution[:, 1]
     infectious = solution[:, 2]
     recovered = solution[:, 3]
-    infected_peak_day = final_results[run]["infected_peak_day"]
-    infected_peak = final_results[run]["infected_peak"]
-    tolal_infected = final_results[run]["tolal_infected"]
-    plt.plot(susceptible, label=f"Susceptible", color="blue")
-    plt.plot(exposed, label=f"Exposed", color="orange")
-    plt.plot(infectious, label=f"Infectious", color="red")
-    plt.plot(recovered, label=f"Recovered", color="green")
+    infected_peak_day = final_results[run]["means"]["infected_peak_day"]
+    infected_peak = final_results[run]["means"]["infected_peak"]
+    tolal_infected = final_results[run]["means"]["total_infected"]
+    plt.plot(susceptible, label="Susceptible", color="blue")
+    plt.plot(exposed, label="Exposed", color="orange")
+    plt.plot(infectious, label="Infectious", color="red")
+    plt.plot(recovered, label="Recovered", color="green")
     plt.axvline(
-        infected_peak_day, color="red", linestyle="--", label=f"Infected peak day"
+        infected_peak_day, color="red", linestyle="--", label="Infected peak day"
     )
     plt.text(infected_peak_day, infected_peak, f"Peak: {infected_peak}", color="red")
 

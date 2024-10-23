@@ -41,11 +41,15 @@ if __name__ == "__main__":
         args=(0.001, 14, 7),
     )
 
-    final_info = {
-        "solution": solution.tolist(),
+    means = {
         "infected_peak_day": np.argmax(solution[:, 2]).item(),
         "infected_peak": np.max(solution[:, 2]).item(),
-        "tolal_infected": solution[-1, 3].item(),
+        "total_infected": solution[-1, 3].item(),
+    }
+
+    final_info = {
+        "means": means,  # means is used in the experiment
+        "solution": solution.tolist(),  # solution is used in the visualization
     }
     with open(os.path.join(out_dir, "final_info.json"), "w") as f:
         json.dump(final_info, f)
