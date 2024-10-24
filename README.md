@@ -37,16 +37,26 @@ We provide all runs and data from our paper [here](https://drive.google.com/driv
 
 ## Table of Contents
 
-1. [Requirements](#requirements)
+1. [Introduction](#introduction)
+2. [Requirements](#requirements)
    - [Installation](#installation)
    - [Supported Models and API Keys](#supported-models-and-api-keys)
-2. [Run AI Scientist Paper Generation Experiments](#run-ai-scientist-paper-generation-experiments)
-3. [Getting an LLM-Generated Paper Review](#getting-an-llm-generated-paper-review)
-4. [Making Your Own Template](#making-your-own-template)
-5. [Template Resources](#template-resources)
-6. [Citing The AI Scientist](#citing-the-ai-scientist)
-7. [Frequently Asked Questions](#frequently-asked-questions)
-8. [Containerization](#containerization)
+3. [Setting Up the Templates](#setting-up-the-templates)
+   - [NanoGPT Template](#nanogpt-template)
+   - [2D Diffusion Template](#2d-diffusion-template)
+   - [Grokking Template](#grokking-template)
+4. [Run AI Scientist Paper Generation Experiments](#run-ai-scientist-paper-generation-experiments)
+5. [Getting an LLM-Generated Paper Review](#getting-an-llm-generated-paper-review)
+6. [Making Your Own Template](#making-your-own-template)
+   - [Community-Contributed Templates](#community-contributed-templates)
+7. [Template Resources](#template-resources)
+8. [Citing The AI Scientist](#citing-the-ai-scientist)
+9. [Frequently Asked Questions](#frequently-asked-questions)
+10. [Containerization](#containerization)
+
+## Introduction
+
+We provide three templates, which were used in our paper, covering the following domains: **NanoGPT**, **2D Diffusion**, and **Grokking**. These templates enable The AI Scientist to generate ideas and conduct experiments in these areas. We accept contributions of new templates from the community, but please note that they are not maintained by us. All other templates beyond the three provided are community contributions.
 
 ## Requirements
 
@@ -127,41 +137,41 @@ export OPENAI_API_KEY="YOUR KEY HERE"
 export S2_API_KEY="YOUR KEY HERE"
 ```
 
-### Setup NanoGPT
+## Setting Up the Templates
 
-**Note:** The following steps provide instructions for setting up the data and baseline evaluations for each template. You only need to run the setup steps for templates you are interested in using. This is necessary to run on your machine as training times may vary depending on your hardware.
+This section provides instructions for setting up each of the three templates used in our paper. Before running The AI Scientist experiments, please ensure you have completed the setup steps for the templates you are interested in.
 
-1. Prepare the data:
+### NanoGPT Template
 
-```bash
-# Prepare NanoGPT data
-python data/enwik8/prepare.py
-python data/shakespeare_char/prepare.py
-python data/text8/prepare.py
-```
+**Description:** This template investigates transformer-based autoregressive next-token prediction tasks.
 
-2. Create baseline runs (machine dependent):
+**Setup Steps:**
 
-```bash
-# Set up NanoGPT baseline run
-# NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
-cd templates/nanoGPT
-python experiment.py --out_dir run_0
-python plot.py
-```
+1. **Prepare the data:**
 
-### Setup NanoGPT_lite Baseline Run (for Sanity-Checking)
+   ```bash
+   python data/enwik8/prepare.py
+   python data/shakespeare_char/prepare.py
+   python data/text8/prepare.py
+   ```
 
-```bash
-# NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
-cd templates/nanoGPT_lite
-python experiment.py --out_dir run_0
-python plot.py
-```
+2. **Create baseline runs (machine dependent):**
 
-### Setup 2D Diffusion
+   ```bash
+   # Set up NanoGPT baseline run
+   # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
+   cd templates/nanoGPT
+   python experiment.py --out_dir run_0
+   python plot.py
+   ```
 
-1. Install dependencies:
+### 2D Diffusion Template
+
+**Description:** This template studies improving the performance of diffusion generative models on low-dimensional datasets.
+
+**Setup Steps:**
+
+1. **Install dependencies:**
 
    ```bash
    # Set up 2D Diffusion
@@ -171,32 +181,36 @@ python plot.py
    pip install scikit-learn
    ```
 
-2. Create baseline runs:
+2. **Create baseline runs:**
 
-```bash
-# Set up 2D Diffusion baseline run
-cd templates/2d_diffusion
-python experiment.py --out_dir run_0
-python plot.py
-```
+   ```bash
+   # Set up 2D Diffusion baseline run
+   cd templates/2d_diffusion
+   python experiment.py --out_dir run_0
+   python plot.py
+   ```
 
-### Setup Grokking
+### Grokking Template
 
-1. Install dependencies:
+**Description:** This template investigates questions about generalization and learning speed in deep neural networks.
 
-```bash
-# Set up Grokking
-pip install einops
-```
+**Setup Steps:**
 
-2. Create baseline runs:
+1. **Install dependencies:**
 
-```bash
-# Set up Grokking baseline run
-cd templates/grokking
-python experiment.py --out_dir run_0
-python plot.py
-```
+   ```bash
+   # Set up Grokking
+   pip install einops
+   ```
+
+2. **Create baseline runs:**
+
+   ```bash
+   # Set up Grokking baseline run
+   cd templates/grokking
+   python experiment.py --out_dir run_0
+   python plot.py
+   ```
 
 ## Run AI Scientist Paper Generation Experiments
 
@@ -257,7 +271,15 @@ If there is an area of study you would like **The AI Scientist** to explore, it 
 - `seed_ideas.json` — Place example ideas here. You can also try to generate ideas without any examples and then pick the best one or two to put here.
 - `latex/template.tex` — We recommend using our LaTeX folder but be sure to replace the pre-loaded citations with ones that you expect to be more relevant.
 
-Please see [this PR](https://github.com/SakanaAI/AI-Scientist/pull/141) for an example of a new template for computer vision. The key to making new templates work is matching the base filenames and output JSONs to the existing format; everything else is free to change.
+The key to making new templates work is matching the base filenames and output JSONs to the existing format; everything else is free to change.
+
+### Community-Contributed Templates
+
+We welcome community contributions in the form of new templates. While these are not maintained by us, we encourage sharing your templates with others. Below, we list community-contributed templates along with links to their pull requests (PRs):
+
+- [Example Template A](#) - [PR #XYZ](https://github.com/SakanaAI/AI-Scientist/pull/XYZ)
+
+*This section is reserved for community contributions. Please submit a pull request to add your template to the list!*
 
 ## Template Resources
 
