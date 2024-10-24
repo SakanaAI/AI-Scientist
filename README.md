@@ -275,11 +275,11 @@ The key to making new templates work is matching the base filenames and output J
 
 ### Community-Contributed Templates
 
-We welcome community contributions in the form of new templates. While these are not maintained by us, we encourage sharing your templates with others. Below, we list community-contributed templates along with links to their pull requests (PRs):
+We welcome community contributions in the form of new templates. While these are not maintained by us, we are delighted to highlight your templates to others. Below, we list community-contributed templates along with links to their pull requests (PRs):
 
-- [Example Template A](#) - [PR #XYZ](https://github.com/SakanaAI/AI-Scientist/pull/XYZ)
+- Infectious Disease Modeling (`seir`) - [PR #137](https://github.com/SakanaAI/AI-Scientist/pull/137)
 
-*This section is reserved for community contributions. Please submit a pull request to add your template to the list!*
+*This section is reserved for community contributions. Please submit a pull request to add your template to the list! Please describe the template in the PR description, and also show examples of the generated papers.*
 
 ## Template Resources
 
@@ -360,3 +360,4 @@ docker run -it -e OPENAI_API_KEY=$OPENAI_API_KEY \
   --entrypoint /bin/bash \
   <AI_SCIENTIST_IMAGE>
 ```
+</rewritten_chunk>
