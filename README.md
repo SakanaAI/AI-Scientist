@@ -272,6 +272,7 @@ If there is an area of study you would like **The AI Scientist** to explore, it 
 - `latex/template.tex` — We recommend using our LaTeX folder but be sure to replace the pre-loaded citations with ones that you expect to be more relevant.
 
 The key to making new templates work is matching the base filenames and output JSONs to the existing format; everything else is free to change.
+You should also ensure that the `template.tex` file is updated to use the correct citation style / base plots for your template.
 
 ### Community-Contributed Templates
 
