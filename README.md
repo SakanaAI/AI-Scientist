@@ -254,6 +254,14 @@ review["Decision"]   # 'Accept' or 'Reject'
 review["Weaknesses"] # List of weaknesses (strings)
 ```
 
+To generate a quick review for a single paper:
+
+```bash
+python generate_review.py --model gpt-4o-2024-05-13 -n 1 --num_reflections 5 --num_fs_examples 1 --num_reviews_ensemble 5 --temperature 0.1 --max-pages 0 --openai-api-key sk-1234 ~/path/to/paper.pdf
+```
+
+Will output `n` number of reviews to `outputs/paper_{n}.json`
+
 To run batch analysis:
 
 ```bash
