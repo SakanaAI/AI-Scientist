@@ -360,4 +360,3 @@ docker run -it -e OPENAI_API_KEY=$OPENAI_API_KEY \
   --entrypoint /bin/bash \
   <AI_SCIENTIST_IMAGE>
 ```
-</rewritten_chunk>
