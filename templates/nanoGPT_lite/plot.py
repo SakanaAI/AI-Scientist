@@ -1,9 +1,10 @@
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import numpy as np
 import json
 import os
 import os.path as osp
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
 
 # LOAD FINAL RESULTS:
 datasets = ["shakespeare_char"]
@@ -44,10 +45,12 @@ labels = {
     "run_0": "Baselines",
 }
 
+
 # Create a programmatic color palette
 def generate_color_palette(n):
     cmap = plt.get_cmap('tab20')
     return [mcolors.rgb2hex(cmap(i)) for i in np.linspace(0, 1, n)]
+
 
 # Get the list of runs and generate the color palette
 runs = list(labels.keys())

@@ -1,15 +1,16 @@
-import argparse
 import abc
+import argparse
+import json
+import os
 import random
 from itertools import permutations
 from typing import Set
-import os
-import json
+
 import numpy as np
-from einops import rearrange, repeat
 import torch
-from torch.utils.data import IterableDataset
+from einops import rearrange, repeat
 from torch import nn, Tensor
+from torch.utils.data import IterableDataset
 
 
 class AbstractDataset(abc.ABC):
@@ -27,7 +28,7 @@ class AbstractDataset(abc.ABC):
         random.shuffle(idxs)
         self.train_pairs, self.val_pairs = (
             idxs[: int(len(idxs) * frac_train)],
-            idxs[int(len(idxs) * frac_train) :],
+            idxs[int(len(idxs) * frac_train):],
         )
 
     @abc.abstractmethod
@@ -181,13 +182,13 @@ class DecoderBlock(torch.nn.Module):
 
 class Transformer(torch.nn.Module):
     def __init__(
-        self,
-        num_layers: int,
-        dim_model: int,
-        num_heads: int,
-        vocab_size: int,
-        output_size: int,
-        seq_len: int,
+            self,
+            num_layers: int,
+            dim_model: int,
+            num_heads: int,
+            vocab_size: int,
+            output_size: int,
+            seq_len: int,
     ):
         super().__init__()
 
@@ -364,7 +365,7 @@ def run(out_dir, dataset, seed_offset):
     }
     print(final_info)
     with open(
-        os.path.join(out_dir, f"final_info_{dataset}_{seed_offset}.json"), "w"
+            os.path.join(out_dir, f"final_info_{dataset}_{seed_offset}.json"), "w"
     ) as f:
         json.dump(final_info, f)
     return final_info, train_log_info, val_log_info
@@ -373,7 +374,6 @@ def run(out_dir, dataset, seed_offset):
 parser = argparse.ArgumentParser(description="Run experiment")
 parser.add_argument("--out_dir", type=str, default="run_0", help="Output directory")
 args = parser.parse_args()
-
 
 if __name__ == "__main__":
     num_seeds = {

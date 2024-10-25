@@ -1,20 +1,19 @@
-import os
-import time
+import argparse
 import json
+import os
+import random
+import time
 from dataclasses import dataclass
+from functools import partial
+from typing import Callable, List, Optional, Union, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, models
-import argparse
+from torchvision import datasets, transforms
 
-from functools import partial
-from typing import Callable, List, Optional, Union, Any, Sequence, Tuple
-
-import random
-import numpy as np
 
 # _make_divisible function from torchvision
 def _make_divisible(v: float, divisor: int, min_value: Optional[int] = None) -> int:
@@ -29,14 +28,15 @@ def _make_divisible(v: float, divisor: int, min_value: Optional[int] = None) -> 
         new_v += divisor
     return new_v
 
+
 # Squeeze-and-Excitation block
 class SqueezeExcitation(nn.Module):
     def __init__(
-        self,
-        input_channels: int,
-        squeeze_channels: int,
-        activation: Callable[..., nn.Module] = nn.ReLU,
-        scale_activation: Callable[..., nn.Module] = nn.Hardsigmoid,
+            self,
+            input_channels: int,
+            squeeze_channels: int,
+            activation: Callable[..., nn.Module] = nn.ReLU,
+            scale_activation: Callable[..., nn.Module] = nn.Hardsigmoid,
     ) -> None:
         super().__init__()
         self.avgpool = nn.AdaptiveAvgPool2d(1)
@@ -57,20 +57,21 @@ class SqueezeExcitation(nn.Module):
         scale = self._scale(input)
         return input * scale
 
+
 # ConvNormActivation block
 class ConvNormActivation(nn.Sequential):
     def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int]] = 3,
-        stride: Union[int, Tuple[int]] = 1,
-        padding: Optional[Union[int, Tuple[int], str]] = None,
-        groups: int = 1,
-        norm_layer: Optional[Callable[..., nn.Module]] = nn.BatchNorm2d,
-        activation_layer: Optional[Callable[..., nn.Module]] = nn.ReLU,
-        dilation: Union[int, Tuple[int]] = 1,
-        bias: Optional[bool] = None,
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: Union[int, Tuple[int]] = 3,
+            stride: Union[int, Tuple[int]] = 1,
+            padding: Optional[Union[int, Tuple[int], str]] = None,
+            groups: int = 1,
+            norm_layer: Optional[Callable[..., nn.Module]] = nn.BatchNorm2d,
+            activation_layer: Optional[Callable[..., nn.Module]] = nn.ReLU,
+            dilation: Union[int, Tuple[int]] = 1,
+            bias: Optional[bool] = None,
     ) -> None:
 
         if padding is None:
@@ -102,19 +103,20 @@ class ConvNormActivation(nn.Sequential):
         super().__init__(*layers)
         self.out_channels = out_channels
 
+
 # InvertedResidualConfig class
 class InvertedResidualConfig:
     def __init__(
-        self,
-        input_channels: int,
-        kernel: int,
-        expanded_channels: int,
-        out_channels: int,
-        use_se: bool,
-        activation: str,
-        stride: int,
-        dilation: int,
-        width_mult: float,
+            self,
+            input_channels: int,
+            kernel: int,
+            expanded_channels: int,
+            out_channels: int,
+            use_se: bool,
+            activation: str,
+            stride: int,
+            dilation: int,
+            width_mult: float,
     ):
         self.input_channels = self.adjust_channels(input_channels, width_mult)
         self.kernel = kernel
@@ -129,13 +131,14 @@ class InvertedResidualConfig:
     def adjust_channels(channels: int, width_mult: float):
         return _make_divisible(channels * width_mult, 8)
 
+
 # InvertedResidual block
 class InvertedResidual(nn.Module):
     def __init__(
-        self,
-        cnf: InvertedResidualConfig,
-        norm_layer: Callable[..., nn.Module],
-        se_layer: Callable[..., nn.Module] = partial(SqueezeExcitation, scale_activation=nn.Hardsigmoid),
+            self,
+            cnf: InvertedResidualConfig,
+            norm_layer: Callable[..., nn.Module],
+            se_layer: Callable[..., nn.Module] = partial(SqueezeExcitation, scale_activation=nn.Hardsigmoid),
     ):
         super().__init__()
         if not (1 <= cnf.stride <= 2):
@@ -205,16 +208,17 @@ class InvertedResidual(nn.Module):
         else:
             return result
 
+
 # MobileNetV3 Small model
 class MobileNetV3Small(nn.Module):
     def __init__(
-        self,
-        num_classes: int = 1000,
-        width_mult: float = 1.0,
-        dropout: float = 0.2,
-        reduced_tail: bool = False,
-        dilated: bool = False,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
+            self,
+            num_classes: int = 1000,
+            width_mult: float = 1.0,
+            dropout: float = 0.2,
+            reduced_tail: bool = False,
+            dilated: bool = False,
+            norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
         super().__init__()
 
@@ -308,10 +312,11 @@ class MobileNetV3Small(nn.Module):
         x = self.classifier(x)
         return x
 
+
 # Function to create the model and load pretrained weights
 def mobilenet_v3_small(pretrained=False, progress=True, **kwargs):
     model = MobileNetV3Small(**kwargs)
-    
+
     if pretrained:
         # Load the torchvision model with pretrained weights
         from torchvision.models import mobilenet_v3_small as tv_mobilenet_v3_small
@@ -333,7 +338,7 @@ def mobilenet_v3_small(pretrained=False, progress=True, **kwargs):
             # Load all weights
             pretrained_model = tv_mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT, progress=progress)
             model.load_state_dict(pretrained_model.state_dict())
-    
+
     return model
 
 
@@ -341,7 +346,7 @@ def mobilenet_v3_small(pretrained=False, progress=True, **kwargs):
 class Config:
     # data
     data_path: str = './data'
-    dataset: str = 'cifar10'    
+    dataset: str = 'cifar10'
     num_classes: int = 10
     # model
     model: str = 'mobilenet_v3_small'
@@ -358,7 +363,7 @@ class Config:
     eval_interval: int = 1000
     # output
     out_dir: str = 'run_0'
-    seed: int = 0              
+    seed: int = 0
     # compile for SPEED!
     compile_model: bool = False
 
@@ -436,10 +441,10 @@ def train(config):
         train_loss = 0.0
         train_correct = 0
         train_total = 0
-        
+
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.to(config.device), targets.to(config.device)
-            
+
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -479,6 +484,7 @@ def train(config):
 
     return train_log_info, val_log_info, best_acc
 
+
 def evaluate(model, dataloader, criterion, config):
     model.eval()
     val_loss = 0.0
@@ -501,6 +507,7 @@ def evaluate(model, dataloader, criterion, config):
 
     return val_loss, val_acc
 
+
 def test(config):
     model = MobileNetV3Small(num_classes=config.num_classes).to(config.device)
     if config.compile_model:
@@ -509,10 +516,11 @@ def test(config):
     model.load_state_dict(torch.load(os.path.join(config.out_dir, 'best_model.pth')))
     _, test_loader = get_data_loaders(config)
     criterion = nn.CrossEntropyLoss()
-    
+
     test_loss, test_acc = evaluate(model, test_loader, criterion, config)
     print(f'Test - Loss: {test_loss:.3f}, Acc: {test_acc:.3f}%')
     return test_loss, test_acc
+
 
 def main():
     parser = argparse.ArgumentParser(description="Train MobileNetV3 for Image Classification")
@@ -577,7 +585,7 @@ def main():
         # Aggregate results over seeds
         final_info_dict = {k: [d[k] for d in final_info_list if k in d] for k in final_info_list[0].keys()}
         means = {f"{k}_mean": np.mean(v) for k, v in final_info_dict.items() if isinstance(v[0], (int, float, float))}
-        stderrs = {f"{k}_stderr": np.std(v)/np.sqrt(len(v)) for k, v in final_info_dict.items() if isinstance(v[0], (int, float, float))}
+        stderrs = {f"{k}_stderr": np.std(v) / np.sqrt(len(v)) for k, v in final_info_dict.items() if isinstance(v[0], (int, float, float))}
         final_infos[dataset] = {
             "means": means,
             "stderrs": stderrs,
@@ -593,6 +601,7 @@ def main():
         np.save(f, all_results)
 
     print(f"All results saved to {args.out_dir}")
+
 
 if __name__ == "__main__":
     main()

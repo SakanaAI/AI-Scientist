@@ -1,17 +1,19 @@
 # This file trains a Sketch RNN (https://arxiv.org/abs/1704.03477).
 
 import argparse
-from dataclasses import dataclass
 import json
-import numpy as np
 import os.path as osp
 import pathlib
 import pickle
 import time
+from dataclasses import dataclass
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
 import utils
 
 
@@ -54,7 +56,7 @@ def sample_from_state(state, temperature, device):
     next_state[pen_state_idx + 2] = 1
     return (
         next_state.view(1, 1, -1).to(device),
-        x, y, pen_state_idx==1, pen_state_idx==2,
+        x, y, pen_state_idx == 1, pen_state_idx == 2,
     )
 
 
@@ -66,7 +68,7 @@ def compute_reconstruction_loss(state, targets):
     pen_state = targets.data[:, :, 2:]
     mask = 1 - pen_state[:, :, -1]
     pdf_logits = utils.bivariate_normal_pdf(
-        dx, dy, 
+        dx, dy,
         state.mu_x, state.mu_y, state.sigma_x, state.sigma_y, state.rho_xy
     )
     llh_xy = -torch.sum(
@@ -77,13 +79,13 @@ def compute_reconstruction_loss(state, targets):
 
 
 def compute_kl_loss(sigma, mu, kl_min):
-        """KL between distribution of latent signals and IID N(0, I)."""
-        kl_loss = -0.5 * (
-            torch.sum(1 + sigma - mu ** 2 - torch.exp(sigma))
-            ) / float(np.prod(sigma.size()))
-        if kl_loss < kl_min:
-            return kl_loss.detach()
-        return kl_loss
+    """KL between distribution of latent signals and IID N(0, I)."""
+    kl_loss = -0.5 * (
+        torch.sum(1 + sigma - mu ** 2 - torch.exp(sigma))
+    ) / float(np.prod(sigma.size()))
+    if kl_loss < kl_min:
+        return kl_loss.detach()
+    return kl_loss
 
 
 class EncoderRNN(nn.Module):
@@ -93,7 +95,7 @@ class EncoderRNN(nn.Module):
         self.device = config.device
         # Bidirectional lstm:
         self.lstm = nn.LSTM(
-            input_size=5, # dx dy pen-down pen-up end.
+            input_size=5,  # dx dy pen-down pen-up end.
             hidden_size=config.encoder_hidden_size,
             bidirectional=True
         )
@@ -107,7 +109,7 @@ class EncoderRNN(nn.Module):
             hidden = torch.zeros(2, batch_size, self.hidden_size)
             cell = torch.zeros(2, batch_size, self.hidden_size)
             hidden_cell_pair = (hidden.to(self.device), cell.to(self.device))
-        
+
         _, (hidden, cell) = self.lstm(inputs.float(), hidden_cell_pair)
         # hidden is (2, batch_size, hidden_size),
         # we want it to be (batch_size, 2 * hidden_size):
@@ -125,6 +127,7 @@ class EncoderRNN(nn.Module):
         # mu and sigma_hat are needed for kl loss
         return latent_signal, mu, sigma_hat
 
+
 class DecoderRNN(nn.Module):
     def __init__(self, config):
         super(DecoderRNN, self).__init__()
@@ -135,8 +138,8 @@ class DecoderRNN(nn.Module):
         )
         # Unidirectional lstm:
         self.lstm = nn.LSTM(
-            input_size = config.latent_size + 5,
-            hidden_size = config.decoder_hidden_size,
+            input_size=config.latent_size + 5,
+            hidden_size=config.decoder_hidden_size,
         )
         # FC that predict Mixture's parameters from hiddens activations.
         # The number of parameters is:
@@ -171,14 +174,15 @@ class DecoderRNN(nn.Module):
             params_mixture, 1, dim=2
         )
         return State(
-            mixture_logits=F.log_softmax(mixture_logits.squeeze(), dim=-1), 
-            mu_x=mu_x.squeeze(), 
+            mixture_logits=F.log_softmax(mixture_logits.squeeze(), dim=-1),
+            mu_x=mu_x.squeeze(),
             mu_y=mu_y.squeeze(),
             sigma_x=torch.exp(sigma_x.squeeze()),
-            sigma_y=torch.exp(sigma_y.squeeze()), 
-            rho_xy=torch.tanh(rho_xy.squeeze()), 
+            sigma_y=torch.exp(sigma_y.squeeze()),
+            rho_xy=torch.tanh(rho_xy.squeeze()),
             pen_logits=F.log_softmax(pen_logits.squeeze(), dim=-1),
         ), hidden, cell
+
 
 class Model():
     def __init__(self, config):
@@ -197,11 +201,13 @@ class Model():
         self.decoder_optimizer = optim.Adam(
             self.decoder.parameters(), config.learning_rate
         )
+
         # Function to decay optimizers.
         def _decay(optimizer):
             for param_group in optimizer.param_groups:
                 if param_group['lr'] > config.min_learning_rate:
                     param_group['lr'] *= config.learning_rate_decay_factor
+
         self.decay = _decay
         # kl loss parameters
         self.initial_kl_weight = config.initial_kl_weight
@@ -215,7 +221,7 @@ class Model():
         self.sos = (
             torch.stack([torch.Tensor([0, 0, 1, 0, 0])] * config.batch_size)
         ).unsqueeze(0).to(self.device)
-    
+
     def train(self, sequences):
         self.encoder.train()
         self.decoder.train()
@@ -301,7 +307,7 @@ class Model():
         return np.stack([x_sample, y_sample, z_sample]).T
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda")
@@ -359,19 +365,19 @@ if __name__=="__main__":
             batch = get_batch(config.batch_size)
             step_time = time.time()
             loss, reconstruction_loss, kl_loss = model.train(batch)
-            train_step_time =  time.time() - step_time
+            train_step_time = time.time() - step_time
             train_reconstruction_losses.append(reconstruction_loss)
             train_kl_losses.append(kl_loss)
-            train_losses.append(loss)   
+            train_losses.append(loss)
             train_step_times.append(train_step_time)
             if step % 100 == 0:
                 print(
-                    f'step {step}, loss {loss:.4f}', 
+                    f'step {step}, loss {loss:.4f}',
                     f', recons. loss {reconstruction_loss:.4f}',
                     f', kl_loss {kl_loss:.4f}',
                     f', train_step_time {train_step_time:.4f}',
                 )
-        
+
         final_infos[dataset_name] = {
             "means": {
                 "train_step_time": float(np.mean(train_step_times)),
@@ -390,10 +396,9 @@ if __name__=="__main__":
             "conditioned_sequence": model.sample(context),
             "unconditioned_sequence": model.sample(),
         }
-        
+
     with open(osp.join(config.out_dir, "final_info.json"), "w") as f:
         json.dump(final_infos, f)
 
     with open(osp.join(config.out_dir, "all_results.pkl"), "wb") as f:
         pickle.dump(all_results, f)
-

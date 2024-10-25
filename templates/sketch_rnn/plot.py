@@ -1,11 +1,12 @@
 import json
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import numpy as np
 import os
 import os.path as osp
 import pickle
+
 import PIL
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 def plot_drawing(sequence, step, name='_output_'):

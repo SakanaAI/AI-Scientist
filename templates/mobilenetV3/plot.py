@@ -1,17 +1,16 @@
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import numpy as np
 import json
-import os
 import os.path as osp
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Define the datasets you're working with
 datasets = ["cifar10"]  # Update as per your datasets
 
-INFO = {"cifar10": 
-        {"size": 50000}
-}
-
+INFO = {"cifar10":
+            {"size": 50000}
+        }
 
 # CREATE LEGEND -- ADD RUNS HERE THAT WILL BE PLOTTED
 labels = {
@@ -19,10 +18,12 @@ labels = {
     # Add more runs here if available
 }
 
+
 # Generate a color palette for the runs
 def generate_color_palette(n):
     cmap = plt.get_cmap('tab20')
     return [mcolors.rgb2hex(cmap(i)) for i in np.linspace(0, 1, n - 1)]
+
 
 # Get the list of runs based on the labels dictionary
 runs = list(labels.keys())
@@ -41,15 +42,15 @@ for i, run in enumerate(runs):
         with open(final_info_file, 'r') as f:
             final_info = json.load(f)
             final_results[run] = final_info  # Store final_info
-        
+
         # Load all_results.npy
         results_dict = np.load(all_results_file, allow_pickle=True).item()
         # print(results_dict)
-        
+
         run_info = {}
         for dataset in datasets:
 
-            iterations_per_epoch = INFO[dataset]["size"] // final_info[dataset]["final_info_dict"]["config"][0]["batch_size"] 
+            iterations_per_epoch = INFO[dataset]["size"] // final_info[dataset]["final_info_dict"]["config"][0]["batch_size"]
             # Initialize lists to collect data across seeds
             all_train_iters = []
             all_train_losses = []
@@ -83,7 +84,7 @@ for i, run in enumerate(runs):
                     all_val_losses.append(val_losses)
 
             # Now compute mean and standard error across seeds
-            
+
             if all_train_losses:
                 # Ensure all lists are the same length for averaging
                 min_length = min(len(lst) for lst in all_train_losses)
@@ -205,4 +206,3 @@ for dataset in datasets:
         print(f"Test accuracy plot for {dataset} saved as 'test_accuracy_{dataset}_across_runs.png'.")
     else:
         print(f"No test accuracy data available for dataset {dataset}.")
-

@@ -1,7 +1,8 @@
-import os
-import json
-import numpy as np
 import argparse
+import json
+import os
+
+import numpy as np
 from scipy.integrate import odeint
 
 # -----------------------------------------------------------------------------
@@ -18,6 +19,7 @@ if __name__ == "__main__":
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
+
     def seir_eq(v, t, beta, lp, ip):
         """Differential equation of SEIR model
         v: [S, E, I, R] Distribution of people in each state
@@ -31,6 +33,7 @@ if __name__ == "__main__":
         dI = (1 / lp) * v[1] - (1 / ip) * v[2]
         dR = (1 / ip) * v[2]
         return np.array([dS, dE, dI, dR])
+
 
     # Solve SEIR model
     init_state = np.array([3000, 0, 5, 0])

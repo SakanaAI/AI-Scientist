@@ -1,6 +1,6 @@
-
 import numpy as np
 import torch
+
 
 ####################### probabilities utils
 
@@ -17,10 +17,10 @@ def bivariate_normal_pdf(dx, dy, mu_x, mu_y, sigma_x, sigma_y, rho_xy):
 
 def sample_bivariate_normal(
         mu_x, mu_y, sigma_x, sigma_y, rho_xy, temperature, greedy=False,
-    ):
+):
     """Samples from bivariate normal distribution."""
     if greedy:
-      return mu_x, mu_y
+        return mu_x, mu_y
     mean = [mu_x, mu_y]
     sigma_x *= np.sqrt(temperature)
     sigma_y *= np.sqrt(temperature)
@@ -94,7 +94,7 @@ def get_batch_factory(dataset, sequence_length, device):
         strokes = []
         indice = 0
         for seq in batch_sequences:
-            len_seq = len(seq[:,0])
+            len_seq = len(seq[:, 0])
             new_seq = np.zeros((sequence_length, 5))
             new_seq[:len_seq, :2] = seq[:, :2]
             new_seq[:len_seq - 1, 2] = 1 - seq[:-1, 2]
