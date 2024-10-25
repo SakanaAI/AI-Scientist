@@ -363,3 +363,7 @@ docker run -it -e OPENAI_API_KEY=$OPENAI_API_KEY \
   --entrypoint /bin/bash \
   <AI_SCIENTIST_IMAGE>
 ```
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=SakanaAI/AI-Scientist&type=Date)](https://star-history.com/#SakanaAI/AI-Scientist&Date)
