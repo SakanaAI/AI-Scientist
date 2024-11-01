@@ -1,10 +1,11 @@
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import numpy as np
 import json
 import os
 import os.path as osp
 import pickle
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
 
 # LOAD FINAL RESULTS:
 datasets = ["circle", "dino", "line", "moons"]

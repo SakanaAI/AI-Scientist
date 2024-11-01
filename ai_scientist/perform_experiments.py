@@ -1,9 +1,9 @@
-import shutil
-import os.path as osp
-import subprocess
-from subprocess import TimeoutExpired
-import sys
 import json
+import os.path as osp
+import shutil
+import subprocess
+import sys
+from subprocess import TimeoutExpired
 
 MAX_ITERS = 4
 MAX_RUNS = 5
@@ -151,7 +151,7 @@ Only the runs in the `labels` dictionary will be plotted, so make sure to includ
 We will be running the command `python plot.py` to generate the plots.
 """
     while True:
-        coder_out = coder.run(next_prompt)
+        _ = coder.run(next_prompt)
         return_code, next_prompt = run_plotting(folder_name)
         current_iter += 1
         if return_code == 0 or current_iter >= MAX_ITERS:

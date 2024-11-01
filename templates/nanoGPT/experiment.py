@@ -1,16 +1,17 @@
-import os
-import time
-import math
-import pickle
+import argparse
 import inspect
 import json
+import math
+import os
+import pickle
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import argparse
 
 
 # --- BEGIN model.py ---
@@ -208,7 +209,7 @@ class GPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         assert (
-            t <= self.config.block_size
+                t <= self.config.block_size
         ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
 
@@ -292,7 +293,7 @@ class GPT(nn.Module):
             idx_cond = (
                 idx
                 if idx.size(1) <= self.config.block_size
-                else idx[:, -self.config.block_size :]
+                else idx[:, -self.config.block_size:]
             )
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
@@ -401,11 +402,11 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
             )
         ix = torch.randint(len(data) - block_size, (batch_size,))
         x = torch.stack(
-            [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
+            [torch.from_numpy((data[i: i + block_size]).astype(np.int64)) for i in ix]
         )
         y = torch.stack(
             [
-                torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64))
+                torch.from_numpy((data[i + 1: i + 1 + block_size]).astype(np.int64))
                 for i in ix
             ]
         )
@@ -555,7 +556,7 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
             with ctx:
                 logits, loss = model(X, Y)
                 loss = (
-                    loss / gradient_accumulation_steps
+                        loss / gradient_accumulation_steps
                 )  # scale the loss to account for gradient accumulation
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch("train")
@@ -579,7 +580,7 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
             # get loss as float. note: this is a CPU-GPU sync point
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
-            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
+            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms")
             train_log_info.append(
                 {
                     "iter": iter_num,
@@ -649,7 +650,7 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
                 inference_time = end_time - start_time
                 tokens_per_second = max_new_tokens / inference_time
 
-                print(f"Sample {k+1}:")
+                print(f"Sample {k + 1}:")
                 print(generated_text)
                 print(f"Inference time: {inference_time:.2f} seconds")
                 print(f"Tokens per second: {tokens_per_second:.2f}")
@@ -671,7 +672,7 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
     final_info["avg_inference_tokens_per_second"] = avg_tokens_per_second
 
     with open(
-        os.path.join(out_dir, f"final_info_{dataset}_{seed_offset}.json"), "w"
+            os.path.join(out_dir, f"final_info_{dataset}_{seed_offset}.json"), "w"
     ) as f:
         json.dump(final_info, f)
     return final_info, train_log_info, val_log_info
