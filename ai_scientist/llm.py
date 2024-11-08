@@ -21,6 +21,7 @@ AVAILABLE_LLMS = [
     # Anthropic Claude models via Amazon Bedrock
     "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
     "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
     "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
     "bedrock/anthropic.claude-3-opus-20240229-v1:0",
     # Anthropic Claude models Vertex AI
@@ -143,7 +144,7 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if model.startswith("claude-"):
+    if "claude" in model:
         new_msg_history = msg_history + [
             {
                 "role": "user",
