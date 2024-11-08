@@ -27,6 +27,7 @@ AVAILABLE_LLMS = [
     # Anthropic Claude models Vertex AI
     "vertex_ai/claude-3-opus@20240229",
     "vertex_ai/claude-3-5-sonnet@20240620",
+    "vertex_ai/claude-3-5-sonnet-v2@20241022",
     "vertex_ai/claude-3-sonnet@20240229",
     "vertex_ai/claude-3-haiku@20240307",
 ]
