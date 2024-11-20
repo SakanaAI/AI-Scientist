@@ -2,12 +2,12 @@ import json
 import os
 import os.path as osp
 import time
-from typing import List, Dict, Union
+from typing import Dict, List, Union
 
 import backoff
 import requests
-
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from llm import (AVAILABLE_LLMS, create_client, extract_json_between_markers,
+                 get_response_from_llm)
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -70,6 +70,43 @@ NEW IDEA JSON:
 
 If there is nothing to improve, simply repeat the previous JSON EXACTLY after the thought and include "I am done" at the end of the thoughts but before the JSON.
 ONLY INCLUDE "I am done" IF YOU ARE MAKING NO MORE CHANGES."""
+
+def summarize_papers_on_theme(theme, client, model):
+    # 論文を検索
+    papers = search_for_papers(theme, result_limit=10)
+    if not papers:
+        print("No relevant papers were found.")
+        return
+
+    # 論文情報を文字列にまとめる
+    papers_text = ""
+    for i, paper in enumerate(papers):
+        authors = ', '.join([author['name'] for author in paper['authors']])
+        papers_text += f"{i+1}. {paper['title']} by {authors} ({paper['year']})\n"
+        papers_text += f"Abstract: {paper['abstract']}\n\n"
+
+    # LLM を使って論文をまとめる
+    summary_prompt = f"""You are an AI language model assistant tasked with summarizing research papers in detail.
+
+Please provide a detailed summary in English of the following papers related to the theme "{theme}".
+
+List each paper with its key contributions, methods, and findings.
+
+Here are the papers:
+
+{papers_text}
+"""
+
+    summary, _ = get_response_from_llm(
+        summary_prompt,
+        client=client,
+        model=model,
+        system_message="You are a knowledgeable researcher. Summarize the following papers in detail.",
+        msg_history=[]
+    )
+
+    print("Summary of the papers:")
+    print(summary)
 
 
 # GENERATE IDEAS
@@ -448,54 +485,85 @@ def check_idea_novelty(
 
 
 if __name__ == "__main__":
-    MAX_NUM_GENERATIONS = 32
-    NUM_REFLECTIONS = 5
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate AI scientist ideas")
-    # add type of experiment (nanoGPT, Boston, etc.)
+    parser = argparse.ArgumentParser(description="テーマに関連する論文を検索し、要約します。")
     parser.add_argument(
-        "--experiment",
+        "--theme",
         type=str,
-        default="nanoGPT",
-        help="Experiment to run AI Scientist on.",
+        required=True,
+        help="検索したいテーマを指定してください。",
     )
     parser.add_argument(
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
         choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
-    )
-    parser.add_argument(
-        "--skip-idea-generation",
-        action="store_true",
-        help="Skip idea generation and use existing ideas.",
-    )
-    parser.add_argument(
-        "--check-novelty",
-        action="store_true",
-        help="Check novelty of ideas.",
+        help="使用する LLM のモデルを指定してください。",
     )
     args = parser.parse_args()
 
-    # Create client
+    # クライアントを作成
     client, client_model = create_client(args.model)
 
-    base_dir = osp.join("templates", args.experiment)
-    results_dir = osp.join("results", args.experiment)
-    ideas = generate_ideas(
-        base_dir,
+    # テーマに関連する論文を検索し、要約
+    summarize_papers_on_theme(
+        theme=args.theme,
         client=client,
         model=client_model,
-        skip_generation=args.skip_idea_generation,
-        max_num_generations=MAX_NUM_GENERATIONS,
-        num_reflections=NUM_REFLECTIONS,
     )
-    if args.check_novelty:
-        ideas = check_idea_novelty(
-            ideas,
-            base_dir=base_dir,
-            client=client,
-            model=client_model,
-        )
+
+
+
+# if __name__ == "__main__":
+#     MAX_NUM_GENERATIONS = 32
+#     NUM_REFLECTIONS = 5
+#     import argparse
+
+#     parser = argparse.ArgumentParser(description="Generate AI scientist ideas")
+#     # add type of experiment (nanoGPT, Boston, etc.)
+#     parser.add_argument(
+#         "--experiment",
+#         type=str,
+#         default="nanoGPT",
+#         help="Experiment to run AI Scientist on.",
+#     )
+#     parser.add_argument(
+#         "--model",
+#         type=str,
+#         default="gpt-4o-2024-05-13",
+#         choices=AVAILABLE_LLMS,
+#         help="Model to use for AI Scientist.",
+#     )
+#     parser.add_argument(
+#         "--skip-idea-generation",
+#         action="store_true",
+#         help="Skip idea generation and use existing ideas.",
+#     )
+#     parser.add_argument(
+#         "--check-novelty",
+#         action="store_true",
+#         help="Check novelty of ideas.",
+#     )
+#     args = parser.parse_args()
+
+#     # Create client
+#     client, client_model = create_client(args.model)
+
+#     base_dir = osp.join("templates", args.experiment)
+#     results_dir = osp.join("results", args.experiment)
+#     ideas = generate_ideas(
+#         base_dir,
+#         client=client,
+#         model=client_model,
+#         skip_generation=args.skip_idea_generation,
+#         max_num_generations=MAX_NUM_GENERATIONS,
+#         num_reflections=NUM_REFLECTIONS,
+#     )
+#     if args.check_novelty:
+#         ideas = check_idea_novelty(
+#             ideas,
+#             base_dir=base_dir,
+#             client=client,
+#             model=client_model,
+#         )
