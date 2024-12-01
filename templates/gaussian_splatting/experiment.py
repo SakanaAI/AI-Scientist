@@ -254,15 +254,20 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+
+    datasets = ['south-building']
     
-    print("Optimizing " + args.model_path)
+    for dataset in datasets:
+        args.source_path = os.path.join("..", "..", "data", dataset)
+        
+        print("Optimizing " + args.model_path)
 
-    # Initialize system state (RNG)
-    safe_state(args.quiet)
+        # Initialize system state (RNG)
+        safe_state(args.quiet)
 
-    # Configure and run training
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+        # Configure and run training
+        torch.autograd.set_detect_anomaly(args.detect_anomaly)
+        training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
     print("\nTraining complete.")
