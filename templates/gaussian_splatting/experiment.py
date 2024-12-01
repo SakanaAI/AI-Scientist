@@ -10,6 +10,7 @@
 #
 
 import os
+import json
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -140,7 +141,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            training_report_result = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            if training_report_result is not None:
+                final_result = training_report_result
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -173,6 +176,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+    return final_result
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -208,6 +213,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
+        result_dict = {}
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
@@ -225,7 +231,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
+                l1_test /= len(config['cameras'])
+                result_dict[f"{config['name']}_l1"] = l1_test.item()
+                result_dict[f"{config['name']}_psnr"] = psnr_test.item()          
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
@@ -235,6 +243,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
+    
+        return result_dict
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -252,14 +262,16 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--out_dir", type=str, default="run_0")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
     datasets = ['south-building']
     
+    final_infos = {}
     for dataset in datasets:
         args.source_path = os.path.join("..", "..", "data", dataset)
-        
+        args.model_path = os.path.join(args.out_dir, dataset)
         print("Optimizing " + args.model_path)
 
         # Initialize system state (RNG)
@@ -267,7 +279,12 @@ if __name__ == "__main__":
 
         # Configure and run training
         torch.autograd.set_detect_anomaly(args.detect_anomaly)
-        training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+        final_result = training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
+        final_infos[dataset] = {}
+        final_infos[dataset]["mean"] = final_result
+
+        with open(os.path.join(args.out_dir, "final_info.json"), "w") as f:
+            json.dump(final_infos, f)
     # All done
     print("\nTraining complete.")
