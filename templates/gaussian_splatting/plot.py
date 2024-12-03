@@ -21,7 +21,7 @@ for dataset in datasets:
         current_result = []
         for run in all_run_folders:
             for split in ["train", "test"]:
-                performance = all_final_info[run][dataset]["mean"][f"{split}_{metric}"]
+                performance = all_final_info[run][dataset]["means"][f"{split}_{metric}"]
                 current_result.append([split, run, performance])
         
         df = pd.DataFrame(

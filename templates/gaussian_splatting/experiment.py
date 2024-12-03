@@ -744,7 +744,7 @@ if __name__ == "__main__":
         final_result = training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
         final_infos[dataset] = {}
-        final_infos[dataset]["mean"] = final_result
+        final_infos[dataset]["means"] = final_result
 
         with open(os.path.join(args.out_dir, "final_info.json"), "w") as f:
             json.dump(final_infos, f)
