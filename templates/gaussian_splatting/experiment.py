@@ -732,7 +732,10 @@ if __name__ == "__main__":
     
     final_infos = {}
     for dataset in datasets:
-        args.source_path = os.path.join("..", "..", "data", dataset)
+        if args.out_dir == "run_0":
+            args.source_path = os.path.join("..", "..", "data", dataset)
+        else:
+            args.source_path = os.path.join("..", "..", "..", "data", dataset)
         args.model_path = os.path.join(args.out_dir, dataset)
         print("Optimizing " + args.model_path)
 
