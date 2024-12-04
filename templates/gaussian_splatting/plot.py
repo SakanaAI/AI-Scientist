@@ -40,7 +40,7 @@ for dataset in datasets:
         plt.xlabel("Runs")
         plt.ylabel(metric)
         sns.barplot(df, x="run", y="performance", hue="split")
-        plt.xticks(rotation=45)
+        plt.xticks(rotation=-45)
         plt.savefig(f"{dataset}_{metric}.png")
         plt.close()
 
@@ -52,13 +52,13 @@ for dataset in datasets:
     with Image.open(os.path.join("run_0", f"{dataset}_ground_truth_image.png")) as image:
         image_array = np.array(image)
         ax[0].imshow(image_array)
-        ax[0].set_title("Ground Truth")
+        ax[0].set_title("Ground Truth", fontsize=30)
         ax[0].axis('off')
     for idx, run in enumerate(all_run_folders):
         with Image.open(os.path.join(run, f"{dataset}_rendered_image.png")) as image:
             image_array = np.array(image)
             ax[idx + 1].imshow(image_array)
-            ax[idx + 1].set_title(labels[run])
+            ax[idx + 1].set_title(labels[run], fontsize=30)
             ax[idx + 1].axis('off')
 
 
