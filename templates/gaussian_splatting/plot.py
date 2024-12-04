@@ -46,7 +46,9 @@ for dataset in datasets:
 
 # Plot comparison of ground truth image with rendred images from each run
 for dataset in datasets:
-    fig, ax = plt.subplots(1, len(all_run_folders) + 1)
+    subplot_width = 10 * (len(all_run_folders) + 1)
+    subplot_height = subplot_width // 2
+    fig, ax = plt.subplots(1, len(all_run_folders) + 1, figsize=(subplot_width, subplot_height))
     with Image.open(os.path.join("run_0", f"{dataset}_ground_truth_image.png")) as image:
         image_array = np.array(image)
         ax[0].imshow(image_array)
