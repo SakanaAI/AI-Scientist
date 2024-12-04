@@ -40,6 +40,7 @@ for dataset in datasets:
         plt.xlabel("Runs")
         plt.ylabel(metric)
         sns.barplot(df, x="run", y="performance", hue="split")
+        plt.xticks(rotation=45)
         plt.savefig(f"{dataset}_{metric}.png")
         plt.close()
 
@@ -60,7 +61,7 @@ for dataset in datasets:
             ax[idx + 1].set_title(labels[run])
             ax[idx + 1].axis('off')
 
-    plt.xticks(rotation=45)
+
     plt.savefig(f"{dataset}_images_comparison.png")
     plt.close()
 
