@@ -37,9 +37,8 @@ for dataset in datasets:
             columns=["split", "run", "performance"]
         )
 
-        plt.title(f"Train and Test {metric} over all runs")
-        plt.xlabel("Runs")
-        plt.ylabel(metric)
+        plt.title(f"Train and Test {metric} over all runs", fontsize=20)
+        plt.ylabel(metric, fontsize=20)
         sns.barplot(df, x="run", y="performance", hue="split")
         plt.xticks(rotation=-45)
         plt.savefig(f"{dataset}_{metric}.png")
