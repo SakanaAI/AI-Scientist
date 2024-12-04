@@ -12,6 +12,7 @@
 import os
 import json
 import torch
+from PIL import Image
 from torch import nn
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -639,6 +640,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
+    #Save a sample ground truth test image and the corresponding rendered image
+    viewpoint = scene.getTestCameras()[0]
+    renderArgs = (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp)
+    image = torch.clamp(render(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+    gt_image = torch.clamp(viewpoint.original_image, 0.0, 1.0)
+
+    image = (image.permute(1,2,0).detach().cpu().numpy() * 255).astype(np.uint8)
+    Image.fromarray(image).save(os.path.join(args.out_dir, f"{args.dataset_name}_rendered_image.png"))
+    gt_image = (gt_image.permute(1,2,0).detach().cpu().numpy() * 255).astype(np.uint8)
+    Image.fromarray(gt_image).save(os.path.join(args.out_dir, f"{args.dataset_name}_ground_truth_image.png"))
+    
     return final_result
 
 def prepare_output_and_logger(args):    
@@ -732,6 +744,7 @@ if __name__ == "__main__":
     
     final_infos = {}
     for dataset in datasets:
+        args.dataset_name = dataset
         if args.out_dir == "run_0":
             args.source_path = os.path.join("..", "..", "data", dataset)
         else:
