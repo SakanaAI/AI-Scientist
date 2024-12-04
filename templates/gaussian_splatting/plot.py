@@ -39,7 +39,9 @@ for dataset in datasets:
 
         plt.title(f"Train and Test {metric} over all runs", fontsize=20)
         plt.ylabel(metric, fontsize=20)
-        sns.barplot(df, x="run", y="performance", hue="split")
+        barplot = sns.barplot(df, x="run", y="performance", hue="split")
+        for i in barplot.containers:
+            barplot.bar_label(i,)
         plt.xticks(rotation=-45)
         plt.savefig(f"{dataset}_{metric}.png")
         plt.close()
