@@ -30,12 +30,12 @@ for dataset in datasets:
             for split in ["train", "test"]:
                 performance = all_final_info[run][dataset]["means"][f"{split}_{metric}"]
                 current_result.append([split, labels[run], performance])
-        
+
         df = pd.DataFrame(
             data=current_result,
             columns=["split", "run", "performance"]
         )
-        
+
         plt.title(f"Train and Test {metric} over all runs")
         plt.xlabel("Runs")
         plt.ylabel(metric)
@@ -43,8 +43,7 @@ for dataset in datasets:
         plt.savefig(f"{dataset}_{metric}.png")
         plt.close()
 
-
-# Plot comparison of ground truth image with rendred images from each run
+# Plot comparison of ground truth image with rendered images from each run
 for dataset in datasets:
     subplot_width = 10 * (len(all_run_folders) + 1)
     subplot_height = subplot_width // 2
@@ -60,7 +59,7 @@ for dataset in datasets:
             ax[idx + 1].imshow(image_array)
             ax[idx + 1].set_title(labels[run])
             ax[idx + 1].axis('off')
-        
+
     plt.savefig(f"{dataset}_images_comparison.png")
     plt.close()
-    
+
