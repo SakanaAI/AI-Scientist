@@ -11,10 +11,9 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 datasets = ["south-building"]
-all_run_folders = glob.glob("run_*")
+all_run_folders = [run_folder for run_folder in glob.glob("run_*") if os.path.isdir(run_folder)]
 
 all_final_info = {}
-
 for run in all_run_folders:
     with open(os.path.join(run, "final_info.json"), "r") as f:
         all_final_info[run] = json.load(f)
