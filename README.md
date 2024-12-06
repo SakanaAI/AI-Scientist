@@ -1,3 +1,29 @@
+# Placeholder instruction for running Gaussian Splatting template
+This fork added a template for [Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
+
+## Installation
+First, follow the `AI-Scientist` installation instruction below. After that, run the following command to install gaussian splatting template specific dependencies.
+
+```bash
+pip install -r gaussian_splatting_requirements.txt
+```
+The original gaussian splat code also relies on the following repos [diff-gaussian-rasterization](https://github.com/dendenxu/diff-gaussian-rasterization), [simple-knn](https://github.com/camenduru/simple-knn) and [fused-ssim](https://github.com/rahul-goel/fused-ssim/tree/main). Clone them, `cd` into each of the repos and run the following command.
+
+```bash
+pip install .
+```
+
+Alternatively, visit the original repo for [Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) and follow the installation instruction there.
+## Prepare COLMAP data
+To prepare the COLMAP `south-building` dataset for gaussian splatting, run the following commands.
+
+```bash
+cd data/south-building
+bash prepare.sh
+```
+
+Alternatively, you can create your own COLMAP dataset if you are interested. Please take a look at the [official tutorial](https://colmap.github.io/tutorial.html).
+
 <h1 align="center">
   <a href="https://github.com/SakanaAI/AI-Scientist/blob/main/docs/logo_2.png">
     <img src="docs/logo_2.png" width="215" /></a><br>
