@@ -25,8 +25,8 @@ bash prepare.sh
 Alternatively, you can create your own COLMAP dataset if you are interested. Please take a look at the [official tutorial](https://colmap.github.io/tutorial.html).
 
 ## Sample papers generated using the template
-+ [Neural-Adaptive Gaussian Splatting: Real-Time Radiance Field Rendering with Dynamic Optimization](docs/neural_adaptive_gaussian_splatting.pdf)
-+ [Importance-Weighted Gaussian Splatting For Optimized Real-Time Radiance Field Rendering](docs/importance_weighted_gaussian_splatting.pdf)
++ [Neural-Adaptive Gaussian Splatting: Real-Time Radiance Field Rendering with Dynamic Optimization](example_papers/neural_adaptive_gaussian_splatting.pdf)
++ [Importance-Weighted Gaussian Splatting For Optimized Real-Time Radiance Field Rendering](example_papers/importance_weighted_gaussian_splatting.pdf)
 
 <h1 align="center">
   <a href="https://github.com/SakanaAI/AI-Scientist/blob/main/docs/logo_2.png">
