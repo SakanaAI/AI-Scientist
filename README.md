@@ -98,21 +98,33 @@ AI-Scientist supports multiple model providers and variants:
 - LLaMa 3.3 70B (via OpenRouter API)
 - LLaMa 3.3 70B Local (via Ollama)
 - LLaMa 3.2 1B Local (via Ollama, for resource-constrained environments)
-- LLaMa 3.1 (via OpenRouter API)
+- LLaMa 3.1 8B Local (via Ollama, optimized for segmented templates)
 
 ### Additional Models
 - Gemini Pro (via Google Cloud)
 - Grok-1 (via xAI)
 - DeepSeek Coder V2 (via DeepSeek API)
 
+## Model Performance and Template Compatibility
+
+### Performance Tiers
+- Tier 1 (Full Capability): LLaMa 3.3, GPT-4o, Claude 3.5
+- Tier 2 (Standard): LLaMa 3.1, GPT-3.5
+- Tier 3 (Resource-Constrained): LLaMa 3.2 1B
+
+### Template Formats
+AI-Scientist supports two template editing modes:
+- **Diff Mode**: Default for high-capability models (Tier 1)
+- **Whole Mode**: Optimized for resource-constrained models (Tier 2 & 3)
+
+### Template Segmentation
+For improved compatibility with resource-constrained models:
+- Segmented templates split papers into manageable sections
+- Recommended for LLaMa 3.1 8B and LLaMa 3.2 1B
+- Helps prevent edit mode termination issues
+- Improves reliability for paper generation tasks
+
 For detailed configuration of each model type, see the sections below.
-
-### Model Performance Notes
-- LLaMa 3.3 ≈ GPT-4 (text-only mode)
-- LLaMa 3.1 ≈ GPT-3.5
-- Local models may have varying performance based on available system resources
-
-#### Anthropic API (Claude Sonnet 3.5)
 
 By default, this uses the `ANTHROPIC_API_KEY` environment variable.
 
