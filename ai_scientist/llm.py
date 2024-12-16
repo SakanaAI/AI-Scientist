@@ -44,6 +44,8 @@ class Model:
         self.system_message = system_message
         self.client, self.client_model = create_client(model_name)
         self.msg_history = []
+        # Determine edit format based on model capabilities
+        self.edit_format = "whole" if model_name in ["llama3.1:8b", "llama3.2:1b"] else "diff"
 
     def get_response(self, msg, temperature=0.75, print_debug=False):
         content, self.msg_history = get_response_from_llm(
@@ -54,6 +56,7 @@ class Model:
             print_debug=print_debug,
             msg_history=self.msg_history,
             temperature=temperature,
+            edit_format=self.edit_format  # Pass edit format to get_response_from_llm
         )
         return content
 
@@ -165,7 +168,12 @@ def get_response_from_llm(
         print_debug=False,
         msg_history=None,
         temperature=0.75,
+        edit_format="diff"  # Default to diff mode for stronger models
 ):
+    # Use "whole" mode for weaker models that benefit from segmented templates
+    if model in ["llama3.1:8b", "llama3.2:1b"]:
+        edit_format = "whole"
+
     if msg_history is None:
         msg_history = []
 
