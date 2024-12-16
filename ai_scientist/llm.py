@@ -5,6 +5,7 @@ import re
 import anthropic
 import backoff
 import openai
+from google.cloud import aiplatform
 
 MAX_NUM_TOKENS = 4096
 
@@ -17,7 +18,9 @@ AVAILABLE_LLMS = [
     "o1-preview-2024-09-12",
     "o1-mini-2024-09-12",
     "deepseek-coder-v2-0724",
-    "llama3.1-405b",
+    "llama3.3-70b",
+    "gemini-pro",
+    "grok-1",
     # Anthropic Claude models via Amazon Bedrock
     "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
     "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -196,26 +199,19 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["o1-preview-2024-09-12", "o1-mini-2024-09-12"]:
+    elif model == "gemini-pro":
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = client.generate_text(
+            prompt=f"{system_message}\n\n{msg}",
+            temperature=temperature,
+            max_output_tokens=MAX_NUM_TOKENS,
+        )
+        content = response.text
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif model == "grok-1":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "user", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=1,
-            max_completion_tokens=MAX_NUM_TOKENS,
-            n=1,
-            #stop=None,
-            seed=0,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model == "deepseek-coder-v2-0724":
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="deepseek-coder",
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -227,10 +223,10 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct"]:
+    elif model == "llama3.3-70b":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
+            model="meta-llama/llama-3.3-70b-instruct",
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -309,11 +305,22 @@ def create_client(model):
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com"
         ), model
-    elif model == "llama3.1-405b":
-        print(f"Using OpenAI API with {model}.")
+    elif model == "llama3.3-70b":
+        print(f"Using OpenRouter API with {model}.")
         return openai.OpenAI(
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1"
-        ), "meta-llama/llama-3.1-405b-instruct"
+        ), "meta-llama/llama-3.3-70b-instruct"
+    elif model == "gemini-pro":
+        if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+            raise ValueError("GOOGLE_APPLICATION_CREDENTIALS environment variable is required for Gemini models")
+        print(f"Using Google Cloud API with {model}.")
+        return aiplatform.TextGenerationModel.from_pretrained("text-bison@002"), model
+    elif model == "grok-1":
+        print(f"Using xAI API with {model}.")
+        return openai.OpenAI(
+            api_key=os.environ["XAI_API_KEY"],
+            base_url="https://api.xai.com/v1"
+        ), model
     else:
         raise ValueError(f"Model {model} not supported.")
