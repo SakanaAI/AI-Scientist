@@ -21,6 +21,7 @@ AVAILABLE_LLMS = [
     "llama3.3-70b",
     "llama3.3-70b-local",
     "llama3.2:1b",
+    "llama3.1:8b",  # New viable option with segmented templates
     "gemini-pro",
     "grok-1",
     # Anthropic Claude models via Amazon Bedrock
@@ -243,12 +244,13 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["llama3.3-70b", "llama3.3-70b-local", "llama3.2:1b"]:
+    elif model in ["llama3.3-70b", "llama3.3-70b-local", "llama3.2:1b", "llama3.1:8b"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         model_name = {
             "llama3.3-70b": "meta-llama/llama-3.3-70b-instruct",
             "llama3.3-70b-local": "llama2",
-            "llama3.2:1b": "llama3.2:1b"
+            "llama3.2:1b": "llama3.2:1b",
+            "llama3.1:8b": "llama3.1:8b"
         }[model]
         response = client.chat.completions.create(
             model=model_name,
@@ -336,7 +338,7 @@ def create_client(model):
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1"
         ), "meta-llama/llama-3.3-70b-instruct"
-    elif model in ["llama3.3-70b-local", "llama3.2:1b"]:
+    elif model in ["llama3.3-70b-local", "llama3.2:1b", "llama3.1:8b"]:
         print(f"Using Ollama API with {model}.")
         return openai.OpenAI(
             base_url="http://localhost:11434/v1",
