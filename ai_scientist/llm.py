@@ -19,6 +19,8 @@ AVAILABLE_LLMS = [
     "o1-mini-2024-09-12",
     "deepseek-coder-v2-0724",
     "llama3.3-70b",
+    "llama3.3-70b-local",
+    "llama3.2:1b",
     "gemini-pro",
     "grok-1",
     # Anthropic Claude models via Amazon Bedrock
@@ -35,6 +37,24 @@ AVAILABLE_LLMS = [
     "vertex_ai/claude-3-haiku@20240307",
 ]
 
+class Model:
+    def __init__(self, model_name, system_message="You are a helpful AI assistant."):
+        self.model_name = model_name
+        self.system_message = system_message
+        self.client, self.client_model = create_client(model_name)
+        self.msg_history = []
+
+    def get_response(self, msg, temperature=0.75, print_debug=False):
+        content, self.msg_history = get_response_from_llm(
+            msg=msg,
+            client=self.client,
+            model=self.model_name,
+            system_message=self.system_message,
+            print_debug=print_debug,
+            msg_history=self.msg_history,
+            temperature=temperature,
+        )
+        return content
 
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
@@ -223,10 +243,15 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model == "llama3.3-70b":
+    elif model in ["llama3.3-70b", "llama3.3-70b-local", "llama3.2:1b"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        model_name = {
+            "llama3.3-70b": "meta-llama/llama-3.3-70b-instruct",
+            "llama3.3-70b-local": "llama2",
+            "llama3.2:1b": "llama3.2:1b"
+        }[model]
         response = client.chat.completions.create(
-            model="meta-llama/llama-3.3-70b-instruct",
+            model=model_name,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -311,6 +336,12 @@ def create_client(model):
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1"
         ), "meta-llama/llama-3.3-70b-instruct"
+    elif model in ["llama3.3-70b-local", "llama3.2:1b"]:
+        print(f"Using Ollama API with {model}.")
+        return openai.OpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama"  # required but unused
+        ), model
     elif model == "gemini-pro":
         if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
             raise ValueError("GOOGLE_APPLICATION_CREDENTIALS environment variable is required for Gemini models")
