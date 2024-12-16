@@ -78,11 +78,39 @@ pip install -r requirements.txt
 
 ### Supported Models and API Keys
 
-We support a wide variety of models, including open-weight and API-only models. In general, we recommend using only frontier models above the capability of the original GPT-4. To see a full list of supported models, see [here](https://github.com/SakanaAI/AI-Scientist/blob/main/ai_scientist/llm.py).
+We support a wide variety of models, including open-weight and API-only models. In general, we recommend using only frontier models above the capability of the original GPT-4. Below is a comprehensive list of supported models and their variants.
 
-#### OpenAI API (GPT-4o, GPT-4o-mini, o1 models)
+## Available Models
 
-By default, this uses the `OPENAI_API_KEY` environment variable.
+AI-Scientist supports multiple model providers and variants:
+
+### Claude Models
+- Claude 3.5 Sonnet (via Anthropic API)
+- Claude 3.5 Sonnet (via Amazon Bedrock)
+- Claude 3.5 Sonnet (via Vertex AI)
+
+### GPT Models
+- GPT-4o and variants (via OpenAI API)
+- GPT-4o-mini and variants (via OpenAI API)
+- o1 models and variants (via OpenAI API)
+
+### LLaMa Models
+- LLaMa 3.3 70B (via OpenRouter API)
+- LLaMa 3.3 70B Local (via Ollama)
+- LLaMa 3.2 1B Local (via Ollama, for resource-constrained environments)
+- LLaMa 3.1 (via OpenRouter API)
+
+### Additional Models
+- Gemini Pro (via Google Cloud)
+- Grok-1 (via xAI)
+- DeepSeek Coder V2 (via DeepSeek API)
+
+For detailed configuration of each model type, see the sections below.
+
+### Model Performance Notes
+- LLaMa 3.3 ≈ GPT-4 (text-only mode)
+- LLaMa 3.1 ≈ GPT-3.5
+- Local models may have varying performance based on available system resources
 
 #### Anthropic API (Claude Sonnet 3.5)
 
@@ -122,9 +150,34 @@ export VERTEXAI_PROJECT="PROJECT_ID"      # for Aider/LiteLLM call
 
 By default, this uses the `DEEPSEEK_API_KEY` environment variable.
 
-#### OpenRouter API (Llama3.1)
+#### OpenRouter API (LLaMa Models)
 
-By default, this uses the `OPENROUTER_API_KEY` environment variable.
+By default, this uses the `OPENROUTER_API_KEY` environment variable. Supported models:
+- LLaMa 3.3 70B: High-performance model suitable for complex research tasks
+- LLaMa 3.1: Mid-tier model for general research tasks
+
+#### Local Models via Ollama
+
+For local model execution without API keys, AI-Scientist supports running models through Ollama:
+
+1. Install Ollama:
+   ```bash
+   curl https://ollama.ai/install.sh | sh
+   ```
+
+2. Pull the LLaMa model:
+   ```bash
+   ollama pull llama2
+   ```
+
+3. Start the Ollama server:
+   ```bash
+   ollama serve
+   ```
+
+4. Use the local model by specifying "llama3.3-70b-local" as the model identifier in your experiments.
+
+Note: Local model performance may vary based on your system's resources. The Ollama server provides an OpenAI-compatible endpoint at `http://localhost:11434/v1`.
 
 #### Semantic Scholar API (Literature Search)
 
