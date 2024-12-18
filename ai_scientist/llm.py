@@ -7,6 +7,8 @@ import backoff
 import openai
 from google.cloud import aiplatform
 
+from ai_scientist.rate_limit import rate_limiter
+
 MAX_NUM_TOKENS = 4096
 
 AVAILABLE_LLMS = [
@@ -47,6 +49,7 @@ class Model:
         # Determine edit format based on model capabilities
         self.edit_format = "whole" if model_name in ["llama3.1:8b", "llama3.2:1b"] else "diff"
 
+    @rate_limiter.handle_rate_limit(lambda self: self.model_name)
     def get_response(self, msg, temperature=0.75, print_debug=False):
         content, self.msg_history = get_response_from_llm(
             msg=msg,
@@ -61,6 +64,7 @@ class Model:
         return content
 
 # Get N responses from a single message, used for ensembling.
+@rate_limiter.handle_rate_limit(lambda args: args[2])
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_batch_responses_from_llm(
         msg,
@@ -89,7 +93,7 @@ def get_batch_responses_from_llm(
             ],
             temperature=temperature,
             max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
+            n=n_responses,  # Fix parameter position
             stop=None,
             seed=0,
         )
@@ -124,7 +128,7 @@ def get_batch_responses_from_llm(
             ],
             temperature=temperature,
             max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
+            n_responses,
             stop=None,
         )
         content = [r.message.content for r in response.choices]
@@ -159,6 +163,7 @@ def get_batch_responses_from_llm(
     return content, new_msg_history
 
 
+@rate_limiter.handle_rate_limit(lambda args: args[2])
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_response_from_llm(
         msg,

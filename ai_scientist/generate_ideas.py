@@ -8,6 +8,7 @@ import backoff
 import requests
 
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.rate_limit import rate_limiter
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -312,8 +313,11 @@ def on_backoff(details):
 
 
 @backoff.on_exception(
-    backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff
+    backoff.expo,
+    requests.exceptions.HTTPError,
+    on_backoff=on_backoff
 )
+@rate_limiter.handle_rate_limit("semantic_scholar")  # Add rate limiting for Semantic Scholar
 def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
     if not query:
         return None
