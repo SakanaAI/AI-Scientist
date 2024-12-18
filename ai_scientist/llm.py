@@ -7,6 +7,7 @@ import backoff
 import openai
 
 MAX_NUM_TOKENS = 4096
+MAX_JSON_RETRIES = 3
 
 AVAILABLE_LLMS = [
     "claude-3-5-sonnet-20240620",
@@ -272,7 +273,10 @@ def extract_json_between_markers(llm_output):
         try:
             parsed_json = json.loads(json_string)
             return parsed_json
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # Provide detailed error message
+            error_msg = f"JSON parse error: {str(e)}\nContent: {json_string[:100]}..."
+            print(error_msg)
             # Attempt to fix common JSON issues
             try:
                 # Remove invalid control characters
@@ -282,7 +286,8 @@ def extract_json_between_markers(llm_output):
             except json.JSONDecodeError:
                 continue  # Try next match
 
-    return None  # No valid JSON found
+    print("No valid JSON found in LLM output")
+    return None
 
 
 def create_client(model):
