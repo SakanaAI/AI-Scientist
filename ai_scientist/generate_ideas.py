@@ -7,7 +7,7 @@ from typing import List, Dict, Union
 import backoff
 import requests
 
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS, MAX_JSON_RETRIES
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -112,56 +112,65 @@ def generate_ideas(
     for _ in range(max_num_generations):
         print()
         print(f"Generating idea {_ + 1}/{max_num_generations}")
-        try:
-            prev_ideas_string = "\n\n".join(idea_str_archive)
+        retry_count = 0
+        while retry_count < MAX_JSON_RETRIES:
+            try:
+                prev_ideas_string = "\n\n".join(idea_str_archive)
 
-            msg_history = []
-            print(f"Iteration 1/{num_reflections}")
-            text, msg_history = get_response_from_llm(
-                idea_first_prompt.format(
-                    task_description=prompt["task_description"],
-                    code=code,
-                    prev_ideas_string=prev_ideas_string,
-                    num_reflections=num_reflections,
-                ),
-                client=client,
-                model=model,
-                system_message=idea_system_prompt,
-                msg_history=msg_history,
-            )
-            ## PARSE OUTPUT
-            json_output = extract_json_between_markers(text)
-            assert json_output is not None, "Failed to extract JSON from LLM output"
-            print(json_output)
+                msg_history = []
+                print(f"Iteration 1/{num_reflections} (Attempt {retry_count + 1}/{MAX_JSON_RETRIES})")
+                text, msg_history = get_response_from_llm(
+                    idea_first_prompt.format(
+                        task_description=prompt["task_description"],
+                        code=code,
+                        prev_ideas_string=prev_ideas_string,
+                        num_reflections=num_reflections,
+                    ),
+                    client=client,
+                    model=model,
+                    system_message=idea_system_prompt,
+                    msg_history=msg_history,
+                )
+                ## PARSE OUTPUT
+                json_output = extract_json_between_markers(text)
+                if json_output is None:
+                    retry_count += 1
+                    continue
+                print(json_output)
 
-            # Iteratively improve task.
-            if num_reflections > 1:
-                for j in range(num_reflections - 1):
-                    print(f"Iteration {j + 2}/{num_reflections}")
-                    text, msg_history = get_response_from_llm(
-                        idea_reflection_prompt.format(
-                            current_round=j + 2, num_reflections=num_reflections
-                        ),
-                        client=client,
-                        model=model,
-                        system_message=idea_system_prompt,
-                        msg_history=msg_history,
-                    )
-                    ## PARSE OUTPUT
-                    json_output = extract_json_between_markers(text)
-                    assert (
-                            json_output is not None
-                    ), "Failed to extract JSON from LLM output"
-                    print(json_output)
+                # Iteratively improve task.
+                if num_reflections > 1:
+                    for j in range(num_reflections - 1):
+                        print(f"Iteration {j + 2}/{num_reflections}")
+                        text, msg_history = get_response_from_llm(
+                            idea_reflection_prompt.format(
+                                current_round=j + 2, num_reflections=num_reflections
+                            ),
+                            client=client,
+                            model=model,
+                            system_message=idea_system_prompt,
+                            msg_history=msg_history,
+                        )
+                        ## PARSE OUTPUT
+                        json_output = extract_json_between_markers(text)
+                        if json_output is None:
+                            retry_count += 1
+                            continue
+                        print(json_output)
 
-                    if "I am done" in text:
-                        print(f"Idea generation converged after {j + 2} iterations.")
-                        break
+                        if "I am done" in text:
+                            print(f"Idea generation converged after {j + 2} iterations.")
+                            break
 
-            idea_str_archive.append(json.dumps(json_output))
-        except Exception as e:
-            print(f"Failed to generate idea: {e}")
-            continue
+                idea_str_archive.append(json.dumps(json_output))
+                break
+            except Exception as e:
+                print(f"Failed to generate idea: {e}")
+                retry_count += 1
+                if retry_count >= MAX_JSON_RETRIES:
+                    print(f"Max retries ({MAX_JSON_RETRIES}) reached, skipping idea")
+                    break
+                continue
 
     ## SAVE IDEAS
     ideas = []

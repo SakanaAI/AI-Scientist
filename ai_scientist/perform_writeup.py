@@ -8,7 +8,7 @@ import subprocess
 from typing import Optional, Tuple
 
 from ai_scientist.generate_ideas import search_for_papers
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS, MAX_JSON_RETRIES
 
 
 # GENERATE LATEX
@@ -312,8 +312,14 @@ def get_citation_aider_prompt(
             return None, True
 
         ## PARSE OUTPUT
-        json_output = extract_json_between_markers(text)
-        assert json_output is not None, "Failed to extract JSON from LLM output"
+        retry_count = 0
+        while retry_count < MAX_JSON_RETRIES:
+            json_output = extract_json_between_markers(text)
+            if json_output is not None:
+                break
+            retry_count += 1
+            if retry_count >= MAX_JSON_RETRIES:
+                raise ValueError("Failed to extract JSON after max retries")
         query = json_output["Query"]
         papers = search_for_papers(query)
     except Exception as e:
@@ -354,8 +360,14 @@ def get_citation_aider_prompt(
             print("Do not add any.")
             return None, False
         ## PARSE OUTPUT
-        json_output = extract_json_between_markers(text)
-        assert json_output is not None, "Failed to extract JSON from LLM output"
+        retry_count = 0
+        while retry_count < MAX_JSON_RETRIES:
+            json_output = extract_json_between_markers(text)
+            if json_output is not None:
+                break
+            retry_count += 1
+            if retry_count >= MAX_JSON_RETRIES:
+                raise ValueError("Failed to extract JSON after max retries")
         desc = json_output["Description"]
         selected_papers = json_output["Selected"]
         selected_papers = str(selected_papers)
