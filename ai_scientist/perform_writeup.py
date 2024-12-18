@@ -313,10 +313,20 @@ def get_citation_aider_prompt(
             return None, True
 
         ## PARSE OUTPUT
-        json_output = extract_json_between_markers(text)
-        assert json_output is not None, "Failed to extract JSON from LLM output"
-        query = json_output["Query"]
-        papers = search_for_papers(query)
+        try:
+            json_output = extract_json_between_markers(text)
+            if json_output is None:
+                print("Failed to extract JSON from LLM output")
+                return None, False
+            query = json_output["Query"]
+            papers = search_for_papers(query)
+        except ValueError as e:
+            print(f"Error extracting JSON: {e}")
+            return None, False
+        except KeyError as e:
+            print(f"Missing required field in JSON: {e}")
+            return None, False
+
     except Exception as e:
         print(f"Error: {e}")
         return None, False
@@ -355,21 +365,31 @@ def get_citation_aider_prompt(
             print("Do not add any.")
             return None, False
         ## PARSE OUTPUT
-        json_output = extract_json_between_markers(text)
-        assert json_output is not None, "Failed to extract JSON from LLM output"
-        desc = json_output["Description"]
-        selected_papers = json_output["Selected"]
-        selected_papers = str(selected_papers)
+        try:
+            json_output = extract_json_between_markers(text)
+            if json_output is None:
+                print("Failed to extract JSON from LLM output")
+                return None, False
+            desc = json_output["Description"]
+            selected_papers = json_output["Selected"]
+            selected_papers = str(selected_papers)
 
-        # convert to list
-        if selected_papers != "[]":
-            selected_papers = list(map(int, selected_papers.strip("[]").split(",")))
-            assert all(
-                [0 <= i < len(papers) for i in selected_papers]
-            ), "Invalid paper index"
-            bibtexs = [papers[i]["citationStyles"]["bibtex"] for i in selected_papers]
-            bibtex_string = "\n".join(bibtexs)
-        else:
+            # convert to list
+            if selected_papers != "[]":
+                selected_papers = list(map(int, selected_papers.strip("[]").split(",")))
+                assert all(
+                    [0 <= i < len(papers) for i in selected_papers]
+                ), "Invalid paper index"
+                bibtexs = [papers[i]["citationStyles"]["bibtex"] for i in selected_papers]
+                bibtex_string = "\n".join(bibtexs)
+            else:
+                return None, False
+
+        except ValueError as e:
+            print(f"Error extracting JSON: {e}")
+            return None, False
+        except KeyError as e:
+            print(f"Missing required field in JSON: {e}")
             return None, False
 
     except Exception as e:

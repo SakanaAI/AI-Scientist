@@ -130,9 +130,18 @@ def generate_ideas(
                 msg_history=msg_history,
             )
             ## PARSE OUTPUT
-            json_output = extract_json_between_markers(text)
-            assert json_output is not None, "Failed to extract JSON from LLM output"
-            print(json_output)
+            try:
+                json_output = extract_json_between_markers(text)
+                if json_output is None:
+                    print("Failed to extract JSON from LLM output")
+                    continue
+                print(json_output)
+            except ValueError as e:
+                print(f"Error extracting JSON: {e}")
+                continue
+            except Exception as e:
+                print(f"Unexpected error while extracting JSON: {e}")
+                continue
 
             # Iteratively improve task.
             if num_reflections > 1:
@@ -148,11 +157,18 @@ def generate_ideas(
                         msg_history=msg_history,
                     )
                     ## PARSE OUTPUT
-                    json_output = extract_json_between_markers(text)
-                    assert (
-                            json_output is not None
-                    ), "Failed to extract JSON from LLM output"
-                    print(json_output)
+                    try:
+                        json_output = extract_json_between_markers(text)
+                        if json_output is None:
+                            print("Failed to extract JSON from LLM output")
+                            continue
+                        print(json_output)
+                    except ValueError as e:
+                        print(f"Error extracting JSON: {e}")
+                        continue
+                    except Exception as e:
+                        print(f"Unexpected error while extracting JSON: {e}")
+                        continue
 
                     if "I am done" in text:
                         print(f"Idea generation converged after {j + 2} iterations.")
@@ -229,9 +245,18 @@ Scores of 0 indicate the idea failed either during experimentation, writeup or r
                     msg_history=msg_history,
                 )
                 ## PARSE OUTPUT
-                json_output = extract_json_between_markers(text)
-                assert json_output is not None, "Failed to extract JSON from LLM output"
-                print(json_output)
+                try:
+                    json_output = extract_json_between_markers(text)
+                    if json_output is None:
+                        print("Failed to extract JSON from LLM output")
+                        continue
+                    print(json_output)
+                except ValueError as e:
+                    print(f"Error extracting JSON: {e}")
+                    continue
+                except Exception as e:
+                    print(f"Unexpected error while extracting JSON: {e}")
+                    continue
 
                 # Iteratively improve task.
                 if num_reflections > 1:
@@ -247,11 +272,18 @@ Scores of 0 indicate the idea failed either during experimentation, writeup or r
                             msg_history=msg_history,
                         )
                         ## PARSE OUTPUT
-                        json_output = extract_json_between_markers(text)
-                        assert (
-                                json_output is not None
-                        ), "Failed to extract JSON from LLM output"
-                        print(json_output)
+                        try:
+                            json_output = extract_json_between_markers(text)
+                            if json_output is None:
+                                print("Failed to extract JSON from LLM output")
+                                continue
+                            print(json_output)
+                        except ValueError as e:
+                            print(f"Error extracting JSON: {e}")
+                            continue
+                        except Exception as e:
+                            print(f"Unexpected error while extracting JSON: {e}")
+                            continue
 
                         if "I am done" in text:
                             print(
@@ -409,29 +441,42 @@ def check_idea_novelty(
                     break
 
                 ## PARSE OUTPUT
-                json_output = extract_json_between_markers(text)
-                assert json_output is not None, "Failed to extract JSON from LLM output"
+                try:
+                    json_output = extract_json_between_markers(text)
+                    if json_output is None:
+                        print("Failed to extract JSON from LLM output")
+                        continue
 
-                ## SEARCH FOR PAPERS
-                query = json_output["Query"]
-                papers = search_for_papers(query, result_limit=10)
-                if papers is None:
-                    papers_str = "No papers found."
+                    ## SEARCH FOR PAPERS
+                    query = json_output["Query"]
+                    papers = search_for_papers(query, result_limit=10)
+                    if papers is None:
+                        papers_str = "No papers found."
 
-                paper_strings = []
-                for i, paper in enumerate(papers):
-                    paper_strings.append(
-                        """{i}: {title}. {authors}. {venue}, {year}.\nNumber of citations: {cites}\nAbstract: {abstract}""".format(
-                            i=i,
-                            title=paper["title"],
-                            authors=paper["authors"],
-                            venue=paper["venue"],
-                            year=paper["year"],
-                            cites=paper["citationCount"],
-                            abstract=paper["abstract"],
+                    paper_strings = []
+                    for i, paper in enumerate(papers):
+                        paper_strings.append(
+                            """{i}: {title}. {authors}. {venue}, {year}.\nNumber of citations: {cites}\nAbstract: {abstract}""".format(
+                                i=i,
+                                title=paper["title"],
+                                authors=paper["authors"],
+                                venue=paper["venue"],
+                                year=paper["year"],
+                                cites=paper["citationCount"],
+                                abstract=paper["abstract"],
+                            )
                         )
-                    )
-                papers_str = "\n\n".join(paper_strings)
+                    papers_str = "\n\n".join(paper_strings)
+
+                except ValueError as e:
+                    print(f"Error extracting JSON: {e}")
+                    continue
+                except KeyError as e:
+                    print(f"Missing required field in JSON: {e}")
+                    continue
+                except Exception as e:
+                    print(f"Unexpected error while extracting JSON: {e}")
+                    continue
 
             except Exception as e:
                 print(f"Error: {e}")
