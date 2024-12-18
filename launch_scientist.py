@@ -19,7 +19,35 @@ from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
 from ai_scientist.perform_writeup import perform_writeup, generate_latex
 
+# Constants
 NUM_REFLECTIONS = 3
+
+def check_dependencies():
+    """Verify system requirements and dependencies."""
+    # Check Python version
+    python_version = sys.version_info
+    if python_version.major != 3 or not (8 <= python_version.minor <= 11):
+        raise RuntimeError("Python version must be between 3.8 and 3.11 (inclusive)")
+
+    # Check RAM
+    try:
+        import psutil
+        total_ram = psutil.virtual_memory().total
+        if total_ram < 8 * 1024 * 1024 * 1024:  # 8GB
+            print("Warning: Less than 8GB RAM available")
+        print(f"Available RAM: {total_ram / (1024**3):.1f} GB")
+    except ImportError:
+        print("Warning: psutil not installed, RAM check skipped")
+
+    # Check GPU if available
+    try:
+        if torch.cuda.is_available():
+            print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f} GB")
+        else:
+            print("Warning: No GPU detected, using CPU only")
+    except Exception as e:
+        print(f"Warning: Error checking GPU: {e}")
 
 
 def print_time():
@@ -285,6 +313,9 @@ def do_idea(
 
 
 if __name__ == "__main__":
+    # Verify system requirements
+    check_dependencies()
+
     args = parse_arguments()
 
     # Check available GPUs and adjust parallel processes if necessary
