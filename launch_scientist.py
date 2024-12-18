@@ -26,7 +26,7 @@ def check_dependencies():
     """Verify system requirements and dependencies."""
     # Check Python version
     if not (3.8 <= float(f"{sys.version_info.major}.{sys.version_info.minor}") <= 3.11):
-        raise RuntimeError("Python version must be between 3.8 and 3.11")
+        raise RuntimeError("Python version must be between 3.8 and 3.11 (inclusive)")
 
     # Check RAM
     try:
