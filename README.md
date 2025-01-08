@@ -33,7 +33,7 @@ We provide all runs and data from our paper [here](https://drive.google.com/driv
 
 <p align="center">
   <a href="https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/adaptive_dual_scale_denoising/adaptive_dual_scale_denoising.pdf"><img src="https://github.com/SakanaAI/AI-Scientist/blob/main/docs/anim-ai-scientist.gif" alt="Adaptive Dual Scale Denoising" width="80%" />
-</p>
+</a></p>
 
 ## Table of Contents
 
