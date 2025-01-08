@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from functools import partial
+from typing import Set
 
 import torch
 from torch import Tensor
 from torch.nn import Module
-
-from typing import Set
 
 
 def exists(val):

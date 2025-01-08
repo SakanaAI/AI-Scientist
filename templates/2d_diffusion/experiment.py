@@ -2,22 +2,22 @@
 
 import argparse
 import json
-import time
 import os.path as osp
-import numpy as np
-from tqdm.auto import tqdm
-import npeet.entropy_estimators as ee
-import pickle
 import pathlib
+import pickle
+import time
 
+import npeet.entropy_estimators as ee
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from ema_pytorch import EMA
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 import datasets
+from ema_pytorch import EMA
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -1,19 +1,49 @@
+import json
+import os
+import re
+
+import anthropic
 import backoff
 import openai
-import json
+
+MAX_NUM_TOKENS = 4096
+
+AVAILABLE_LLMS = [
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-sonnet-20241022",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-4o-2024-05-13",
+    "gpt-4o-2024-08-06",
+    "o1-preview-2024-09-12",
+    "o1-mini-2024-09-12",
+    "deepseek-coder-v2-0724",
+    "llama3.1-405b",
+    # Anthropic Claude models via Amazon Bedrock
+    "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+    "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    "bedrock/anthropic.claude-3-opus-20240229-v1:0",
+    # Anthropic Claude models Vertex AI
+    "vertex_ai/claude-3-opus@20240229",
+    "vertex_ai/claude-3-5-sonnet@20240620",
+    "vertex_ai/claude-3-5-sonnet-v2@20241022",
+    "vertex_ai/claude-3-sonnet@20240229",
+    "vertex_ai/claude-3-haiku@20240307",
+]
 
 
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_batch_responses_from_llm(
-    msg,
-    client,
-    model,
-    system_message,
-    print_debug=False,
-    msg_history=None,
-    temperature=0.75,
-    n_responses=1,
+        msg,
+        client,
+        model,
+        system_message,
+        print_debug=False,
+        msg_history=None,
+        temperature=0.75,
+        n_responses=1,
 ):
     if msg_history is None:
         msg_history = []
@@ -31,7 +61,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
             seed=0,
@@ -49,7 +79,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
         )
@@ -66,7 +96,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
         )
@@ -74,7 +104,7 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif "claude" in model:
+    else:
         content, new_msg_history = [], []
         for _ in range(n_responses):
             c, hist = get_response_from_llm(
@@ -88,9 +118,6 @@ def get_batch_responses_from_llm(
             )
             content.append(c)
             new_msg_history.append(hist)
-    else:
-        # TODO: This is only supported for GPT-4 in our reviewer pipeline.
-        raise ValueError(f"Model {model} not supported.")
 
     if print_debug:
         # Just print the first one.
@@ -107,13 +134,13 @@ def get_batch_responses_from_llm(
 
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_response_from_llm(
-    msg,
-    client,
-    model,
-    system_message,
-    print_debug=False,
-    msg_history=None,
-    temperature=0.75,
+        msg,
+        client,
+        model,
+        system_message,
+        print_debug=False,
+        msg_history=None,
+        temperature=0.75,
 ):
     if msg_history is None:
         msg_history = []
@@ -132,7 +159,7 @@ def get_response_from_llm(
         ]
         response = client.messages.create(
             model=model,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             temperature=temperature,
             system=system_message,
             messages=new_msg_history,
@@ -162,9 +189,25 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
+            seed=0,
+        )
+        content = response.choices[0].message.content
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif model in ["o1-preview-2024-09-12", "o1-mini-2024-09-12"]:
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=1,
+            max_completion_tokens=MAX_NUM_TOKENS,
+            n=1,
+            #stop=None,
             seed=0,
         )
         content = response.choices[0].message.content
@@ -178,7 +221,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -193,7 +236,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -215,24 +258,62 @@ def get_response_from_llm(
 
 
 def extract_json_between_markers(llm_output):
-    json_start_marker = "```json"
-    json_end_marker = "```"
+    # Regular expression pattern to find JSON content between ```json and ```
+    json_pattern = r"```json(.*?)```"
+    matches = re.findall(json_pattern, llm_output, re.DOTALL)
 
-    # Find the start and end indices of the JSON string
-    start_index = llm_output.find(json_start_marker)
-    if start_index != -1:
-        start_index += len(json_start_marker)  # Move past the marker
-        end_index = llm_output.find(json_end_marker, start_index)
+    if not matches:
+        # Fallback: Try to find any JSON-like content in the output
+        json_pattern = r"\{.*?\}"
+        matches = re.findall(json_pattern, llm_output, re.DOTALL)
+
+    for json_string in matches:
+        json_string = json_string.strip()
+        try:
+            parsed_json = json.loads(json_string)
+            return parsed_json
+        except json.JSONDecodeError:
+            # Attempt to fix common JSON issues
+            try:
+                # Remove invalid control characters
+                json_string_clean = re.sub(r"[\x00-\x1F\x7F]", "", json_string)
+                parsed_json = json.loads(json_string_clean)
+                return parsed_json
+            except json.JSONDecodeError:
+                continue  # Try next match
+
+    return None  # No valid JSON found
+
+
+def create_client(model):
+    if model.startswith("claude-"):
+        print(f"Using Anthropic API with model {model}.")
+        return anthropic.Anthropic(), model
+    elif model.startswith("bedrock") and "claude" in model:
+        client_model = model.split("/")[-1]
+        print(f"Using Amazon Bedrock with model {client_model}.")
+        return anthropic.AnthropicBedrock(), client_model
+    elif model.startswith("vertex_ai") and "claude" in model:
+        client_model = model.split("/")[-1]
+        print(f"Using Vertex AI with model {client_model}.")
+        return anthropic.AnthropicVertex(), client_model
+    elif 'gpt' in model:
+        print(f"Using OpenAI API with model {model}.")
+        return openai.OpenAI(), model
+    elif model in ["o1-preview-2024-09-12", "o1-mini-2024-09-12"]:
+        print(f"Using OpenAI API with model {model}.")
+        return openai.OpenAI(), model
+    elif model == "deepseek-coder-v2-0724":
+        print(f"Using OpenAI API with {model}.")
+        return openai.OpenAI(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com"
+        ), model
+    elif model == "llama3.1-405b":
+        print(f"Using OpenAI API with {model}.")
+        return openai.OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url="https://openrouter.ai/api/v1"
+        ), "meta-llama/llama-3.1-405b-instruct"
     else:
-        return None  # JSON markers not found
-
-    if end_index == -1:
-        return None  # End marker not found
-
-    # Extract the JSON string
-    json_string = llm_output[start_index:end_index].strip()
-    try:
-        parsed_json = json.loads(json_string)
-        return parsed_json
-    except json.JSONDecodeError:
-        return None  # Invalid JSON format
+        raise ValueError(f"Model {model} not supported.")

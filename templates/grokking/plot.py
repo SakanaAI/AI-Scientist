@@ -1,9 +1,10 @@
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import numpy as np
 import json
 import os
 import os.path as osp
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
 
 # LOAD FINAL RESULTS:
 datasets = ["x_div_y", "x_minus_y", "x_plus_y", "permutation"]
@@ -122,7 +123,6 @@ for dataset in datasets:
     plt.tight_layout()
     plt.savefig(f"val_loss_{dataset}.png")
     plt.close()
-
 
 # Plot 3: Line plot of training acc for each dataset across the runs with labels
 for dataset in datasets:
