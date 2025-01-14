@@ -134,7 +134,7 @@ class LLFFDataset(Dataset):
         self.downsample = downsample
         self.define_transforms()
 
-        self.blender2opencv = np.eye(4)#np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+        self.blender2opencv = np.eye(4)  # np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
         self.read_meta()
         self.white_bg = False
 
@@ -146,7 +146,6 @@ class LLFFDataset(Dataset):
         self.invradius = 1.0 / (self.scene_bbox[1] - self.center).float().view(1, 1, 3)
 
     def read_meta(self):
-
 
         poses_bounds = np.load(os.path.join(self.root_dir, 'poses_bounds.npy'))  # (N_images, 17)
         self.image_paths = sorted(glob.glob(os.path.join(self.root_dir, 'images_4/*')))
@@ -221,12 +220,11 @@ class LLFFDataset(Dataset):
             self.all_rays += [torch.cat([rays_o, rays_d], 1)]  # (h*w, 6)
 
         if not self.is_stack:
-            self.all_rays = torch.cat(self.all_rays, 0) # (len(self.meta['frames])*h*w, 3)
-            self.all_rgbs = torch.cat(self.all_rgbs, 0) # (len(self.meta['frames])*h*w,3)
+            self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*h*w, 3)
+            self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*h*w,3)
         else:
-            self.all_rays = torch.stack(self.all_rays, 0)   # (len(self.meta['frames]),h,w, 3)
-            self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)
-
+            self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h,w, 3)
+            self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1, *self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)
 
     def define_transforms(self):
         self.transform = T.ToTensor()

@@ -1,4 +1,4 @@
-import torch,os,imageio,sys
+import torch, os, imageio, sys
 from tqdm.auto import tqdm
 from dataLoader.ray_utils import get_rays
 from models.tensoRF import TensorVM, TensorCP, raw2alpha, TensorVMSplit, AlphaGridMask
@@ -7,26 +7,26 @@ from dataLoader.ray_utils import ndc_rays_blender
 
 
 def OctreeRender_trilinear_fast(rays, tensorf, chunk=4096, N_samples=-1, ndc_ray=False, white_bg=True, is_train=False, device='cuda'):
-
     rgbs, alphas, depth_maps, weights, uncertainties = [], [], [], [], []
     N_rays_all = rays.shape[0]
     for chunk_idx in range(N_rays_all // chunk + int(N_rays_all % chunk > 0)):
         rays_chunk = rays[chunk_idx * chunk:(chunk_idx + 1) * chunk].to(device)
-    
+
         rgb_map, depth_map = tensorf(rays_chunk, is_train=is_train, white_bg=white_bg, ndc_ray=ndc_ray, N_samples=N_samples)
 
         rgbs.append(rgb_map)
         depth_maps.append(depth_map)
-    
+
     return torch.cat(rgbs), None, torch.cat(depth_maps), None, None
 
+
 @torch.no_grad()
-def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
+def evaluation(test_dataset, tensorf, args, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
                white_bg=False, ndc_ray=False, compute_extra_metrics=True, device='cuda'):
     PSNRs, rgb_maps, depth_maps = [], [], []
-    ssims,l_alex,l_vgg=[],[],[]
+    ssims, l_alex, l_vgg = [], [], []
     os.makedirs(savePath, exist_ok=True)
-    os.makedirs(savePath+"/rgbd", exist_ok=True)
+    os.makedirs(savePath + "/rgbd", exist_ok=True)
 
     try:
         tqdm._instances.clear()
@@ -34,20 +34,20 @@ def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prt
         pass
 
     near_far = test_dataset.near_far
-    img_eval_interval = 1 if N_vis < 0 else max(test_dataset.all_rays.shape[0] // N_vis,1)
+    img_eval_interval = 1 if N_vis < 0 else max(test_dataset.all_rays.shape[0] // N_vis, 1)
     idxs = list(range(0, test_dataset.all_rays.shape[0], img_eval_interval))
     for idx, samples in tqdm(enumerate(test_dataset.all_rays[0::img_eval_interval]), file=sys.stdout):
 
         W, H = test_dataset.img_wh
-        rays = samples.view(-1,samples.shape[-1])
+        rays = samples.view(-1, samples.shape[-1])
 
         rgb_map, _, depth_map, _, _ = renderer(rays, tensorf, chunk=4096, N_samples=N_samples,
-                                        ndc_ray=ndc_ray, white_bg = white_bg, device=device)
+                                               ndc_ray=ndc_ray, white_bg=white_bg, device=device)
         rgb_map = rgb_map.clamp(0.0, 1.0)
 
         rgb_map, depth_map = rgb_map.reshape(H, W, 3).cpu(), depth_map.reshape(H, W).cpu()
 
-        depth_map, _ = visualize_depth_numpy(depth_map.numpy(),near_far)
+        depth_map, _ = visualize_depth_numpy(depth_map.numpy(), near_far)
         if len(test_dataset.all_rgbs):
             gt_rgb = test_dataset.all_rgbs[idxs[idx]].view(H, W, 3)
             loss = torch.mean((rgb_map - gt_rgb) ** 2)
@@ -83,16 +83,16 @@ def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prt
         else:
             np.savetxt(f'{savePath}/{prtx}mean.txt', np.asarray([psnr]))
 
-
     return PSNRs
 
+
 @torch.no_grad()
-def evaluation_path(test_dataset,tensorf, c2ws, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
+def evaluation_path(test_dataset, tensorf, c2ws, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
                     white_bg=False, ndc_ray=False, compute_extra_metrics=True, device='cuda'):
     PSNRs, rgb_maps, depth_maps = [], [], []
-    ssims,l_alex,l_vgg=[],[],[]
+    ssims, l_alex, l_vgg = [], [], []
     os.makedirs(savePath, exist_ok=True)
-    os.makedirs(savePath+"/rgbd", exist_ok=True)
+    os.makedirs(savePath + "/rgbd", exist_ok=True)
 
     try:
         tqdm._instances.clear()
@@ -111,12 +111,12 @@ def evaluation_path(test_dataset,tensorf, c2ws, renderer, savePath=None, N_vis=5
         rays = torch.cat([rays_o, rays_d], 1)  # (h*w, 6)
 
         rgb_map, _, depth_map, _, _ = renderer(rays, tensorf, chunk=8192, N_samples=N_samples,
-                                        ndc_ray=ndc_ray, white_bg = white_bg, device=device)
+                                               ndc_ray=ndc_ray, white_bg=white_bg, device=device)
         rgb_map = rgb_map.clamp(0.0, 1.0)
 
         rgb_map, depth_map = rgb_map.reshape(H, W, 3).cpu(), depth_map.reshape(H, W).cpu()
 
-        depth_map, _ = visualize_depth_numpy(depth_map.numpy(),near_far)
+        depth_map, _ = visualize_depth_numpy(depth_map.numpy(), near_far)
 
         rgb_map = (rgb_map.numpy() * 255).astype('uint8')
         # rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
@@ -140,6 +140,4 @@ def evaluation_path(test_dataset,tensorf, c2ws, renderer, savePath=None, N_vis=5
         else:
             np.savetxt(f'{savePath}/{prtx}mean.txt', np.asarray([psnr]))
 
-
     return PSNRs
-

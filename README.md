@@ -296,6 +296,7 @@ We welcome community contributions in the form of new templates. While these are
 - Image Classification with MobileNetV3 (`mobilenetV3`) - [PR #141](https://github.com/SakanaAI/AI-Scientist/pull/141)
 - Sketch RNN (`sketch_rnn`) - [PR #143](https://github.com/SakanaAI/AI-Scientist/pull/143)
 - Earthquake Prediction (`earthquake-prediction`) - [PR #167](https://github.com/SakanaAI/AI-Scientist/pull/167)
+- Tensorial Radiance Fields (`tensorf`) - [PR #175](https://github.com/SakanaAI/AI-Scientist/pull/175)
 
 *This section is reserved for community contributions. Please submit a pull request to add your template to the list! Please describe the template in the PR description, and also show examples of the generated papers.*
 

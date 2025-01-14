@@ -83,40 +83,41 @@ def gen_path(pos_gen, at=(0, 0, 0), up=(0, -1, 0), frames=180):
         c2ws.append(c2w)
     return torch.stack(c2ws)
 
+
 class TanksTempleDataset(Dataset):
     """NSVF Generic Dataset."""
-    def __init__(self, datadir, split='train', downsample=1.0, wh=[1920,1080], is_stack=False):
+
+    def __init__(self, datadir, split='train', downsample=1.0, wh=[1920, 1080], is_stack=False):
         self.root_dir = datadir
         self.split = split
         self.is_stack = is_stack
         self.downsample = downsample
-        self.img_wh = (int(wh[0]/downsample),int(wh[1]/downsample))
+        self.img_wh = (int(wh[0] / downsample), int(wh[1] / downsample))
         self.define_transforms()
 
         self.white_bg = True
-        self.near_far = [0.01,6.0]
-        self.scene_bbox = torch.from_numpy(np.loadtxt(f'{self.root_dir}/bbox.txt')).float()[:6].view(2,3)*1.2
+        self.near_far = [0.01, 6.0]
+        self.scene_bbox = torch.from_numpy(np.loadtxt(f'{self.root_dir}/bbox.txt')).float()[:6].view(2, 3) * 1.2
 
         self.blender2opencv = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
         self.read_meta()
         self.define_proj_mat()
-        
+
         self.center = torch.mean(self.scene_bbox, axis=0).float().view(1, 1, 3)
         self.radius = (self.scene_bbox[1] - self.center).float().view(1, 1, 3)
-    
+
     def bbox2corners(self):
-        corners = self.scene_bbox.unsqueeze(0).repeat(4,1,1)
+        corners = self.scene_bbox.unsqueeze(0).repeat(4, 1, 1)
         for i in range(3):
-            corners[i,[0,1],i] = corners[i,[1,0],i] 
-        return corners.view(-1,3)
-        
-        
+            corners[i, [0, 1], i] = corners[i, [1, 0], i]
+        return corners.view(-1, 3)
+
     def read_meta(self):
 
         self.intrinsics = np.loadtxt(os.path.join(self.root_dir, "intrinsics.txt"))
-        self.intrinsics[:2] *= (np.array(self.img_wh)/np.array([1920,1080])).reshape(2,1)
+        self.intrinsics[:2] *= (np.array(self.img_wh) / np.array([1920, 1080])).reshape(2, 1)
         pose_files = sorted(os.listdir(os.path.join(self.root_dir, 'pose')))
-        img_files  = sorted(os.listdir(os.path.join(self.root_dir, 'rgb')))
+        img_files = sorted(os.listdir(os.path.join(self.root_dir, 'rgb')))
 
         if self.split == 'train':
             pose_files = [x for x in pose_files if x.startswith('0_')]
@@ -134,11 +135,9 @@ class TanksTempleDataset(Dataset):
             img_files = test_img_files
 
         # ray directions for all pixels, same for all images (same H, W, focal)
-        self.directions = get_ray_directions(self.img_wh[1], self.img_wh[0], [self.intrinsics[0,0],self.intrinsics[1,1]], center=self.intrinsics[:2,2])  # (h, w, 3)
+        self.directions = get_ray_directions(self.img_wh[1], self.img_wh[0], [self.intrinsics[0, 0], self.intrinsics[1, 1]], center=self.intrinsics[:2, 2])  # (h, w, 3)
         self.directions = self.directions / torch.norm(self.directions, dim=-1, keepdim=True)
 
-
-        
         self.poses = []
         self.all_rays = []
         self.all_rgbs = []
@@ -147,16 +146,15 @@ class TanksTempleDataset(Dataset):
         for img_fname, pose_fname in tqdm(zip(img_files, pose_files), desc=f'Loading data {self.split} ({len(img_files)})'):
             image_path = os.path.join(self.root_dir, 'rgb', img_fname)
             img = Image.open(image_path)
-            if self.downsample!=1.0:
+            if self.downsample != 1.0:
                 img = img.resize(self.img_wh, Image.LANCZOS)
             img = self.transform(img)  # (4, h, w)
             img = img.view(img.shape[0], -1).permute(1, 0)  # (h*w, 4) RGBA
-            if img.shape[-1]==4:
+            if img.shape[-1] == 4:
                 img = img[:, :3] * img[:, -1:] + (1 - img[:, -1:])  # blend A to RGB
             self.all_rgbs.append(img)
-            
 
-            c2w = np.loadtxt(os.path.join(self.root_dir, 'pose', pose_fname))# @ cam_trans
+            c2w = np.loadtxt(os.path.join(self.root_dir, 'pose', pose_fname))  # @ cam_trans
             c2w = torch.FloatTensor(c2w)
             self.poses.append(c2w)  # C2W
             rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
@@ -165,36 +163,33 @@ class TanksTempleDataset(Dataset):
         self.poses = torch.stack(self.poses)
 
         center = torch.mean(self.scene_bbox, dim=0)
-        radius = torch.norm(self.scene_bbox[1]-center)*1.2
+        radius = torch.norm(self.scene_bbox[1] - center) * 1.2
         up = torch.mean(self.poses[:, :3, 1], dim=0).tolist()
-        pos_gen = circle(radius=radius, h=-0.2*up[1], axis='y')
-        self.render_path = gen_path(pos_gen, up=up,frames=200)
+        pos_gen = circle(radius=radius, h=-0.2 * up[1], axis='y')
+        self.render_path = gen_path(pos_gen, up=up, frames=200)
         self.render_path[:, :3, 3] += center
-
-
 
         if 'train' == self.split:
             if self.is_stack:
-                self.all_rays = torch.stack(self.all_rays, 0).reshape(-1,*self.img_wh[::-1], 6)  # (len(self.meta['frames])*h*w, 3)
-                self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames])*h*w, 3) 
+                self.all_rays = torch.stack(self.all_rays, 0).reshape(-1, *self.img_wh[::-1], 6)  # (len(self.meta['frames])*h*w, 3)
+                self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1, *self.img_wh[::-1], 3)  # (len(self.meta['frames])*h*w, 3)
             else:
                 self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*h*w, 3)
                 self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*h*w, 3)
         else:
             self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
-            self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)
+            self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1, *self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)
 
- 
     def define_transforms(self):
         self.transform = T.ToTensor()
-        
+
     def define_proj_mat(self):
-        self.proj_mat = torch.from_numpy(self.intrinsics[:3,:3]).unsqueeze(0).float() @ torch.inverse(self.poses)[:,:3]
+        self.proj_mat = torch.from_numpy(self.intrinsics[:3, :3]).unsqueeze(0).float() @ torch.inverse(self.poses)[:, :3]
 
     def world2ndc(self, points):
         device = points.device
         return (points - self.center.to(device)) / self.radius.to(device)
-        
+
     def __len__(self):
         if self.split == 'train':
             return len(self.all_rays)
