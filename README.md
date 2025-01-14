@@ -159,8 +159,6 @@ This section provides instructions for setting up each of the three templates us
 
 **Description:** This template investigates transformer-based autoregressive next-token prediction tasks.
 
-### Setup NanoGPT
-
 **Setup Steps:**
 
 1. **Prepare the data:**
