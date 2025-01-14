@@ -137,6 +137,20 @@ export OPENAI_API_KEY="YOUR KEY HERE"
 export S2_API_KEY="YOUR KEY HERE"
 ```
 
+#### OpenAlex API (Literature Search Alternative)
+
+OpenAlex API can be used as an alternative if you do not have a Semantic Scholar API Key.
+OpenAlex does not require API key.
+
+```bash
+pip install pyalex
+export OPENALEX_MAIL_ADDRESS="YOUR EMAIL ADDRESS"
+```
+
+And specify `--engine openalex` when you execute the AI Scientist code.
+
+Note that this is experimental for those who do not have a Semantic Scholar API Key.
+
 ## Setting Up the Templates
 
 This section provides instructions for setting up each of the three templates used in our paper. Before running The AI Scientist experiments, please ensure you have completed the setup steps for the templates you are interested in.

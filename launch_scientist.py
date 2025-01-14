@@ -82,6 +82,13 @@ def parse_arguments():
         default=50,
         help="Number of ideas to generate",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        default="semanticscholar",
+        choices=["semanticscholar", "openalex"],
+        help="Scholar engine to use.",
+    )
     return parser.parse_args()
 
 
@@ -217,7 +224,7 @@ def do_idea(
                 edit_format="diff",
             )
             try:
-                perform_writeup(idea, folder_name, coder, client, client_model)
+                perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
             except Exception as e:
                 print(f"Failed to perform writeup: {e}")
                 return False
@@ -310,12 +317,14 @@ if __name__ == "__main__":
         max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
     )
-    ideas = check_idea_novelty(
-        ideas,
-        base_dir=base_dir,
-        client=client,
-        model=client_model,
-    )
+    if not args.skip_novelty_check:
+        ideas = check_idea_novelty(
+            ideas,
+            base_dir=base_dir,
+            client=client,
+            model=client_model,
+            engine=args.engine,
+        )
 
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)
@@ -375,5 +384,6 @@ if __name__ == "__main__":
                 print(f"Completed idea: {idea['Name']}, Success: {success}")
             except Exception as e:
                 print(f"Failed to evaluate idea {idea['Name']}: {str(e)}")
-
+                import traceback
+                print(traceback.format_exc())
     print("All ideas evaluated.")
