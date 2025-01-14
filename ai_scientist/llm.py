@@ -16,6 +16,7 @@ AVAILABLE_LLMS = [
     "gpt-4o-2024-08-06",
     "o1-preview-2024-09-12",
     "o1-mini-2024-09-12",
+    "o1-2024-12-17",
     "deepseek-coder-v2-0724",
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -65,23 +66,6 @@ def get_batch_responses_from_llm(
             n=n_responses,
             stop=None,
             seed=0,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
-    elif model == "deepseek-coder-v2-0724":
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="deepseek-coder",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
         )
         content = [r.message.content for r in response.choices]
         new_msg_history = [
