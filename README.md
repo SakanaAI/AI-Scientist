@@ -118,7 +118,7 @@ export VERTEXAI_LOCATION="REGION"         # for Aider/LiteLLM call
 export VERTEXAI_PROJECT="PROJECT_ID"      # for Aider/LiteLLM call
 ```
 
-#### DeepSeek API (DeepSeek-Coder-V2)
+#### DeepSeek API (DeepSeek-V3)
 
 By default, this uses the `DEEPSEEK_API_KEY` environment variable.
 
@@ -337,7 +337,7 @@ The AI Scientist finishes an idea with a success rate that depends on the templa
 
 **What is the cost of each idea generated?**
 
-Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek Coder V2 for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
+Typically less than $15 per paper with Claude Sonnet 3.5. We recommend DeepSeek-V3 for a much more cost-effective approach. A good place to look for new models is the [Aider leaderboard](https://aider.chat/docs/leaderboards/).
 
 **How do I change the base conference format associated with the write-ups?**
 
