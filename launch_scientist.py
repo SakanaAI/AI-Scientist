@@ -98,6 +98,27 @@ def get_available_gpus(gpu_ids=None):
     return list(range(torch.cuda.device_count()))
 
 
+def check_latex_dependencies():
+    """
+    Check if required LaTeX dependencies are installed on the system.
+    Returns True if all dependencies are found, False otherwise.
+    """
+    import shutil
+    import sys
+
+    required_dependencies = ['pdflatex', 'chktex']
+    missing_deps = []
+
+    for dep in required_dependencies:
+        if shutil.which(dep) is None:
+            missing_deps.append(dep)
+    
+    if missing_deps:
+        print("Error: Required LaTeX dependencies not found:", file=sys.stderr)
+        return False
+    
+    return True
+    
 def worker(
         queue,
         base_dir,
@@ -303,6 +324,10 @@ if __name__ == "__main__":
         args.parallel = len(available_gpus)
 
     print(f"Using GPUs: {available_gpus}")
+
+    # Check LaTeX dependencies before proceeding
+    if args.writeup == "latex" and not check_latex_dependencies():
+        sys.exit(1)
 
     # Create client
     client, client_model = create_client(args.model)
