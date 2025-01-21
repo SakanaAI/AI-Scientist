@@ -118,13 +118,19 @@ export VERTEXAI_LOCATION="REGION"         # for Aider/LiteLLM call
 export VERTEXAI_PROJECT="PROJECT_ID"      # for Aider/LiteLLM call
 ```
 
-#### DeepSeek API (DeepSeek-Coder-V2)
-
+#### DeepSeek API (deepseek-chat, deepseek-reasoner)
 By default, this uses the `DEEPSEEK_API_KEY` environment variable.
 
 #### OpenRouter API (Llama3.1)
 
 By default, this uses the `OPENROUTER_API_KEY` environment variable.
+
+#### Google Gemini
+We support Google Gemini models (e.g., "gemini-1.5-flash", "gemini-1.5-pro") via the [google-generativeai](https://pypi.org/project/google-generativeai) Python library. By default, it uses the environment variable:
+
+```bash
+export GEMINI_API_KEY="YOUR GEMINI API KEY"
+```
 
 #### Semantic Scholar API (Literature Search)
 
