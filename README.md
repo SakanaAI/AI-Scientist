@@ -118,13 +118,19 @@ export VERTEXAI_LOCATION="REGION"         # for Aider/LiteLLM call
 export VERTEXAI_PROJECT="PROJECT_ID"      # for Aider/LiteLLM call
 ```
 
-#### DeepSeek API (DeepSeek-Coder-V2)
-
+#### DeepSeek API (deepseek-chat, deepseek-reasoner)
 By default, this uses the `DEEPSEEK_API_KEY` environment variable.
 
 #### OpenRouter API (Llama3.1)
 
 By default, this uses the `OPENROUTER_API_KEY` environment variable.
+
+#### Google Gemini
+We support Google Gemini models (e.g., "gemini-1.5-flash", "gemini-1.5-pro") via the [google-generativeai](https://pypi.org/project/google-generativeai) Python library. By default, it uses the environment variable:
+
+```bash
+export GEMINI_API_KEY="YOUR GEMINI API KEY"
+```
 
 #### Semantic Scholar API (Literature Search)
 
@@ -136,6 +142,20 @@ Be sure to provide the key for the model used for your runs, e.g.:
 export OPENAI_API_KEY="YOUR KEY HERE"
 export S2_API_KEY="YOUR KEY HERE"
 ```
+
+#### OpenAlex API (Literature Search Alternative)
+
+OpenAlex API can be used as an alternative if you do not have a Semantic Scholar API Key.
+OpenAlex does not require API key.
+
+```bash
+pip install pyalex
+export OPENALEX_MAIL_ADDRESS="YOUR EMAIL ADDRESS"
+```
+
+And specify `--engine openalex` when you execute the AI Scientist code.
+
+Note that this is experimental for those who do not have a Semantic Scholar API Key.
 
 ## Setting Up the Templates
 
@@ -281,6 +301,8 @@ We welcome community contributions in the form of new templates. While these are
 - Infectious Disease Modeling (`seir`) - [PR #137](https://github.com/SakanaAI/AI-Scientist/pull/137)
 - Image Classification with MobileNetV3 (`mobilenetV3`) - [PR #141](https://github.com/SakanaAI/AI-Scientist/pull/141)
 - Sketch RNN (`sketch_rnn`) - [PR #143](https://github.com/SakanaAI/AI-Scientist/pull/143)
+- Earthquake Prediction (`earthquake-prediction`) - [PR #167](https://github.com/SakanaAI/AI-Scientist/pull/167)
+- Tensorial Radiance Fields (`tensorf`) - [PR #175](https://github.com/SakanaAI/AI-Scientist/pull/175)
 
 *This section is reserved for community contributions. Please submit a pull request to add your template to the list! Please describe the template in the PR description, and also show examples of the generated papers.*
 

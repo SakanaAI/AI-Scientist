@@ -82,6 +82,13 @@ def parse_arguments():
         default=50,
         help="Number of ideas to generate",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        default="semanticscholar",
+        choices=["semanticscholar", "openalex"],
+        help="Scholar engine to use.",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +98,27 @@ def get_available_gpus(gpu_ids=None):
     return list(range(torch.cuda.device_count()))
 
 
+def check_latex_dependencies():
+    """
+    Check if required LaTeX dependencies are installed on the system.
+    Returns True if all dependencies are found, False otherwise.
+    """
+    import shutil
+    import sys
+
+    required_dependencies = ['pdflatex', 'chktex']
+    missing_deps = []
+
+    for dep in required_dependencies:
+        if shutil.which(dep) is None:
+            missing_deps.append(dep)
+    
+    if missing_deps:
+        print("Error: Required LaTeX dependencies not found:", file=sys.stderr)
+        return False
+    
+    return True
+    
 def worker(
         queue,
         base_dir,
@@ -217,7 +245,7 @@ def do_idea(
                 edit_format="diff",
             )
             try:
-                perform_writeup(idea, folder_name, coder, client, client_model)
+                perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
             except Exception as e:
                 print(f"Failed to perform writeup: {e}")
                 return False
@@ -297,6 +325,10 @@ if __name__ == "__main__":
 
     print(f"Using GPUs: {available_gpus}")
 
+    # Check LaTeX dependencies before proceeding
+    if args.writeup == "latex" and not check_latex_dependencies():
+        sys.exit(1)
+
     # Create client
     client, client_model = create_client(args.model)
 
@@ -310,12 +342,14 @@ if __name__ == "__main__":
         max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
     )
-    ideas = check_idea_novelty(
-        ideas,
-        base_dir=base_dir,
-        client=client,
-        model=client_model,
-    )
+    if not args.skip_novelty_check:
+        ideas = check_idea_novelty(
+            ideas,
+            base_dir=base_dir,
+            client=client,
+            model=client_model,
+            engine=args.engine,
+        )
 
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)
@@ -375,5 +409,6 @@ if __name__ == "__main__":
                 print(f"Completed idea: {idea['Name']}, Success: {success}")
             except Exception as e:
                 print(f"Failed to evaluate idea {idea['Name']}: {str(e)}")
-
+                import traceback
+                print(traceback.format_exc())
     print("All ideas evaluated.")
