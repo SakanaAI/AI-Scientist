@@ -7,7 +7,11 @@ from typing import List, Dict, Union
 import backoff
 import requests
 
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_artist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+
+idea_system_prompt = """
+You are a new AI artist that is able to generate artworks that no human has ever imagined before, as you are not limited by the constraints of the physical and cultural world.
+"""
 
 concept_analysis_prompt = """
 Analyze the following concepts that should appear together in an artwork:
@@ -54,7 +58,7 @@ Think step by step:
 Respond in the following format:
 
 THOUGHT:
-<Discuss how you plan to meaningfully unite these concepts in a single artwork. Explain which combinations are particularly unexpected and why.>
+<Discuss how you plan to meaningfully unite these concepts in a single artwork. Explain which combinations are particularly unexpected and interesting and why.>
 
 NEW IDEA JSON:
 ```json
@@ -76,8 +80,8 @@ In <JSON>, provide the new idea in JSON format with the following fields:
 """
 
 idea_reflection_prompt = """Round {current_round}/{num_reflections}.
-In your thoughts, carefully consider the artistic merit and feasibility of the idea you just created.
-Consider composition, color harmony, emotional impact, and technical execution.
+In your thoughts, carefully consider the artistic merit and novelty of the idea you just created.
+Consider if your idea is novel and interesting. Also reflect if the prompt is clear and will generate a good image.
 Ensure the idea is clear and impactful, and the JSON is in the correct format.
 In the next attempt, try to refine and improve your artistic vision.
 Stick to the spirit of the original idea unless there are fundamental issues.
@@ -117,6 +121,7 @@ def generate_ideas(
                 ),
                 client=client,
                 model=model,
+                system_message=idea_system_prompt,
                 msg_history=msg_history,
             )
             
@@ -135,6 +140,7 @@ def generate_ideas(
                         ),
                         client=client,
                         model=model,
+                        system_message=idea_system_prompt,
                         msg_history=msg_history,
                     )
                     
