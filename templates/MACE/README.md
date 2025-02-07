@@ -12,7 +12,7 @@ After downloading, place the folder named after each respective molecule into th
 
 ## Example Paper
 
-An example of a generated paper can be found [here](https://drive.google.com/file/d/1dO8qXeCWaXkqP-sbV4z1S5RwY--pmggh/view?usp=sharing).
+An example of a generated paper can be found [here](https://drive.google.com/file/d/1G_0QDmuBCVzbUGPTvWCSXWEVql9A8MSX/view?usp=sharing).
 
 ## Installation
 
@@ -23,3 +23,4 @@ pip install mace-torch
 pip install MDAnalysis
 pip install statsmodels
 
+Depending on your hardware you may need to increase timeout in run_experiment(folder_name, run_num, timeout=7200) function. 
