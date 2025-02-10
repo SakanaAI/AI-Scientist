@@ -9,8 +9,30 @@ MAX_ITERS = 4
 MAX_RUNS = 5
 MAX_STDERR_OUTPUT = 1500
 
+# FIXME: prompt engineering for the database definition & auto-generate the following prompt
+coupon_logic = """
+user_df and restaurant_df are provided as input. 
+user_df: User DataFrame
+    user_id: User ID
+    usage_1_person: Total charge of 1 person usage
+    usage_2_people: Total charge of 2 people usage
+    usage_3-4_people: Total charge of 3-4 people usage
+    usage_5_or_more_people: Total charge of 5 or more people usage
+    avg_lunch_price: Average lunch price
+    avg_dinner_price: Average dinner price
+restaurant_df: Restaurant DataFrame
+    restaurant_id: Restaurant ID
+    restaurant_name: Restaurant name
+    lunch_price: Average lunch price
+    dinner_price: Average dinner price
+    last_month_sales_1_person: Total sales of last month for 1 person
+    last_month_sales_2_people: Total sales of last month for 2 people
+    last_month_sales_3-4_people: Total sales of last month for 3-4 people
+    last_month_sales_5_or_more: Total sales of last month for 5 or more people
+"""
 coder_prompt = """Your goal is to implement the following idea: {title}.
 The proposed experiment is as follows: {idea}.
+{coupon_logic}
 You are given a total of up to {max_runs} runs to complete the necessary experiments. You do not need to use all {max_runs}.
 
 First, plan the list of experiments you would like to run. For example, if you are sweeping over a specific hyperparameter, plan each value you would like to test for each run.
@@ -27,7 +49,12 @@ You can then implement the next thing on your list."""
 
 
 # RUN EXPERIMENT
-def run_experiment(folder_name, run_num, timeout=7200):
+def run_experiment(
+    folder_name,
+    run_num,
+    marketing_mode: bool = False,
+    timeout=7200,
+):
     cwd = osp.abspath(folder_name)
     # COPY CODE SO WE CAN SEE IT.
     shutil.copy(
@@ -43,7 +70,11 @@ def run_experiment(folder_name, run_num, timeout=7200):
     ]
     try:
         result = subprocess.run(
-            command, cwd=cwd, stderr=subprocess.PIPE, text=True, timeout=timeout
+            command,
+            cwd=cwd,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
         )
 
         if result.stderr:
@@ -61,7 +92,11 @@ def run_experiment(folder_name, run_num, timeout=7200):
         else:
             with open(osp.join(cwd, f"run_{run_num}", "final_info.json"), "r") as f:
                 results = json.load(f)
-            results = {k: v["means"] for k, v in results.items()}
+
+            if not marketing_mode:
+                # if marketing_mode is True, we will use the result as is.
+                # default is to use the mean of the results
+                results = {k: v["means"] for k, v in results.items()}
 
             next_prompt = f"""Run {run_num} completed. Here are the results:
 {results}
@@ -113,7 +148,13 @@ def run_plotting(folder_name, timeout=600):
 
 
 # PERFORM EXPERIMENTS
-def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
+def perform_experiments(
+    idea,
+    folder_name,
+    coder,
+    baseline_results,
+    marketing_mode: bool = False,
+) -> bool:
     ## RUN EXPERIMENT
     current_iter = 0
     run = 1
@@ -122,6 +163,7 @@ def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
         idea=idea["Experiment"],
         max_runs=MAX_RUNS,
         baseline_results=baseline_results,
+        coupon_logic=coupon_logic if marketing_mode else "",
     )
     while run < MAX_RUNS + 1:
         if current_iter >= MAX_ITERS:
@@ -131,7 +173,11 @@ def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
         print(coder_out)
         if "ALL_COMPLETED" in coder_out:
             break
-        return_code, next_prompt = run_experiment(folder_name, run)
+        return_code, next_prompt = run_experiment(
+            folder_name,
+            run,
+            marketing_mode=marketing_mode,
+        )
         if return_code == 0:
             run += 1
             current_iter = 0
