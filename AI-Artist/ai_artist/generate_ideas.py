@@ -267,3 +267,41 @@ The JSON should include:
         json.dump(idea_archive, f, indent=4)
 
     return idea_archive
+
+def refine_idea_with_feedback(idea: Dict, feedback: Dict, client, model, num_reflections: int = 1) -> Dict:
+    """
+    Refine the artwork idea using review feedback.
+    This function prompts the LLM (using the same idea system prompt)
+    to revise the idea given the feedback.
+    """
+    feedback_prompt = f"""
+Based on the following existing artwork idea:
++{json.dumps(idea, indent=2)}
+
+And the following review feedback:
++{json.dumps(feedback, indent=2)}
+
+Please refine the artwork idea to address the review feedback and improve the new concept added.
+Think step by step about what enhancements can be made to better align the artwork with the critic's comments, focusing on how to modify the prompt to generate a better artwork.
+
+Respond in the following format:
+
+THOUGHT:
+<Discuss the changes made based on the feedback>
+
+NEW IDEA JSON:
+```json
+<JSON>
+```
+"""
+    text, _ = get_response_from_llm(
+        feedback_prompt,
+        client=client,
+        model=model,
+        system_message=idea_system_prompt,
+        temperature=0.75,
+    )
+    refined_json = extract_json_between_markers(text)
+    if refined_json is None:
+        raise ValueError("Failed to extract refined idea from LLM output.")
+    return refined_json

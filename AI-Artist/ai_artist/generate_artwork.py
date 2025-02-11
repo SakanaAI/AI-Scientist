@@ -13,6 +13,7 @@ def generate_artwork(
     size="1024x1024",
     quality="standard",
     style="vivid",
+    suffix="",
 ):
     """Generate artwork from idea using DALL-E or other image generation models"""
     
@@ -35,7 +36,7 @@ def generate_artwork(
         image = Image.open(io.BytesIO(image_response.content))
         
         # Create filename from idea name
-        filename = f"{idea['Name']}.png"
+        filename = f"{idea['Name']}{suffix}.png"
         filepath = os.path.join(output_dir, filename)
         
         # Save image
