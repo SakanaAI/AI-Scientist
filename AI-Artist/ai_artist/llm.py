@@ -1,12 +1,14 @@
 import json
 import os
 import re
+from typing import Tuple, Any, List
 
 import anthropic
 import backoff
 import openai
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
+
 
 MAX_NUM_TOKENS = 4096
 
@@ -276,6 +278,82 @@ def get_response_from_llm(
         print()
 
     return content, new_msg_history
+
+
+def get_response_from_vlm(
+    msg: str,
+    image_base64: str,
+    client: Any,
+    model: str,
+    system_message: str,
+    temperature: float = 0.75,
+) -> Tuple[str, List]:
+    """
+    Sends a text prompt and a base64-encoded image to a Vision-Language Model (VLM)
+    and returns the response.
+
+    This function correctly formats requests for both OpenAI's and Claude's multimodal APIs:
+      - OpenAI API: Uses `client.chat.completions.create` with structured message formatting.
+      - Claude API: Uses `client.messages.create` with a content list containing both text and image.
+
+    Parameters:
+      msg (str): The text prompt.
+      image_base64 (str): The base64-encoded image.
+      client: The API client instance.
+      model (str): The model identifier (e.g., "gpt-4o", "claude-3").
+      system_message (str): A system prompt or instruction.
+      temperature (float): Sampling temperature for generation (default: 0.75).
+
+    Returns:
+      Tuple[str, List]: A tuple containing the response text and an empty list (for message history).
+    """
+
+    # --- Claude VLM branch ---
+    if "claude" in model.lower():
+        # Claude expects messages with a list of content items.
+        message_payload = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": msg},
+                    {"type": "image", "source": {"data": image_base64, "media_type": "image/png"}},
+                ],
+            }
+        ]
+        response = client.messages.create(
+            model=model,
+            max_tokens=512,  # Adjust token limit as needed.
+            temperature=temperature,
+            system=system_message,
+            messages=message_payload,
+        )
+        output_text = response.content[0].text
+        return output_text, []
+
+    # --- OpenAI VLM branch ---
+    else:
+        # OpenAI expects a structured message format with an image URL or base64 data.
+        message_payload = [
+            {"role": "system", "content": system_message},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": msg},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                    },
+                ],
+            },
+        ]
+        response = client.chat.completions.create(
+            model=model,
+            messages=message_payload,
+            temperature=temperature,
+            max_tokens=512,  # Adjust as needed.
+        )
+        output_text = response.choices[0].message.content
+        return output_text, []
 
 
 def extract_json_between_markers(llm_output):
