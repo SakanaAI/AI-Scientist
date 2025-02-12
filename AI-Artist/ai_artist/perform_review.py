@@ -1,11 +1,13 @@
 import json
 import base64
 from ai_artist.llm import get_response_from_llm, extract_json_between_markers, get_response_from_vlm
+from PIL import Image
+import io
 
 art_reviewer_system_prompt = """You are an experienced art critic and curator reviewing an artwork and its underlying idea.
-Evaluate both the visual execution of the artwork and the conceptual strength of the idea. Focus mainly on the novel element of the artwork, the concept that has been added to the original concepts to create a novel and interesting artwork.
-Provide constructive feedback on how the idea could be improved to better align with the artwork.
-Be thorough in your analysis of technical execution, artistic merit, and conceptual creativity."""
+Evaluate both the visual execution of the artwork and the conceptual strength of the idea.
+Provide constructive feedback on how the artwork could be visually improved to be more novel and interesting, with the aim of painting something that has not been painted before.
+"""
 
 art_review_template = """
 Respond in the following format:
@@ -60,17 +62,27 @@ Please review the above artwork and idea.
         system_message=art_reviewer_system_prompt,
         temperature=review_temperature,  # Use review_temperature here
     )
+    # Debug: Print the full LLM response from the review.
+    print("\n[Review] Full LLM Response:")
+    print("-" * 40)
+    print(review_text)
+    print("-" * 40)
+
     review_json = extract_json_between_markers(review_text)
     if review_json is None:
         raise ValueError("Failed to extract review JSON from LLM output.")
     return review_json
 
-def encode_image_to_base64(image_path: str) -> str:
+def encode_image_to_base64(image_path: str, size: int = 128) -> str:
     """
     Encode the given image file to a base64 string.
     """
-    with open(image_path, "rb") as f:
-        encoded_bytes = base64.b64encode(f.read())
+    # Open the image using Pillow and resize it in memory for LLM input
+    with Image.open(image_path) as img:
+         img_resized = img.resize((size, size), Image.LANCZOS)
+         buffer = io.BytesIO()
+         img_resized.save(buffer, format="PNG")
+         encoded_bytes = base64.b64encode(buffer.getvalue())
     return encoded_bytes.decode('utf-8')
 
 def perform_vlm_review(
@@ -113,6 +125,12 @@ Please review the above artwork and its underlying idea, focusing on the visual 
         system_message=art_reviewer_system_prompt,
         temperature=review_temperature,  # Use review_temperature here
     )
+    # Debug: Print the full VLM response.
+    print("\n[VLM Review] Full LLM Response:")
+    print("-" * 40)
+    print(review_text)
+    print("-" * 40)
+
     review_json = extract_json_between_markers(review_text)
     if review_json is None:
         raise ValueError("Failed to extract review JSON from VLM output.")

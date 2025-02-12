@@ -350,7 +350,7 @@ def get_response_from_vlm(
             model=model,
             messages=message_payload,
             temperature=temperature,
-            max_tokens=512,  # Adjust as needed.
+            max_tokens=MAX_NUM_TOKENS,  # Adjust as needed.
         )
         output_text = response.choices[0].message.content
         return output_text, []

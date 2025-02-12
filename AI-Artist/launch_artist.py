@@ -6,7 +6,7 @@ from datetime import datetime
 
 from ai_artist.generate_ideas import generate_ideas, generate_next_artwork_idea, refine_idea_with_feedback
 from ai_artist.generate_artwork import generate_artwork
-from ai_artist.perform_review import perform_review
+from ai_artist.perform_review import perform_vlm_review
 from ai_artist.llm import create_client, AVAILABLE_LLMS
 
 def parse_arguments():
@@ -138,7 +138,7 @@ def main():
                 break
             
             # Review the generated artwork along with the idea
-            review = perform_review(
+            review = perform_vlm_review(
                 artwork_path,
                 current_idea,
                 model=client_model,
@@ -191,6 +191,7 @@ def main():
             results_dir,
             client,
             model=args.image_model,
+            suffix="_final"
         )
 
 if __name__ == "__main__":

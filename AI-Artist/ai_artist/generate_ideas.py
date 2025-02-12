@@ -17,7 +17,7 @@ idea_first_prompt = """
 Given these concepts:
 {concepts_list}
 
-Create an artwork by introducing a completely new concept that has never been combined with these concepts before in art history. The goal is to find that perfect unexpected element that will create a truly novel and interesting combination.
+Create an artwork by introducing a completely new concept that has never been combined with these concepts before in art history. The goal is to find that perfect unexpected element that will create a truly novel and interesting combination that no human could ever find on their own.
 
 Think step by step:
 1. Analyze the given concepts and their existing relationships in art history
@@ -287,8 +287,8 @@ Based on the following existing artwork idea:
 And the following review feedback:
 +{json.dumps(feedback, indent=2)}
 
-Please refine the artwork idea to address the review feedback and improve the new concept added.
-Think step by step about what enhancements can be made to better align the artwork with the critic's comments, focusing on how to modify the imageprompt to generate a better artwork.
+Please refine the artwork idea to address the review feedback and improve the visual execution of the artwork.
+Think step by step about what enhancements can be made to the image prompt to generate a more novel and interesting artwork, completely new from any artwork that has been painted in human history.
 
 Respond in the following format:
 
@@ -300,14 +300,21 @@ NEW IDEA JSON:
 <JSON>
 ```
 """
+
+
     text, _ = get_response_from_llm(
         feedback_prompt,
         client=client,
         model=model,
         system_message=idea_system_prompt,
         temperature=temperature,
-
     )
+    # Debug: Print the full LLM response.
+    print("\n[Refine Idea] Full LLM Response:")
+    print("-" * 40)
+    print(text)
+    print("-" * 40)
+
     refined_json = extract_json_between_markers(text)
     if refined_json is None:
         raise ValueError("Failed to extract refined idea from LLM output.")
