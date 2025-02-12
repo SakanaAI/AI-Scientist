@@ -26,7 +26,13 @@ In <JSON>, provide the review in JSON format with the following fields:
 - "Suggested_Improvements": List of potential enhancements
 """
 
-def perform_review(artwork_path: str, idea: dict, client, model, temperature: float = 0.3) -> dict:
+def perform_review(
+    artwork_path: str, 
+    idea: dict, 
+    client, 
+    model, 
+    review_temperature: float = 0.3
+) -> dict:
     """
     Generate a review for the generated artwork and its underlying idea using text-only input.
     
@@ -35,7 +41,7 @@ def perform_review(artwork_path: str, idea: dict, client, model, temperature: fl
         idea (dict): The JSON data representing the artwork idea.
         client: The LLM client.
         model (str): The model name for the LLM.
-        temperature (float): Temperature configuration for the review generation.
+        review_temperature (float): Temperature configuration for the review generation.
     
     Returns:
         dict: The review as a JSON dictionary.
@@ -52,7 +58,7 @@ Please review the above artwork and idea.
         client=client,
         model=model,
         system_message=art_reviewer_system_prompt,
-        temperature=temperature,
+        temperature=review_temperature,  # Use review_temperature here
     )
     review_json = extract_json_between_markers(review_text)
     if review_json is None:
@@ -67,7 +73,13 @@ def encode_image_to_base64(image_path: str) -> str:
         encoded_bytes = base64.b64encode(f.read())
     return encoded_bytes.decode('utf-8')
 
-def perform_vlm_review(artwork_path: str, idea: dict, client, model, temperature: float = 0.3) -> dict:
+def perform_vlm_review(
+    artwork_path: str, 
+    idea: dict, 
+    client, 
+    model, 
+    review_temperature: float = 0.3  # Renamed parameter for clarity
+) -> dict:
     """
     Generate a review for the generated artwork using a Vision-Language Model (VLM).
     In this function the artwork image is loaded and encoded to base64 and passed along
@@ -78,7 +90,7 @@ def perform_vlm_review(artwork_path: str, idea: dict, client, model, temperature
         idea (dict): The JSON data representing the artwork idea.
         client: The VLM client.
         model (str): The VLM model name.
-        temperature (float): Temperature configuration for the review generation.
+        review_temperature (float): Temperature configuration for the review generation.
     
     Returns:
         dict: The review as a JSON dictionary.
@@ -99,7 +111,7 @@ Please review the above artwork and its underlying idea, focusing on the visual 
         client=client,
         model=model,
         system_message=art_reviewer_system_prompt,
-        temperature=temperature,
+        temperature=review_temperature,  # Use review_temperature here
     )
     review_json = extract_json_between_markers(review_text)
     if review_json is None:

@@ -42,7 +42,6 @@ In <JSON>, provide the new idea in JSON format with the following fields:
 - "New Concept": The new concept that you chose to introduce
 - "Image_Prompt": A carefully crafted prompt for the image generation model that will create this artwork
 - "Novel_Element": Explanation of what makes this combination unprecedented
-- "Originality": A rating from 1 to 10
 """
 
 idea_reflection_prompt = """Round {current_round}/{num_reflections}.
@@ -68,6 +67,8 @@ def generate_ideas(
     concepts_list,
     client,
     model,
+    idea_temperature=0.75,
+    reflection_temperature=0.5,
     max_num_generations=5,
     num_reflections=3,
 ):
@@ -79,7 +80,7 @@ def generate_ideas(
         print(f"Generating idea {i + 1}/{max_num_generations}")
         print(f"{'='*80}")
         try:
-            # Generate initial idea
+            # Generate initial idea with idea_temperature
             msg_history = []
             print(f"\n--- Iteration 1/{num_reflections} ---")
             text, msg_history = get_response_from_llm(
@@ -90,6 +91,7 @@ def generate_ideas(
                 model=model,
                 system_message=idea_system_prompt,
                 msg_history=msg_history,
+                temperature=idea_temperature,
             )
             
             print("\nFull LLM Response:")
@@ -102,7 +104,7 @@ def generate_ideas(
             print("\nExtracted JSON:")
             print(json.dumps(json_output, indent=2))
 
-            # Iteratively improve idea
+            # Iteratively improve idea with reflection_temperature
             if num_reflections > 1:
                 for j in range(num_reflections - 1):
                     print(f"\n--- Iteration {j + 2}/{num_reflections} ---")
@@ -115,6 +117,7 @@ def generate_ideas(
                         model=model,
                         system_message=idea_system_prompt,
                         msg_history=msg_history,
+                        temperature=reflection_temperature,
                     )
                     
                     print("\nFull LLM Response:")
@@ -143,6 +146,8 @@ def generate_next_artwork_idea(
         concepts_list,
         client,
         model,
+        idea_temperature=0.75,
+        reflection_temperature=0.5,
         prev_idea_archive=[],
         num_reflections=3,
         max_attempts=5,
@@ -199,13 +204,12 @@ The JSON should include:
 - "Previous_Combinations": Brief analysis of what has been tried before
 - "Novel_Element": Explanation of what makes this combination unprecedented
 - "Image_Prompt": A carefully crafted prompt for the image generation model that will create this artwork
-- "Originality": A rating from 1 to 10
 """
 
     for attempt in range(max_attempts):
         print(f"\nAttempt {attempt + 1}/{max_attempts}")
         try:
-            # Generate initial idea
+            # Generate initial idea with idea_temperature
             msg_history = []
             print(f"\n--- Iteration 1/{num_reflections} ---")
             text, msg_history = get_response_from_llm(
@@ -214,6 +218,7 @@ The JSON should include:
                 model=model,
                 system_message=idea_system_prompt,
                 msg_history=msg_history,
+                temperature=idea_temperature,
             )
             
             print("\nFull LLM Response:")
@@ -226,7 +231,7 @@ The JSON should include:
             print("\nExtracted JSON:")
             print(json.dumps(json_output, indent=2))
 
-            # Iteratively improve idea
+            # Iteratively improve idea with reflection_temperature
             if num_reflections > 1:
                 for j in range(num_reflections - 1):
                     print(f"\n--- Iteration {j + 2}/{num_reflections} ---")
@@ -239,6 +244,7 @@ The JSON should include:
                         model=model,
                         system_message=idea_system_prompt,
                         msg_history=msg_history,
+                        temperature=reflection_temperature,
                     )
                     
                     print("\nFull LLM Response:")
@@ -268,7 +274,7 @@ The JSON should include:
 
     return idea_archive
 
-def refine_idea_with_feedback(idea: Dict, feedback: Dict, client, model, num_reflections: int = 1) -> Dict:
+def refine_idea_with_feedback(idea: Dict, feedback: Dict, client, model, num_reflections: int = 1, temperature: float = 0.75) -> Dict:
     """
     Refine the artwork idea using review feedback.
     This function prompts the LLM (using the same idea system prompt)
@@ -282,7 +288,7 @@ And the following review feedback:
 +{json.dumps(feedback, indent=2)}
 
 Please refine the artwork idea to address the review feedback and improve the new concept added.
-Think step by step about what enhancements can be made to better align the artwork with the critic's comments, focusing on how to modify the prompt to generate a better artwork.
+Think step by step about what enhancements can be made to better align the artwork with the critic's comments, focusing on how to modify the imageprompt to generate a better artwork.
 
 Respond in the following format:
 
@@ -299,7 +305,8 @@ NEW IDEA JSON:
         client=client,
         model=model,
         system_message=idea_system_prompt,
-        temperature=0.75,
+        temperature=temperature,
+
     )
     refined_json = extract_json_between_markers(text)
     if refined_json is None:

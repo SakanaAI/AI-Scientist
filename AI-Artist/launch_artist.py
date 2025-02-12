@@ -38,6 +38,24 @@ def parse_arguments():
         help="Model to use for image generation",
     )
     parser.add_argument(
+        "--idea-temperature",
+        type=float,
+        default=0.75,
+        help="Temperature for initial idea generation",
+    )
+    parser.add_argument(
+        "--reflection-temperature",
+        type=float,
+        default=0.5,
+        help="Temperature for idea reflection/refinement steps",
+    )
+    parser.add_argument(
+        "--review-temperature",
+        type=float,
+        default=0.3,
+        help="Temperature for artwork review generation",
+    )
+    parser.add_argument(
         "--feedback-loops",
         type=int,
         default=0,
@@ -78,6 +96,8 @@ def main():
             concepts_list=args.concepts,
             client=client,
             model=client_model,
+            idea_temperature=args.idea_temperature,
+            reflection_temperature=args.reflection_temperature,
             prev_idea_archive=prev_ideas,
             num_reflections=3,
         )
@@ -86,6 +106,8 @@ def main():
             concepts_list=args.concepts,
             client=client,
             model=client_model,
+            idea_temperature=args.idea_temperature,
+            reflection_temperature=args.reflection_temperature,
             max_num_generations=args.num_ideas,
             num_reflections=3,
         )
@@ -121,6 +143,7 @@ def main():
                 current_idea,
                 model=client_model,
                 client=client,
+                review_temperature=args.review_temperature,
             )
             
             # Save the review with an iteration suffix
@@ -136,7 +159,13 @@ def main():
             
             # Refine the idea based on the review feedback
             try:
-                current_idea = refine_idea_with_feedback(current_idea, review, client, client_model)
+                current_idea = refine_idea_with_feedback(
+                    current_idea, 
+                    review, 
+                    client, 
+                    client_model,
+                    temperature=args.reflection_temperature,  # Use reflection temperature for refinement
+                )
                 print("Idea refined successfully based on review feedback.")
             except Exception as e:
                 print(f"Failed to refine idea based on feedback: {e}")
@@ -163,16 +192,6 @@ def main():
             client,
             model=args.image_model,
         )
-        if final_artwork:
-            final_review = perform_review(
-                final_artwork,
-                idea,
-                model=client_model,
-                client=client,
-            )
-            final_review_path = final_artwork.replace(".png", "_final_review.json")
-            with open(final_review_path, "w") as f:
-                json.dump(final_review, f, indent=4)
 
 if __name__ == "__main__":
     main()
