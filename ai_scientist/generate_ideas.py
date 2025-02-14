@@ -11,6 +11,44 @@ from ai_scientist.llm import get_response_from_llm, extract_json_between_markers
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
+
+idea_clarification_prompt = """{task_description}
+<experiment.py>
+{code}
+</experiment.py>
+
+Here are the ideas that you have already generated:
+
+'''
+{prev_ideas_string}
+'''
+Come up with a maximum of five clarification questions that can help narrow down the research area and generate impactful, creative ideas for research experiments and directions that can be feasibly investigated using the provided code. 
+Note that you will not have access to any additional resources or datasets.
+Some examples of possible questions (but not limited to) could relate to the dataset, models, or information about the target applications.
+Make sure any idea is not overfit the specific training dataset or model, and has wider significance.
+You do not need to ask five questions, only ask questions that are necessary to clarify the task.
+
+Respond in the following format:
+
+THOUGHT:
+<THOUGHT>
+
+NEW IDEA JSON:
+```json
+<JSON>
+```
+
+In <THOUGHT>, first briefly discuss roughly which area of the idea need to clarify. Detail your questions. Justify how the questions help come up with the next impactful and creative research idea.
+
+In <JSON>, provide the new idea in JSON format with the following fields:
+- "Q": A list of clarification questions.
+
+Be cautious and realistic on your ratings.
+This JSON will be automatically parsed, so ensure the format is precise.
+The number of questions is limited to five and should be arranged in order of importance.
+ONLY INCLUDE "I have no questions" IF YOU DO NOT HAVE ANY QUESTIONS TO ASK.
+"""
+
 idea_first_prompt = """{task_description}
 <experiment.py>
 {code}
@@ -80,6 +118,7 @@ def generate_ideas(
         skip_generation=False,
         max_num_generations=20,
         num_reflections=5,
+        skip_clarification=False,
 ):
     if skip_generation:
         # Load existing ideas from file
@@ -109,13 +148,47 @@ def generate_ideas(
 
     idea_system_prompt = prompt["system"]
 
+    prev_ideas_string = "\n\n".join(idea_str_archive)
+    msg_history = []
+
+    # Idea clarification
+    if skip_clarification:
+        print("\nSkipping idea clarification stage.")
+    else:
+        text, msg_history = get_response_from_llm(
+            idea_clarification_prompt.format(
+                task_description=prompt["task_description"],
+                code=code,
+                prev_ideas_string=prev_ideas_string,
+            ),
+            client=client,
+            model=model,
+            system_message=idea_system_prompt,
+            msg_history=msg_history,
+        )
+        ## PARSE OUTPUT
+        json_output = extract_json_between_markers(text)
+        assert json_output is not None, "Failed to extract JSON from LLM output"
+        print(json_output)
+        if "I have no questions" in json_output["Q"]:
+            print("No questions asked.")
+        else:
+            print(f"\n---------------------------------------------------------------")
+            print(f" I have {len(json_output["Q"])} questions to clarify the task.")
+            print(f"\n---------------------------------------------------------------")
+            prompt["task_description"] += "\n\nTask clarification question and answers:"
+            for n, question in enumerate(json_output["Q"]):
+                print(f"\nQuestion ({n+1}/{len(json_output["Q"])}): {question}")
+                a = str(input("Answer: "))
+                if a != "":
+                    prompt["task_description"] += f"\n\nQuestion: {question}\nAnswer: {a}"
+
     for _ in range(max_num_generations):
         print()
         print(f"Generating idea {_ + 1}/{max_num_generations}")
         try:
             prev_ideas_string = "\n\n".join(idea_str_archive)
 
-            msg_history = []
             print(f"Iteration 1/{num_reflections}")
             text, msg_history = get_response_from_llm(
                 idea_first_prompt.format(

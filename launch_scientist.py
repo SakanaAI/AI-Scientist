@@ -89,6 +89,13 @@ def parse_arguments():
         choices=["semanticscholar", "openalex"],
         help="Scholar engine to use.",
     )
+    parser.add_argument(
+        "--skip_clarification",
+        type=bool,
+        default=False,
+        action="store_true",
+        help="Skip clarification step.", 
+    )
     return parser.parse_args()
 
 
@@ -341,6 +348,7 @@ if __name__ == "__main__":
         skip_generation=args.skip_idea_generation,
         max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
+        skip_clarification=args.skip_clarification,
     )
     if not args.skip_novelty_check:
         ideas = check_idea_novelty(
