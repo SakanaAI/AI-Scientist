@@ -18,19 +18,20 @@ from sklearn.metrics import confusion_matrix, \
                             recall_score, \
                             precision_score
 
-
 def preprocess_data(target_type='hard'):
     # preprocess the data for activity recognition
-    input_file_path = os.path.join('..', '..', 'data', 'activity_recognition', 'train')
+    input_file_path = os.path.join(os.environ["AI_SCIENTIST_ROOT"], 'data', 'activity_recognition', 'train')
 
     df_list = []
     for id in ['00001', '00002', '00003', '00004', '00005', '00006', '00007', '00008', '00009', '00010']:
-        # format the data (accelerometer and RSSI) for activity recognition
+        # Format the data (accelerometer and RSSI) for activity recognition
+        # The column names in the source are: 'x','y','z','Kitchen_AP', 'Lounge_AP', 'Upstairs_AP', 'Study_AP'
         df = pd.read_csv(os.path.join(input_file_path, id, 'acceleration.csv'))
         df.replace(np.nan, -120, inplace=True)
         df['t'] = pd.to_datetime(df['t'], unit='s')
         df.set_index('t', inplace=True)
         df = df.resample('1s').mean()
+        data_id = df.columns.tolist()
         
         # format the targe
         df_tgt = pd.read_csv(os.path.join(input_file_path, id, 'targets.csv'))
@@ -54,20 +55,18 @@ def preprocess_data(target_type='hard'):
     df = pd.concat(df_list, axis=0, ignore_index=True)
 
     # split feature dtata and labels
-    data_id = ['x','y','z','Kitchen_AP', 'Lounge_AP', 'Upstairs_AP', 'Study_AP'] # if new features are added or removed, their column names should be added or removed here
     target_id = ['a_ascend', 'a_descend', 'a_jump', 'a_loadwalk' ,'a_walk',
                     'p_bent', 'p_kneel', 'p_lie', 'p_sit', 'p_squat', 'p_stand', 
                     't_bend', 't_kneel_stand', 't_lie_sit', 't_sit_lie', 't_sit_stand', 
                     't_stand_kneel', 't_stand_sit', 't_straighten','t_turn'] # if new labels are added or removed, their column names should be added or removed here
     if target_type=='soft':
-        _id = target_id
+        target = df[target_id].values
     elif target_type=='hard':
-        _id = ['target']
+        target = df['target'].values.squeeze()
     else:
         raise ValueError('label_type should be either "hard" or "soft"')
 
     data = df[data_id].values
-    target = df[_id].values
     
     return data, data_id, target, target_id
 
@@ -119,7 +118,7 @@ if __name__ == "__main__":
     dataset_name = 'SPHERE_Challenge' # at moment, only SPHERE_Challenge is supported
     data, features_id, target, target_id = preprocess_data(target_type='hard')
     (X_train, y_train), (X_test, y_test) = split_train_test(data, target)
-
+    
     # get the classifier grid
     clf_grid = get_classifier_grid()
     

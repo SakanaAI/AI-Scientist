@@ -174,11 +174,11 @@ def generate_ideas(
             print("No questions asked.")
         else:
             print(f"\n---------------------------------------------------------------")
-            print(f" I have {len(json_output["Q"])} questions to clarify the task.")
+            print(f" I have {len(json_output['Q'])} questions to clarify the task.")
             print(f"\n---------------------------------------------------------------")
             prompt["task_description"] += "\n\nTask clarification question and answers:"
             for n, question in enumerate(json_output["Q"]):
-                print(f"\nQuestion ({n+1}/{len(json_output["Q"])}): {question}")
+                print(f"\nQuestion ({n+1}/{len(json_output['Q'])}): {question}")
                 a = str(input("Answer: "))
                 if a != "":
                     prompt["task_description"] += f"\n\nQuestion: {question}\nAnswer: {a}"

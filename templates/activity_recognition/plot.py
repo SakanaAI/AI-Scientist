@@ -60,5 +60,5 @@ for j, dataset in enumerate(datasets):
         # plt.xticks(rotation=45)
 
         plt.tight_layout()
-        plt.savefig("confusion_matrix_{dataset}_{labels[run]}.png", dpi=300)
+        plt.savefig(f"confusion_matrix_{dataset}_{labels[run]}.png", dpi=300)
         plt.show()

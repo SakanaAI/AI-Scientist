@@ -91,8 +91,6 @@ def parse_arguments():
     )
     parser.add_argument(
         "--skip_clarification",
-        type=bool,
-        default=False,
         action="store_true",
         help="Skip clarification step.", 
     )
