@@ -1,9 +1,11 @@
-<h1 align="center">
-  <a href="https://github.com/SakanaAI/AI-Scientist/blob/main/docs/logo_2.png">
-    <img src="docs/logo_2.png" width="215" /></a><br>
-  <b>The AI Scientist: Towards Fully Automated</b><br>
-  <b>Open-Ended Scientific Discovery 🧑‍🔬</b><br>
-</h1>
+# Sakana's AI Scientist on AI Safety Research
+
+This repository is a fork of Sakana's AI Scientist in which we explore what its pipelines produce when given AI Safety tasks.
+This work was done as part of [AI Safety Camp 10](https://www.aisafety.camp/).
+
+---
+
+# ORIGINAL README OF SAKANA PAPER
 
 <p align="center">
   📚 <a href="https://arxiv.org/abs/2408.06292">[Paper]</a> |
