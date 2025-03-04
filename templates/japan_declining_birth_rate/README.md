@@ -5,7 +5,7 @@ This project demonstrates an AI-driven approach to evaluating and optimizing gov
 
 ## AI Scientist Generated Paper
 
-[Link to Paper](https://drive.google.com/file/d/1plHraWSsSOOZnFbUxlp0Xd0ejkdDxrRZ/view?usp=drive_link)  
+[Link to Paper](https://drive.google.com/file/d/1AnR6ZgkgHhiTxMfGM731Heq5QUiDZhNM/view?usp=sharing)  
 
 
 ## Installation
