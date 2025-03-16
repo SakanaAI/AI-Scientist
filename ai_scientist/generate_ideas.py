@@ -318,31 +318,76 @@ def on_backoff(details):
     on_backoff=on_backoff
 )
 @rate_limiter.handle_rate_limit("semantic_scholar")  # Add rate limiting for Semantic Scholar
-def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
+def search_for_papers(query, result_limit=10, engine="semanticscholar") -> Union[None, List[Dict]]:
+
     if not query:
         return None
-    rsp = requests.get(
-        "https://api.semanticscholar.org/graph/v1/paper/search",
-        headers={"X-API-KEY": S2_API_KEY},
-        params={
-            "query": query,
-            "limit": result_limit,
-            "fields": "title,authors,venue,year,abstract,citationStyles,citationCount",
-        },
-    )
-    print(f"Response Status Code: {rsp.status_code}")
-    print(
-        f"Response Content: {rsp.text[:500]}"
-    )  # Print the first 500 characters of the response content
-    rsp.raise_for_status()
-    results = rsp.json()
-    total = results["total"]
-    time.sleep(1.0)
-    if not total:
-        return None
+    if engine == "semanticscholar":
+        rsp = requests.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            headers={"X-API-KEY": S2_API_KEY} if S2_API_KEY else {},
+            params={
+                "query": query,
+                "limit": result_limit,
+                "fields": "title,authors,venue,year,abstract,citationStyles,citationCount",
+            },
+        )
+        print(f"Response Status Code: {rsp.status_code}")
+        print(
+            f"Response Content: {rsp.text[:500]}"
+        )  # Print the first 500 characters of the response content
+        rsp.raise_for_status()
+        results = rsp.json()
+        total = results["total"]
+        time.sleep(1.0)
+        if not total:
+            return None
 
-    papers = results["data"]
-    return papers
+        papers = results["data"]
+        return papers
+    elif engine == "openalex":
+        import pyalex
+        from pyalex import Work, Works
+        mail = os.environ.get("OPENALEX_MAIL_ADDRESS", None)
+        if mail is None:
+            print("[WARNING] Please set OPENALEX_MAIL_ADDRESS for better access to OpenAlex API!")
+        else:
+            pyalex.config.email = mail
+
+        def extract_info_from_work(work: Work, max_abstract_length: int = 1000) -> dict[str, str]:
+            # "Unknown" is returned when venue is unknown...
+            venue = "Unknown"
+            for i, location in enumerate(work["locations"]):
+                if location["source"] is not None:
+                    venue = location["source"]["display_name"]
+                    if venue != "":
+                        break
+            title = work["title"]
+            abstract = work["abstract"]
+            if abstract is None:
+                abstract = ""
+            if len(abstract) > max_abstract_length:
+                # To avoid context length exceed error.
+                print(f"[WARNING] {title=}: {len(abstract)=} is too long! Use first {max_abstract_length} chars.")
+                abstract = abstract[:max_abstract_length]
+            authors_list = [author["author"]["display_name"] for author in work["authorships"]]
+            authors = " and ".join(authors_list) if len(authors_list) < 20 else f"{authors_list[0]} et al."
+            paper = dict(
+                title=title,
+                authors=authors,
+                venue=venue,
+                year=work["publication_year"],
+                abstract=abstract,
+                citationCount=work["cited_by_count"],
+            )
+            return paper
+
+        works: List[Dict] = Works().search(query).get(per_page=result_limit)
+        papers: List[Dict[str, str]] = [extract_info_from_work(work) for work in works]
+        return papers
+    else:
+        raise NotImplementedError(f"{engine=} not supported!")
+
 
 
 novelty_system_msg = """You are an ambitious AI PhD student who is looking to publish a paper that will contribute significantly to the field.
@@ -400,6 +445,7 @@ def check_idea_novelty(
         client,
         model,
         max_num_iterations=10,
+        engine="semanticscholar",
 ):
     with open(osp.join(base_dir, "experiment.py"), "r") as f:
         code = f.read()
@@ -445,30 +491,27 @@ def check_idea_novelty(
                     break
 
                 ## PARSE OUTPUT
-                try:
-                    json_output = extract_json_between_markers(text)
-                    if json_output is None:
-                        print("Failed to extract JSON from LLM output")
-                        continue
 
-                    ## SEARCH FOR PAPERS
-                    query = json_output["Query"]
-                    papers = search_for_papers(query, result_limit=10)
-                    if papers is None:
-                        papers_str = "No papers found."
+                json_output = extract_json_between_markers(text)
+                assert json_output is not None, "Failed to extract JSON from LLM output"
 
-                    paper_strings = []
-                    for i, paper in enumerate(papers):
-                        paper_strings.append(
-                            """{i}: {title}. {authors}. {venue}, {year}.\nNumber of citations: {cites}\nAbstract: {abstract}""".format(
-                                i=i,
-                                title=paper["title"],
-                                authors=paper["authors"],
-                                venue=paper["venue"],
-                                year=paper["year"],
-                                cites=paper["citationCount"],
-                                abstract=paper["abstract"],
-                            )
+                ## SEARCH FOR PAPERS
+                query = json_output["Query"]
+                papers = search_for_papers(query, result_limit=10, engine=engine)
+                if papers is None:
+                    papers_str = "No papers found."
+
+                paper_strings = []
+                for i, paper in enumerate(papers):
+                    paper_strings.append(
+                        """{i}: {title}. {authors}. {venue}, {year}.\nNumber of citations: {cites}\nAbstract: {abstract}""".format(
+                            i=i,
+                            title=paper["title"],
+                            authors=paper["authors"],
+                            venue=paper["venue"],
+                            year=paper["year"],
+                            cites=paper["citationCount"],
+                            abstract=paper["abstract"],
                         )
                     papers_str = "\n\n".join(paper_strings)
 

@@ -295,7 +295,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
 
 def get_citation_aider_prompt(
-        client, model, draft, current_round, total_rounds
+        client, model, draft, current_round, total_rounds, engine="semanticscholar"
 ) -> Tuple[Optional[str], bool]:
     msg_history = []
     try:
@@ -326,7 +326,6 @@ def get_citation_aider_prompt(
         except KeyError as e:
             print(f"Missing required field in JSON: {e}")
             return None, False
-
     except Exception as e:
         print(f"Error: {e}")
         return None, False
@@ -420,7 +419,7 @@ Ensure the citation is well-integrated into the text.'''
 
 # PERFORM WRITEUP
 def perform_writeup(
-        idea, folder_name, coder, cite_client, cite_model, num_cite_rounds=20
+        idea, folder_name, coder, cite_client, cite_model, num_cite_rounds=20, engine="semanticscholar"
 ):
     dic_section_files = {"TITLE": "TITLE_HERE.tex",
                          "ABSTRACT" : "ABSTRACT_HERE.tex",
@@ -517,7 +516,7 @@ Be sure to first name the file and then filling.
         with open(osp.join(folder_name, "latex", "template_segments.tex"), "r") as f:
             draft = f.read()
         prompt, done = get_citation_aider_prompt(
-            cite_client, cite_model, draft, _, num_cite_rounds
+            cite_client, cite_model, draft, _, num_cite_rounds, engine=engine
         )
         if done:
             break
@@ -579,6 +578,13 @@ if __name__ == "__main__":
         choices=AVAILABLE_LLMS,
         help="Model to use for AI Scientist.",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        default="semanticscholar",
+        choices=["semanticscholar", "openalex"],
+        help="Scholar engine to use.",
+    )
     args = parser.parse_args()
     client, client_model = create_client(args.model)
     print("Make sure you cleaned the Aider logs if re-generating the writeup!")
@@ -618,6 +624,6 @@ if __name__ == "__main__":
         generate_latex(coder, args.folder, f"{args.folder}/test.pdf")
     else:
         try:
-            perform_writeup(idea, folder_name, coder, client, client_model)
+            perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
         except Exception as e:
             print(f"Failed to perform writeup: {e}")

@@ -5,27 +5,32 @@ import re
 import anthropic
 import backoff
 import openai
-from google.cloud import aiplatform
-
 from ai_scientist.rate_limit import rate_limiter
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
 
 MAX_NUM_TOKENS = 4096
 
 AVAILABLE_LLMS = [
+    # Anthropic models
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
+    # OpenAI models
     "gpt-4o-mini-2024-07-18",
     "gpt-4o-2024-05-13",
     "gpt-4o-2024-08-06",
     "o1-preview-2024-09-12",
     "o1-mini-2024-09-12",
-    "deepseek-coder-v2-0724",
+    "deepseek-r1",
     "llama3.3-70b",
     "llama3.3-70b-local",
     "llama3.2:1b",
     "llama3.1:8b",  # New viable option with segmented templates
     "gemini-pro",
-    "grok-1",
+    "grok-3",
+    "o1-2024-12-17",
+    # OpenRouter models
+    "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
     "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
     "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -38,6 +43,13 @@ AVAILABLE_LLMS = [
     "vertex_ai/claude-3-5-sonnet-v2@20241022",
     "vertex_ai/claude-3-sonnet@20240229",
     "vertex_ai/claude-3-haiku@20240307",
+    # DeepSeek models
+    "deepseek-chat",
+    "deepseek-coder",
+    "deepseek-reasoner",
+    # Google Gemini models
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
 ]
 
 class Model:
@@ -101,23 +113,6 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif model == "deepseek-coder-v2-0724":
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="deepseek-coder",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
     elif model == "llama-3-1-405b-instruct":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
@@ -151,7 +146,6 @@ def get_batch_responses_from_llm(
             new_msg_history.append(hist)
 
     if print_debug:
-        # Just print the first one.
         print()
         print("*" * 20 + " LLM START " + "*" * 20)
         for j, msg in enumerate(new_msg_history[0]):
@@ -176,7 +170,7 @@ def get_response_from_llm(
         edit_format="diff"  # Default to diff mode for stronger models
 ):
     # Use "whole" mode for weaker models that benefit from segmented templates
-    if model in ["llama3.1:8b", "llama3.2:1b"]:
+    if model in ["llama3.1:8b", "llama3.2:3b", "llama3.2:1b"]:
         edit_format = "whole"
 
     if msg_history is None:
@@ -235,15 +229,42 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif model == "gemini-pro":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.generate_text(
-            prompt=f"{system_message}\n\n{msg}",
-            temperature=temperature,
-            max_output_tokens=MAX_NUM_TOKENS,
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=1,
+            max_completion_tokens=MAX_NUM_TOKENS,
+            n=1,
+            seed=0,
         )
         content = response.text
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model == "grok-1":
+    elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = client.chat.completions.create(
+            model="meta-llama/llama-3.1-405b-instruct",
+            messages=[
+                {"role": "system", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
+            stop=None,
+        )
+        content = response.choices[0].message.content
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif model in ["llama3.3-70b", "llama3.3-70b-local", "llama3.2:1b", "llama3.1:8b", "deepseek-r1"]:
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        model_name = {
+            "llama3.3-70b": "meta-llama/llama-3.3-70b-instruct",
+            "llama3.3-70b-local": "llama2",
+            "llama3.2:1b": "llama3.2:1b",
+            "llama3.1:8b": "llama3.1:8b"
+        }[model]
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -257,26 +278,33 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["llama3.3-70b", "llama3.3-70b-local", "llama3.2:1b", "llama3.1:8b"]:
+    elif model in ["deepseek-reasoner"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        model_name = {
-            "llama3.3-70b": "meta-llama/llama-3.3-70b-instruct",
-            "llama3.3-70b-local": "llama2",
-            "llama3.2:1b": "llama3.2:1b",
-            "llama3.1:8b": "llama3.1:8b"
-        }[model]
         response = client.chat.completions.create(
-            model=model_name,
+            model=model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
             ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
         content = response.choices[0].message.content
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif "gemini" in model:
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        gemini_contents = [{"role": "system", "parts": system_message}]
+        for m in new_msg_history:
+            gemini_contents.append({"role": m["role"], "parts": m["content"]})
+        response = client.generate_content(
+            contents=gemini_contents,
+            generation_config=GenerationConfig(
+                temperature=temperature,
+                max_output_tokens=MAX_NUM_TOKENS,
+                candidate_count=1,
+            ),
+        )
+        content = response.text
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
         raise ValueError(f"Model {model} not supported.")
@@ -339,7 +367,7 @@ def create_client(model):
     elif model in ["o1-preview-2024-09-12", "o1-mini-2024-09-12"]:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
-    elif model == "deepseek-coder-v2-0724":
+    elif model in ["deepseek-chat", "deepseek-reasoner"]:
         print(f"Using OpenAI API with {model}.")
         return openai.OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
@@ -350,23 +378,11 @@ def create_client(model):
         return openai.OpenAI(
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1"
-        ), "meta-llama/llama-3.3-70b-instruct"
-    elif model in ["llama3.3-70b-local", "llama3.2:1b", "llama3.1:8b"]:
-        print(f"Using Ollama API with {model}.")
-        return openai.OpenAI(
-            base_url="http://localhost:11434/v1",
-            api_key="ollama"  # required but unused
-        ), model
-    elif model == "gemini-pro":
-        if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
-            raise ValueError("GOOGLE_APPLICATION_CREDENTIALS environment variable is required for Gemini models")
-        print(f"Using Google Cloud API with {model}.")
-        return aiplatform.TextGenerationModel.from_pretrained("text-bison@002"), model
-    elif model == "grok-1":
-        print(f"Using xAI API with {model}.")
-        return openai.OpenAI(
-            api_key=os.environ["XAI_API_KEY"],
-            base_url="https://api.xai.com/v1"
-        ), model
+        ), "meta-llama/llama-3.1-405b-instruct"
+    elif "gemini" in model:
+        print(f"Using Google Generative AI with model {model}.")
+        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+        client = genai.GenerativeModel(model)
+        return client, model
     else:
         raise ValueError(f"Model {model} not supported.")
