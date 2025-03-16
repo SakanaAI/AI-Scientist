@@ -8,6 +8,7 @@ import backoff
 import requests
 
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.rate_limit import rate_limiter
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -130,9 +131,18 @@ def generate_ideas(
                 msg_history=msg_history,
             )
             ## PARSE OUTPUT
-            json_output = extract_json_between_markers(text)
-            assert json_output is not None, "Failed to extract JSON from LLM output"
-            print(json_output)
+            try:
+                json_output = extract_json_between_markers(text)
+                if json_output is None:
+                    print("Failed to extract JSON from LLM output")
+                    continue
+                print(json_output)
+            except ValueError as e:
+                print(f"Error extracting JSON: {e}")
+                continue
+            except Exception as e:
+                print(f"Unexpected error while extracting JSON: {e}")
+                continue
 
             # Iteratively improve task.
             if num_reflections > 1:
@@ -148,11 +158,18 @@ def generate_ideas(
                         msg_history=msg_history,
                     )
                     ## PARSE OUTPUT
-                    json_output = extract_json_between_markers(text)
-                    assert (
-                            json_output is not None
-                    ), "Failed to extract JSON from LLM output"
-                    print(json_output)
+                    try:
+                        json_output = extract_json_between_markers(text)
+                        if json_output is None:
+                            print("Failed to extract JSON from LLM output")
+                            continue
+                        print(json_output)
+                    except ValueError as e:
+                        print(f"Error extracting JSON: {e}")
+                        continue
+                    except Exception as e:
+                        print(f"Unexpected error while extracting JSON: {e}")
+                        continue
 
                     if "I am done" in text:
                         print(f"Idea generation converged after {j + 2} iterations.")
@@ -229,9 +246,18 @@ Scores of 0 indicate the idea failed either during experimentation, writeup or r
                     msg_history=msg_history,
                 )
                 ## PARSE OUTPUT
-                json_output = extract_json_between_markers(text)
-                assert json_output is not None, "Failed to extract JSON from LLM output"
-                print(json_output)
+                try:
+                    json_output = extract_json_between_markers(text)
+                    if json_output is None:
+                        print("Failed to extract JSON from LLM output")
+                        continue
+                    print(json_output)
+                except ValueError as e:
+                    print(f"Error extracting JSON: {e}")
+                    continue
+                except Exception as e:
+                    print(f"Unexpected error while extracting JSON: {e}")
+                    continue
 
                 # Iteratively improve task.
                 if num_reflections > 1:
@@ -247,11 +273,18 @@ Scores of 0 indicate the idea failed either during experimentation, writeup or r
                             msg_history=msg_history,
                         )
                         ## PARSE OUTPUT
-                        json_output = extract_json_between_markers(text)
-                        assert (
-                                json_output is not None
-                        ), "Failed to extract JSON from LLM output"
-                        print(json_output)
+                        try:
+                            json_output = extract_json_between_markers(text)
+                            if json_output is None:
+                                print("Failed to extract JSON from LLM output")
+                                continue
+                            print(json_output)
+                        except ValueError as e:
+                            print(f"Error extracting JSON: {e}")
+                            continue
+                        except Exception as e:
+                            print(f"Unexpected error while extracting JSON: {e}")
+                            continue
 
                         if "I am done" in text:
                             print(
@@ -280,9 +313,13 @@ def on_backoff(details):
 
 
 @backoff.on_exception(
-    backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff
+    backoff.expo,
+    requests.exceptions.HTTPError,
+    on_backoff=on_backoff
 )
+@rate_limiter.handle_rate_limit("semantic_scholar")  # Add rate limiting for Semantic Scholar
 def search_for_papers(query, result_limit=10, engine="semanticscholar") -> Union[None, List[Dict]]:
+
     if not query:
         return None
     if engine == "semanticscholar":
@@ -454,6 +491,7 @@ def check_idea_novelty(
                     break
 
                 ## PARSE OUTPUT
+
                 json_output = extract_json_between_markers(text)
                 assert json_output is not None, "Failed to extract JSON from LLM output"
 
@@ -475,8 +513,17 @@ def check_idea_novelty(
                             cites=paper["citationCount"],
                             abstract=paper["abstract"],
                         )
-                    )
-                papers_str = "\n\n".join(paper_strings)
+                    papers_str = "\n\n".join(paper_strings)
+
+                except ValueError as e:
+                    print(f"Error extracting JSON: {e}")
+                    continue
+                except KeyError as e:
+                    print(f"Missing required field in JSON: {e}")
+                    continue
+                except Exception as e:
+                    print(f"Unexpected error while extracting JSON: {e}")
+                    continue
 
             except Exception as e:
                 print(f"Error: {e}")
