@@ -60,14 +60,28 @@ frontend/
 │   │   ├── layout/           # Layout components (e.g., MainLayout, AuthLayout)
 │   │   ├── dashboard/        # Dashboard-specific components
 │   │   ├── experiments/      # Experiment-related components
+│   │   │   ├── ExperimentCard.tsx            # Card component for displaying experiment info
+│   │   │   ├── ExperimentFilter.tsx          # Filter component for experiments list
+│   │   │   ├── ExperimentProgressTracker.tsx # Component for tracking experiment progress
+│   │   │   ├── ExperimentLogViewer.tsx       # Component for displaying experiment logs
+│   │   │   └── README.md                     # Documentation for experiment components
 │   │   ├── papers/           # Paper-related components
 │   │   ├── auth/             # Authentication components
 │   │   ├── common/           # Common/shared components
 │   │   └── results/          # Result visualization components
 │   ├── pages/                # Page components
+│   │   ├── experiments/      # Experiment pages
+│   │   │   ├── ExperimentsList.tsx   # Page for listing all experiments
+│   │   │   ├── ExperimentDetail.tsx  # Page for viewing experiment details
+│   │   │   └── CreateExperiment.tsx  # Page for creating new experiments
 │   ├── services/             # API services and data fetching
+│   │   ├── experimentService.ts  # Service for experiment-related API operations
+│   │   └── README.md             # Documentation for API services
 │   ├── context/              # React context providers
 │   ├── hooks/                # Custom React hooks
+│   │   ├── useExperiments.ts     # Hook for managing experiment data
+│   │   ├── useExperimentLogs.ts  # Hook for handling experiment logs
+│   │   └── README.md             # Documentation for custom hooks
 │   ├── utils/                # Utility functions
 │   └── assets/               # Static assets like images and styles
 ├── dist/                     # Production build output
@@ -106,4 +120,45 @@ Contributions to the AI-Scientist frontend are welcome. Please follow these step
 
 ## License
 
-This project is licensed under the terms specified in the LICENSE file at the root of the repository. 
+This project is licensed under the terms specified in the LICENSE file at the root of the repository.
+
+## Experiments Module
+
+The Experiments module allows researchers to create, manage, and monitor scientific experiments. It includes the following key features:
+
+### Experiment Management
+
+- **Create Experiments**: Set up new experiments with custom parameters, tags, and descriptions
+- **List View**: View all experiments with filtering, sorting, and pagination
+- **Detail View**: Detailed view of individual experiments with progress tracking
+- **Controls**: Start, pause, stop, and delete experiments
+
+### Experiment Monitoring
+
+- **Real-time Progress Tracking**: Visual representation of experiment progress
+- **Step-by-Step Tracking**: Track each step of the experiment with status indicators
+- **Live Logs**: Real-time log viewing with filtering and search capabilities
+- **Resource Monitoring**: View CPU, memory, and GPU usage for experiments
+
+### Data Organization
+
+- **Tagging System**: Organize experiments using tags
+- **Filtering & Search**: Find experiments by status, date, tags, or search terms
+- **Results Integration**: Seamless connection between experiments and their results
+
+### User Interface
+
+- **Card View**: Visual card representation of experiments in list view
+- **Progress Visualization**: Visual progress indicators for each experiment
+- **Log Management**: Advanced log viewer with filtering by log level and source
+
+### Technical Implementation
+
+The Experiments module uses a layered architecture:
+
+1. **UI Components**: Reusable components in `src/components/experiments/`
+2. **Page Components**: Full pages in `src/pages/experiments/`
+3. **API Service**: Data fetching and mutation in `src/services/experimentService.ts`
+4. **Custom Hooks**: Reusable logic in `src/hooks/useExperiments.ts` and `src/hooks/useExperimentLogs.ts`
+
+This separation of concerns makes the code more maintainable and allows for easier testing. 

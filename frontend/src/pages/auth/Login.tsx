@@ -9,14 +9,18 @@ import {
   Alert,
   InputAdornment,
   IconButton,
-  CircularProgress
+  CircularProgress,
+  Divider,
+  Paper
 } from '@mui/material';
-import { Visibility, VisibilityOff } from '@mui/icons-material';
+import { Visibility, VisibilityOff, Login as LoginIcon } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
+import { useTheme } from '../../context/ThemeContext';
 
 const Login: React.FC = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
+  const { mode } = useTheme();
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -46,8 +50,16 @@ const Login: React.FC = () => {
   
   return (
     <Box component="form" onSubmit={handleSubmit} noValidate>
+      <Typography variant="h5" fontWeight="600" textAlign="center" gutterBottom>
+        Sign In
+      </Typography>
+      
+      <Typography variant="body2" color="text.secondary" align="center" sx={{ mb: 3 }}>
+        Enter your credentials to continue
+      </Typography>
+      
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert severity="error" sx={{ mb: 3 }}>
           {error}
         </Alert>
       )}
@@ -64,6 +76,8 @@ const Login: React.FC = () => {
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         disabled={loading}
+        variant="outlined"
+        sx={{ mb: 2 }}
       />
       
       <TextField
@@ -78,6 +92,8 @@ const Login: React.FC = () => {
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         disabled={loading}
+        variant="outlined"
+        sx={{ mb: 1 }}
         InputProps={{
           endAdornment: (
             <InputAdornment position="end">
@@ -93,8 +109,8 @@ const Login: React.FC = () => {
         }}
       />
       
-      <Box sx={{ mt: 2, textAlign: 'right' }}>
-        <Link component={RouterLink} to="/auth/forgot-password" variant="body2">
+      <Box sx={{ mt: 1, textAlign: 'right', mb: 3 }}>
+        <Link component={RouterLink} to="/auth/forgot-password" variant="body2" color="primary">
           Forgot password?
         </Link>
       </Box>
@@ -103,29 +119,51 @@ const Login: React.FC = () => {
         type="submit"
         fullWidth
         variant="contained"
-        sx={{ mt: 3, mb: 2, py: 1.5 }}
+        sx={{ 
+          py: 1.5, 
+          fontSize: '1rem',
+          fontWeight: 500,
+          mb: 3
+        }}
         disabled={loading}
+        startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <LoginIcon />}
       >
-        {loading ? <CircularProgress size={24} /> : 'Sign In'}
+        {loading ? 'Signing in...' : 'Sign In'}
       </Button>
       
-      <Box sx={{ textAlign: 'center' }}>
+      <Divider sx={{ mb: 3 }}>
+        <Typography variant="body2" color="text.secondary">
+          OR
+        </Typography>
+      </Divider>
+      
+      <Box sx={{ textAlign: 'center', mb: 2 }}>
         <Typography variant="body2" color="text.secondary">
           Don't have an account?{' '}
-          <Link component={RouterLink} to="/auth/register" variant="body2">
+          <Link component={RouterLink} to="/auth/register" variant="body2" sx={{ fontWeight: 500 }}>
             Sign Up
           </Link>
         </Typography>
       </Box>
       
-      <Box sx={{ mt: 3, textAlign: 'center' }}>
-        <Typography variant="body2" color="text.secondary">
+      <Paper 
+        elevation={0} 
+        sx={{ 
+          p: 2, 
+          mt: 3, 
+          bgcolor: mode === 'dark' ? 'rgba(0, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.02)',
+          border: '1px solid',
+          borderColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+          borderRadius: 2
+        }}
+      >
+        <Typography variant="body2" color="text.secondary" align="center" fontWeight={500}>
           Demo credentials:
         </Typography>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" color="text.secondary" align="center">
           Email: <strong>demo@example.com</strong>, Password: <strong>password</strong>
         </Typography>
-      </Box>
+      </Paper>
     </Box>
   );
 };
