@@ -140,36 +140,15 @@ def get_response_from_llm(
         msg_history = []
 
     if "claude" in model:
-        new_msg_history = msg_history + [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": msg,
-                    }
-                ],
-            }
-        ]
         response = client.messages.create(
             model=model,
             max_tokens=MAX_NUM_TOKENS,
             temperature=temperature,
             system=system_message,
-            messages=new_msg_history,
+            messages=[{"role": m["role"], "content": m["content"]} for m in msg_history] + [{"role": "user", "content": msg}]
         )
         content = response.content[0].text
-        new_msg_history = new_msg_history + [
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": content,
-                    }
-                ],
-            }
-        ]
+        new_msg_history = msg_history + [{"role": "user", "content": msg}, {"role": "assistant", "content": content}]
     elif model in [
         "gpt-4o-2024-05-13",
         "gpt-4o-mini-2024-07-18",
