@@ -211,7 +211,17 @@ const Dashboard: React.FC = () => {
                 <ListItem 
                   key={exp.id}
                   secondaryAction={getStatusChip(exp.status)}
-                  sx={{ px: 1 }}
+                  sx={{ 
+                    px: 1,
+                    "& .MuiListItemSecondaryAction-root": {
+                      position: "static",
+                      transform: "none",
+                      marginLeft: 2
+                    },
+                    "& .MuiListItemText-root": {
+                      marginRight: 0
+                    }
+                  }}
                 >
                   <ListItemIcon>
                     <Science color="primary" />
@@ -258,7 +268,17 @@ const Dashboard: React.FC = () => {
                     <ListItem 
                       key={paper.id}
                       secondaryAction={getStatusChip(paper.status)}
-                      sx={{ px: 1 }}
+                      sx={{ 
+                        px: 1,
+                        "& .MuiListItemSecondaryAction-root": {
+                          position: "static",
+                          transform: "none",
+                          marginLeft: 2
+                        },
+                        "& .MuiListItemText-root": {
+                          marginRight: 0
+                        }
+                      }}
                     >
                       <ListItemIcon>
                         <Description color="primary" />
@@ -292,7 +312,17 @@ const Dashboard: React.FC = () => {
                   {recentIdeas.map((idea) => (
                     <ListItem 
                       key={idea.id}
-                      sx={{ px: 1 }}
+                      sx={{ 
+                        px: 1,
+                        "& .MuiListItemSecondaryAction-root": {
+                          position: "static",
+                          transform: "none",
+                          marginLeft: 2
+                        },
+                        "& .MuiListItemText-root": {
+                          marginRight: 0
+                        }
+                      }}
                       secondaryAction={
                         <Chip 
                           label={`Score: ${idea.score}%`} 

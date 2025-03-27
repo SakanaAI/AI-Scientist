@@ -1,8 +1,6 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { CssBaseline, ThemeProvider as MuiThemeProvider } from '@mui/material';
-import { LocalizationProvider } from '@mui/x-date-pickers';
-import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { useTheme } from './context/ThemeContext';
 import { useAuth } from './context/AuthContext';
 
@@ -38,38 +36,36 @@ const App: React.FC = () => {
   
   return (
     <MuiThemeProvider theme={theme}>
-      <LocalizationProvider dateAdapter={AdapterDateFns}>
-        <CssBaseline />
-        <Routes>
-          {/* Auth routes */}
-          <Route path="/auth" element={<AuthLayout />}>
-            <Route path="login" element={<Login />} />
-            <Route path="register" element={<Register />} />
+      <CssBaseline />
+      <Routes>
+        {/* Auth routes */}
+        <Route path="/auth" element={<AuthLayout />}>
+          <Route path="login" element={<Login />} />
+          <Route path="register" element={<Register />} />
+        </Route>
+        
+        {/* Main app routes */}
+        <Route path="/" element={
+          <ProtectedRoute>
+            <MainLayout />
+          </ProtectedRoute>
+        }>
+          <Route index element={<Dashboard />} />
+          <Route path="experiments">
+            <Route index element={<ExperimentsList />} />
+            <Route path="new" element={<CreateExperiment />} />
+            <Route path=":id" element={<ExperimentDetail />} />
           </Route>
-          
-          {/* Main app routes */}
-          <Route path="/" element={
-            <ProtectedRoute>
-              <MainLayout />
-            </ProtectedRoute>
-          }>
-            <Route index element={<Dashboard />} />
-            <Route path="experiments">
-              <Route index element={<ExperimentsList />} />
-              <Route path="new" element={<CreateExperiment />} />
-              <Route path=":id" element={<ExperimentDetail />} />
-            </Route>
-            <Route path="papers">
-              <Route index element={<PapersList />} />
-              <Route path=":id" element={<PaperDetail />} />
-            </Route>
-            <Route path="results" element={<ResultsVisualization />} />
+          <Route path="papers">
+            <Route index element={<PapersList />} />
+            <Route path=":id" element={<PaperDetail />} />
           </Route>
-          
-          {/* 404 route */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </LocalizationProvider>
+          <Route path="results" element={<ResultsVisualization />} />
+        </Route>
+        
+        {/* 404 route */}
+        <Route path="*" element={<NotFound />} />
+      </Routes>
     </MuiThemeProvider>
   );
 };

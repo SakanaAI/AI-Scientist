@@ -355,7 +355,7 @@ const MainLayout: React.FC = () => {
         flexGrow: 1, 
         p: 3,
         width: { md: open ? `calc(100% - ${drawerWidth}px)` : '100%' },
-        ml: { md: open ? `${drawerWidth}px` : 0 },
+        marginLeft: { md: 0 },
         transition: muiTheme.transitions.create(['width', 'margin'], {
           easing: muiTheme.transitions.easing.sharp,
           duration: muiTheme.transitions.duration.leavingScreen,

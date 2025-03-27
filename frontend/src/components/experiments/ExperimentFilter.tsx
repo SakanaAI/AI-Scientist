@@ -15,7 +15,6 @@ import {
   IconButton,
   Collapse
 } from '@mui/material';
-import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { FilterList, Clear } from '@mui/icons-material';
 
 interface ExperimentFilterProps {
@@ -41,6 +40,8 @@ const ExperimentFilter: React.FC<ExperimentFilterProps> = ({ onFilterChange, ava
   const [status, setStatus] = useState<string[]>([]);
   const [dateFrom, setDateFrom] = useState<Date | null>(null);
   const [dateTo, setDateTo] = useState<Date | null>(null);
+  const [dateFromString, setDateFromString] = useState('');
+  const [dateToString, setDateToString] = useState('');
   const [tags, setTags] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
@@ -62,12 +63,16 @@ const ExperimentFilter: React.FC<ExperimentFilterProps> = ({ onFilterChange, ava
     applyFilters({ searchQuery: event.target.value });
   };
   
-  const handleDateFromChange = (date: Date | null) => {
+  const handleDateFromChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setDateFromString(event.target.value);
+    const date = event.target.value ? new Date(event.target.value) : null;
     setDateFrom(date);
     applyFilters({ dateFrom: date });
   };
   
-  const handleDateToChange = (date: Date | null) => {
+  const handleDateToChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setDateToString(event.target.value);
+    const date = event.target.value ? new Date(event.target.value) : null;
     setDateTo(date);
     applyFilters({ dateTo: date });
   };
@@ -92,6 +97,8 @@ const ExperimentFilter: React.FC<ExperimentFilterProps> = ({ onFilterChange, ava
     setStatus([]);
     setDateFrom(null);
     setDateTo(null);
+    setDateFromString('');
+    setDateToString('');
     setTags([]);
     setSearchQuery('');
     onFilterChange({
@@ -205,20 +212,26 @@ const ExperimentFilter: React.FC<ExperimentFilterProps> = ({ onFilterChange, ava
           </Grid>
           
           <Grid item xs={12} sm={6} md={3}>
-            <DatePicker
+            <TextField
               label="From Date"
-              value={dateFrom}
+              type="date"
+              value={dateFromString}
               onChange={handleDateFromChange}
-              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+              InputLabelProps={{ shrink: true }}
+              size="small"
+              fullWidth
             />
           </Grid>
           
           <Grid item xs={12} sm={6} md={3}>
-            <DatePicker
+            <TextField
               label="To Date"
-              value={dateTo}
+              type="date"
+              value={dateToString}
               onChange={handleDateToChange}
-              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+              InputLabelProps={{ shrink: true }}
+              size="small"
+              fullWidth
             />
           </Grid>
         </Grid>
@@ -262,6 +275,7 @@ const ExperimentFilter: React.FC<ExperimentFilterProps> = ({ onFilterChange, ava
               size="small"
               onDelete={() => {
                 setDateFrom(null);
+                setDateFromString('');
                 applyFilters({ dateFrom: null });
               }}
             />
@@ -273,6 +287,7 @@ const ExperimentFilter: React.FC<ExperimentFilterProps> = ({ onFilterChange, ava
               size="small"
               onDelete={() => {
                 setDateTo(null);
+                setDateToString('');
                 applyFilters({ dateTo: null });
               }}
             />
