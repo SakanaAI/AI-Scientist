@@ -169,9 +169,12 @@ def do_idea(
     assert not osp.exists(folder_name), f"Folder {folder_name} already exists."
     destination_dir = folder_name
     shutil.copytree(base_dir, destination_dir, dirs_exist_ok=True)
-    with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
-        baseline_results = json.load(f)
-    baseline_results = {k: v["means"] for k, v in baseline_results.items()}
+    # with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
+    #     baseline_results = json.load(f)
+    
+    # baseline_results = {k: v["means"] for k, v in baseline_results.items()}
+    baseline_results = r"Baseline results is we achieve about 10% accuracy on the test set, using basic probe."
+
     exp_file = osp.join(folder_name, "experiment.py")
     vis_file = osp.join(folder_name, "plot.py")
     notes = osp.join(folder_name, "notes.txt")
@@ -354,8 +357,9 @@ if __name__ == "__main__":
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)
 
-    novel_ideas = [idea for idea in ideas if idea["novel"]]
+    # novel_ideas = [idea for idea in ideas if idea["novel"]]
     # novel_ideas = list(reversed(novel_ideas))
+    novel_ideas = ideas
 
     if args.parallel > 0:
         print(f"Running {args.parallel} parallel processes")
