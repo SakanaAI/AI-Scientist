@@ -7,7 +7,7 @@ Explanation of our changes or new files:
 - TODO
 - TODO
 
-## Detailed explantion of steps of the pipeline
+## Detailed explanation of steps of the pipeline
 
 ### 0. Structure of template
 
@@ -58,7 +58,7 @@ I skipped this, but in short it uses a Semantic Scholar API to check if the idea
 
 ### 3. Run experiments
 
-See `launch_scientist.py` for details. In particular, the `do_idea` function is used to run an experiment for a given idea.
+See `launch_scientist.py` for details. In particular, the `do_idea` function is used to run experiments for a given idea.
 
 For each idea in `ideas.json`, we run the following steps:
 - Create a folder for the idea in `results/<template_name>/<timestamp>_<idea_name>`
@@ -73,11 +73,22 @@ For each idea in `ideas.json`, we run the following steps:
   - Say which model to use.
 - Run the experiments
   - See function `perform_experiments` in `ai_scientist/perform_experiments.py` for details.
-  - The experiments are run in a loop, with a maximum of `MAX_RUNS` runs.
-  - If the experiments are not completed in `MAX_ITERS` iterations, the loop will break.
+  - The experiments are organized in 'runs'. There are at most `MAX_RUNS` runs.
+  - At the start, the LLM is asked to plan the list of runs it will run. See `coder_prompt`
+  - Each run is organized in 'iterations'. There are at most `MAX_ITERS` iterations per run.
+  - A single iteration consists of:
+    - Using the aider coding agent to modify the python and notes files. `coder_out = coder.run(next_prompt)`
+    - Run the modified code. `return_code, next_prompt = run_experiment(folder_name, run)`
+    - If the code runs successfully, increment the run number, and the coder is given prompt `Run {run_num} completed. Here are the results: {results}. Decide if you need to re-plan the experiments...`. See the function `run_experiment` for full prompt details.
+    - If the code does not run successfully, increment the iteration number and the coder is given prompt `Run failed with error {stderr_output}`.
   - The results of the experiments are saved in `final_info.json` in the new folder.
 - Generate a latex report
+  - See `perform_writeup` in `ai_scientist/perform_writeup.py` for details.
+  - I skipped this, but it uses aider to iteratively write the latex file section by section, and then to review itself.
 - Perform a peer review
+  - See `perform_review` in `ai_scientist/perform_review.py` for details.
+  - I skipped this, but it just asks an LLM to make `num_reviews_ensemble` independent reviews, than using a different prompts creates a meta-review of the reviews.
+- If `improvement` is set to `True`, then the latex paper is improved based on the review, and another review is performed.
 
 
 
