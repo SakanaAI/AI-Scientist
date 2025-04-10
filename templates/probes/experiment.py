@@ -5,6 +5,8 @@ from transformer_lens import HookedTransformer
 from typing import Callable
 from tqdm import tqdm
 import os
+import argparse
+import json
 
 def generate_training_prompts(
     data: pd.DataFrame,
@@ -255,6 +257,10 @@ def calculate_accuracy(predictions: list[str], targets: pd.Series) -> float:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run experiments with demeaned probes")
+    parser.add_argument("--out_dir", type=str, default="run_0", help="Directory to save results")
+    args = parser.parse_args()
+
     PATH_TO_DATA = "antonyms.json"
     MODEL_NAME = "EleutherAI/gpt-j-6b"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -264,7 +270,7 @@ if __name__ == "__main__":
     EXTRACTION_LAYERS = list(range(9,13))
     BETAS = [1,3,5]
     BATCH_SIZE = 32
-    RESULTS_DIR = "results_" + pd.Timestamp.now().strftime("%Y-%m-%d-%H-%M")
+    RESULTS_DIR = args.out_dir
 
     if not os.path.exists(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
@@ -333,7 +339,21 @@ if __name__ == "__main__":
                 predictions_df.to_csv(os.path.join(RESULTS_DIR, f"predictions_{split_number}_{layer}_{beta}.csv"), index=False)
 
                 pbar.update(1)
-
+    
     pbar.close()
     print("All experiments completed!")
+
+    # Compute and save averaged results using groupby
+    grouped_results = results_df.groupby(['layer', 'beta'])['accuracy'].agg(['mean', 'std']).reset_index()
+    averaged_results = {
+        f"layer_{row['layer']}_beta_{row['beta']}": {
+            "means": float(row['mean']),
+            "stds": float(row['std'])
+        }
+        for _, row in grouped_results.iterrows()
+    }
+    
+    # Save to final_info.json
+    with open(os.path.join(RESULTS_DIR, "final_info.json"), "w") as f:
+        json.dump(averaged_results, f, indent=4)
 
