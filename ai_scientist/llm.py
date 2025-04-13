@@ -44,6 +44,11 @@ AVAILABLE_LLMS = [
     # Google Gemini models
     "gemini-1.5-flash",
     "gemini-1.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-thinking-exp-01-21",
+    "gemini-2.5-pro-preview-03-25", 
+    "gemini-2.5-pro-exp-03-25",
 ]
 
 
@@ -258,18 +263,17 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif "gemini" in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        gemini_contents = [{"role": "system", "parts": system_message}]
-        for m in new_msg_history:
-            gemini_contents.append({"role": m["role"], "parts": m["content"]})
-        response = client.generate_content(
-            contents=gemini_contents,
-            generation_config=GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=MAX_NUM_TOKENS,
-                candidate_count=1,
-            ),
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
         )
-        content = response.text
+        content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
         raise ValueError(f"Model {model} not supported.")
@@ -345,9 +349,10 @@ def create_client(model):
             base_url="https://openrouter.ai/api/v1"
         ), "meta-llama/llama-3.1-405b-instruct"
     elif "gemini" in model:
-        print(f"Using Google Generative AI with model {model}.")
-        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-        client = genai.GenerativeModel(model)
-        return client, model
+        print(f"Using OpenAI API with {model}.")
+        return openai.OpenAI(
+            api_key=os.environ["GEMINI_API_KEY"],
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        ), model
     else:
         raise ValueError(f"Model {model} not supported.")
