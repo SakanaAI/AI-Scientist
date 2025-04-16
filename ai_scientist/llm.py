@@ -15,14 +15,24 @@ AVAILABLE_LLMS = [
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
     # OpenAI models
+    "gpt-4o-mini",
     "gpt-4o-mini-2024-07-18",
+    "gpt-4o",
     "gpt-4o-2024-05-13",
     "gpt-4o-2024-08-06",
+    "gpt-4.1",
+    "gpt-4.1-2025-04-14",
+    "gpt-4.1-mini",
+    "gpt-4.1-mini-2025-04-14",
+    "gpt-4.1-nano",
+    "gpt-4.1-nano-2025-04-14",
+    "o1",
+    "o1-2024-12-17",
+    "o1-preview-2024-09-12",
+    "o1-mini",
+    "o1-mini-2024-09-12",
     "o3-mini",
     "o3-mini-2025-01-31",
-    "o1-preview-2024-09-12",
-    "o1-mini-2024-09-12",
-    "o1-2024-12-17",
     # OpenRouter models
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -47,7 +57,7 @@ AVAILABLE_LLMS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-2.0-flash-thinking-exp-01-21",
-    "gemini-2.5-pro-preview-03-25", 
+    "gemini-2.5-pro-preview-03-25",
     "gemini-2.5-pro-exp-03-25",
 ]
 
@@ -67,11 +77,7 @@ def get_batch_responses_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if model in [
-        "gpt-4o-2024-05-13",
-        "gpt-4o-mini-2024-07-18",
-        "gpt-4o-2024-08-06",
-    ]:
+    if 'gpt' in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
             model=model,
@@ -177,11 +183,7 @@ def get_response_from_llm(
                 ],
             }
         ]
-    elif model in [
-        "gpt-4o-2024-05-13",
-        "gpt-4o-mini-2024-07-18",
-        "gpt-4o-2024-08-06",
-    ]:
+    elif 'gpt' in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
             model=model,
@@ -197,13 +199,7 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in [
-        "o1-preview-2024-09-12", 
-        "o1-mini-2024-09-12",
-        "o1-2024-12-17",
-        "o3-mini",
-        "o3-mini-2025-01-31",
-    ]:
+    elif "o1" in model or "o3" in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
             model=model,
@@ -330,13 +326,10 @@ def create_client(model):
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
-    elif 'gpt' in model:
+    elif 'gpt' in model or "o1" in model or "o3" in model:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
-    elif model in ["o1-preview-2024-09-12", "o1-mini-2024-09-12", "o3-mini", "o3-mini-2025-01-31"]:
-        print(f"Using OpenAI API with model {model}.")
-        return openai.OpenAI(), model
-    elif model in ["deepseek-chat", "deepseek-reasoner"]:
+    elif model in ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]:
         print(f"Using OpenAI API with {model}.")
         return openai.OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
