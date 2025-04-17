@@ -76,6 +76,23 @@ pip install -r requirements.txt
 
 **Note:** Installing `texlive-full` can take a long time. You may need to [hold Enter](https://askubuntu.com/questions/956006/pregenerating-context-markiv-format-this-may-take-some-time-takes-forever) during the installation.
 
+**Note for MacOS Users:**
+
+The command provided above for installing `pdflatex` (`sudo apt-get install texlive-full`)
+works only on Debian-based Linux systems and will not work on macOS. macOS users should install **MacTeX**, which includes `pdflatex` and the full TeX Live distribution. This can be done using Homebrew:  
+
+```sh
+brew install mactex
+```  
+
+⚠ **Note:** MacTeX is quite large (~5GB). If you prefer a smaller installation without GUI tools, you can install the no-GUI version (~2GB):  
+
+```sh
+brew install mactex-no-gui
+```  
+
+Alternatively, MacTeX can be downloaded directly from the [MacTeX website](https://tug.org/mactex/).
+
 ### Supported Models and API Keys
 
 We support a wide variety of models, including open-weight and API-only models. In general, we recommend using only frontier models above the capability of the original GPT-4. To see a full list of supported models, see [here](https://github.com/SakanaAI/AI-Scientist/blob/main/ai_scientist/llm.py).
