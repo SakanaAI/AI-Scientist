@@ -12,6 +12,7 @@ from aider.coders import Coder
 from aider.io import InputOutput
 from aider.models import Model
 from datetime import datetime
+from typing import Any
 
 from ai_scientist.generate_ideas import generate_ideas, check_idea_novelty
 from ai_scientist.llm import create_client, AVAILABLE_LLMS
@@ -56,7 +57,7 @@ def parse_arguments():
         "--writeup",
         type=str,
         default="latex",
-        choices=["latex"],
+        choices=["latex", "na"],
         help="What format to use for writeup",
     )
     parser.add_argument(
@@ -152,26 +153,61 @@ def worker(
 
 
 def do_idea(
-        base_dir,
-        results_dir,
-        idea,
-        model,
-        client,
-        client_model,
-        writeup,
-        improvement,
-        log_file=False,
-):
+    base_dir: str,
+    results_dir: str,
+    idea: dict,
+    model: str,
+    client: Any,
+    client_model: str,
+    writeup: str,
+    improvement: bool,
+    log_file: bool = False,
+) -> bool:
+    """
+    Execute a scientific experiment idea, including running experiments, generating writeups, and performing reviews.
+
+    Args:
+        base_dir (str): Path to the base directory containing the template for the chosen experiment
+            Typically os.path.join("templates", template_name)
+        results_dir (str): Path to store the results of the experiment
+            Typically os.path.join("results", template_name)
+        idea (dict): Dictionary containing experiment idea details including 'Name', 'Title', and 'Experiment'
+            The 'Name' field is used to name the folder for the experiment results
+            The 'Title' field is used to name the experiment
+            The 'Experiment' field contains the details of the experiment
+        model (str): Name of the LLM model to use for code generation
+        client: LLM client instance for API calls
+            See function create_client in llm.py for details
+        client_model (str): Identifier for the specific client model being used
+            See function create_client in llm.py for details
+        writeup (str): Format for the experiment writeup ('latex' or 'na')
+            'na' skips the writeup and review steps
+        improvement (bool): Whether to perform improvement based on reviews
+        log_file (bool, optional): Whether to log output to a file. Defaults to False.
+
+    Returns:
+        bool: True if the experiment was successful, False otherwise
+
+    Note:
+        The function creates a new directory for each experiment, copies template files,
+        runs experiments, generates writeups in LaTeX format (if specified), performs
+        peer review, and optionally improves the paper based on reviews.
+    """
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     idea_name = f"{timestamp}_{idea['Name']}"
     folder_name = osp.join(results_dir, idea_name)
     assert not osp.exists(folder_name), f"Folder {folder_name} already exists."
-    destination_dir = folder_name
-    shutil.copytree(base_dir, destination_dir, dirs_exist_ok=True)
+    shutil.copytree(base_dir, folder_name, dirs_exist_ok=True)
+
+    # Load baseline results.
+    # if "probes" in base_dir:
+    #     baseline_results = r"Baseline results is we achieve about 10% accuracy on the test set, using basic probe."
+    # else:
     with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
         baseline_results = json.load(f)
-    baseline_results = {k: v["means"] for k, v in baseline_results.items()}
+        baseline_results = {k: v["means"] for k, v in baseline_results.items()}
+
     exp_file = osp.join(folder_name, "experiment.py")
     vis_file = osp.join(folder_name, "plot.py")
     notes = osp.join(folder_name, "notes.txt")
@@ -225,6 +261,9 @@ def do_idea(
             return False
 
         print_time()
+        if writeup == "na":
+            print("Done experiments. Skipping writeup and review because writeup variable is set to 'na'.")
+            return True
         print(f"*Starting Writeup*")
         ## PERFORM WRITEUP
         if writeup == "latex":
@@ -354,8 +393,9 @@ if __name__ == "__main__":
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)
 
-    novel_ideas = [idea for idea in ideas if idea["novel"]]
+    # novel_ideas = [idea for idea in ideas if idea["novel"]]
     # novel_ideas = list(reversed(novel_ideas))
+    novel_ideas = ideas
 
     if args.parallel > 0:
         print(f"Running {args.parallel} parallel processes")
@@ -397,14 +437,15 @@ if __name__ == "__main__":
             print(f"Processing idea: {idea['Name']}")
             try:
                 success = do_idea(
-                    base_dir,
-                    results_dir,
-                    idea,
-                    args.model,
-                    client,
-                    client_model,
-                    args.writeup,
-                    args.improvement,
+                    base_dir=base_dir,
+                    results_dir=results_dir,
+                    idea=idea,
+                    model=args.model,
+                    client=client,
+                    client_model=client_model,
+                    writeup=args.writeup,
+                    improvement=args.improvement,
+                    log_file=False,
                 )
                 print(f"Completed idea: {idea['Name']}, Success: {success}")
             except Exception as e:
