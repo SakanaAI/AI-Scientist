@@ -34,9 +34,3 @@
 - However, ideas were not good. E.g. 'cross layer demeaning' where you demean layer 12 (say) using the mean from layer 10 (say). Makes no sense.
 - On coding front, did try to download a dataset from huggingface to calculate the mean. Got some bug so tried again. Failed again. Then just added try except clause where they use some dummy phrase repeated 1000 timesas the dataset. `["This is a dummy text example."] * num_examples`
 - Also, LLM hallucinated a whole file 'analysis_report.md' before actually running any experiments... 
-
-
-
-
-
-
