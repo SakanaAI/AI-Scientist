@@ -201,9 +201,6 @@ def do_idea(
     shutil.copytree(base_dir, folder_name, dirs_exist_ok=True)
 
     # Load baseline results.
-    # if "probes" in base_dir:
-    #     baseline_results = r"Baseline results is we achieve about 10% accuracy on the test set, using basic probe."
-    # else:
     with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
         baseline_results = json.load(f)
         baseline_results = {k: v["means"] for k, v in baseline_results.items()}
