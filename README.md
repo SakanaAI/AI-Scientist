@@ -4,10 +4,12 @@ This repository is a fork of Sakana's AI Scientist in which we explore what its 
 This work was done as part of [AI Safety Camp 10](https://www.aisafety.camp/).
 
 Explanation of our changes or new files:
-- TODO
-- TODO
+- The `templates/probes` folder contains a template for running experiments on probing tasks.
+- The `results/probes` folder contains the results of running the pipeline on the probes template.
+See the [README.md](templates/probes/README.md) in the probes folder for more details.
+- Various minor changes to the code, e.g. changing gitignore to allow results to be tracked, adding some docstrings, adding Claude 3.7 to list of accepted models, etc.
 
-## Detailed explanation of steps of the pipeline
+## Detailed explanation of steps of the AI-Scientist pipeline
 
 ### 0. Structure of template
 
