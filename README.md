@@ -304,6 +304,7 @@ We welcome community contributions in the form of new templates. While these are
 - AI in Quantum Chemistry (`MACE`) - [PR#157](https://github.com/SakanaAI/AI-Scientist/pull/157)
 - Earthquake Prediction (`earthquake-prediction`) - [PR #167](https://github.com/SakanaAI/AI-Scientist/pull/167)
 - Tensorial Radiance Fields (`tensorf`) - [PR #175](https://github.com/SakanaAI/AI-Scientist/pull/175)
+- Large Language Model Steering / Probes (`probes`) - [PR #215](https://github.com/SakanaAI/AI-Scientist/pull/215)
 
 *This section is reserved for community contributions. Please submit a pull request to add your template to the list! Please describe the template in the PR description, and also show examples of the generated papers.*
 
