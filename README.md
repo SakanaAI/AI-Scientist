@@ -60,14 +60,36 @@ We provide three templates, which were used in our paper, covering the following
 
 ## Requirements
 
-This code is designed to run on Linux with NVIDIA GPUs using CUDA and PyTorch. Support for other GPU architectures may be possible by following the [PyTorch guidelines](https://pytorch.org/get-started/locally/). The current templates would likely take an infeasible amount of time on CPU-only machines. Running on other operating systems may require significant adjustments.
+Please see [Hardware Requirements](docs/hardware_requirements.md) for detailed system specifications.
+
+### Prerequisites
+- Python 3.8-3.11
+- pip (latest version)
+- Virtual environment (recommended)
+- Linux operating system
+- NVIDIA GPU (optional, recommended for local models)
 
 ### Installation
 
+We support both conda and venv for environment management. Choose the method that best suits your needs:
+
+#### Option 1: Using conda (Recommended for GPU Support)
 ```bash
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
-# Install pdflatex
+```
+
+#### Option 2: Using venv
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# or
+.\venv\Scripts\activate  # Windows
+```
+
+#### Common Steps
+```bash
+# Install pdflatex (required for paper generation)
 sudo apt-get install texlive-full
 
 # Install PyPI requirements
@@ -75,6 +97,23 @@ pip install -r requirements.txt
 ```
 
 **Note:** Installing `texlive-full` can take a long time. You may need to [hold Enter](https://askubuntu.com/questions/956006/pregenerating-context-markiv-format-this-may-take-some-time-takes-forever) during the installation.
+
+### Model Configuration
+
+Choose from the following model options:
+
+1. Cloud API Models (Recommended for most users)
+   - OpenAI GPT-4/3.5
+   - Google Gemini Pro
+   - Anthropic Claude
+   - DeepSeek Coder V2
+
+2. Local Models (via Ollama)
+   - LLaMA 3.2/3.3
+   - Mistral
+   - Code LLaMA
+
+See [Model Configuration](docs/model_configuration.md) for detailed setup instructions.
 
 ### Supported Models and API Keys
 
