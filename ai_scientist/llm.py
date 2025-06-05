@@ -59,6 +59,7 @@ AVAILABLE_LLMS = [
     "gemini-2.0-flash-thinking-exp-01-21",
     "gemini-2.5-pro-preview-03-25",
     "gemini-2.5-pro-exp-03-25",
+    "local",
 ]
 
 
@@ -347,5 +348,8 @@ def create_client(model):
             api_key=os.environ["GEMINI_API_KEY"],
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         ), model
+    elif model == "local":
+        print("Using local LLM API at http://localhost:8000.")
+        return None, model
     else:
         raise ValueError(f"Model {model} not supported.")
