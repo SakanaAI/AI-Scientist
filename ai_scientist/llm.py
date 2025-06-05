@@ -113,6 +113,30 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
+    elif model == "local":
+    import requests
+
+    content = []
+    new_msg_history = []
+
+    for _ in range(n_responses):
+        prompt = f"{system_message}\n\n{msg}"
+        payload = {
+            "model": "mistralai/Mistral-7B-Instruct-v0.1",
+            "prompt": prompt,
+            "max_tokens": MAX_NUM_TOKENS,
+            "temperature": temperature,
+            "n": 1,
+        }
+
+        response = requests.post("http://localhost:8000/v1/completions", json=payload)
+        result = response.json()
+        c = result.get("choices", [{}])[0].get("text", "").strip()
+
+        content.append(c)
+        new_msg_history.append(
+            msg_history + [{"role": "user", "content": msg}, {"role": "assistant", "content": c}]
+        )
     else:
         content, new_msg_history = [], []
         for _ in range(n_responses):
@@ -272,6 +296,26 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif model == "local":
+    import requests
+
+    prompt = f"{system_message}\n\n{msg}"
+    payload = {
+        "model": "mistralai/Mistral-7B-Instruct-v0.1",
+        "prompt": prompt,
+        "max_tokens": MAX_NUM_TOKENS,
+        "temperature": temperature,
+        "n": 1,
+    }
+
+    response = requests.post("http://localhost:8000/v1/completions", json=payload)
+    result = response.json()
+    content = result.get("choices", [{}])[0].get("text", "").strip()
+
+    new_msg_history = msg_history + [
+        {"role": "user", "content": msg},
+        {"role": "assistant", "content": content},
+    ]
     else:
         raise ValueError(f"Model {model} not supported.")
 
