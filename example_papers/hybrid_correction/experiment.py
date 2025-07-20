@@ -4,6 +4,7 @@ from cpymad.madx import Madx, TwissFailed
 import random
 import os
 import joblib
+import tqdm
 from sklearn.neural_network import MLPRegressor
 
 class VEPP5_sample:
@@ -17,6 +18,7 @@ class VEPP5_sample:
         self.hidden_parameters = {'sigma_x':0, 'sigma_y':0, 'sigma_s':0, 'sigma_psi':0, 'seed':1}
         self.nominal_response_matrix = self.calculcate_resp_mat()
         self.hidden_parameters = orig_hidden
+        self.corr_limit = 7
 
     @property
     def current_elements(self):
@@ -110,7 +112,7 @@ class VEPP5_sample:
         return matrix
 
     def correct_orbit(self):
-        elem_val_limit = 7
+        elem_val_limit = self.corr_limit
         svd_cutoff = 1e-3
         target_orbit = np.zeros(2 * self.num_bpms)
 
@@ -132,24 +134,27 @@ class VEPP5_sample:
         self.stop_madx(madx)
         return x, y, elems_deltas
 
-    def hybrid_correct_orbit(self, model=None, iterations=1):
+    def hybrid_correct_orbit(self, model=None, iterations=0, svd=True):
+        elem_val_limit = self.corr_limit
         # First, do the SVD correction
-        x_svd, y_svd, elems_deltas = self.correct_orbit()
-        R = np.concatenate((x_svd, y_svd))
+        x_new, y_new, elems_deltas = self.correct_orbit() if svd else (*self.get_orbit(), self.globals)
+        R = np.concatenate((x_new, y_new))
 
         # If no model, then we just return the SVD correction
         if model is None:
-            return x_svd, y_svd, elems_deltas, None
+            return x_new, y_new, elems_deltas
 
-        dI_nn_total = np.zeros(len(self.globals))
+        dI_nn_total = np.zeros(len(self.globals)) + list(elems_deltas.values())
         for it in range(iterations):
             # Predict the additional correction
             dI_nn = model.predict(R.reshape(1, -1))[0]
             dI_nn_total += dI_nn
 
             # Apply the additional correction to the correctors
-            for i, key in enumerate(self.globals.keys()):
-                self.globals[key] += dI_nn[i]
+            dI_nn_total = np.clip(dI_nn_total, -elem_val_limit, elem_val_limit)
+
+            elems_deltas = dict(zip(self.globals.keys(), dI_nn_total))
+            self.change_elements(elems_deltas)
 
             # Get the new orbit
             madx = self.start_madx()
@@ -157,7 +162,7 @@ class VEPP5_sample:
             self.stop_madx(madx)
             R = np.concatenate((x_new, y_new))
 
-        return x_new, y_new, elems_deltas, dI_nn_total
+        return x_new, y_new, elems_deltas
         
 
 import argparse
@@ -173,7 +178,7 @@ def run_experiment(out_dir, num_samples=10):
     results_dict = {}
 
     # For run_1: training data collection and model training
-    if out_dir == "run_1":
+    if out_dir == "collect_data":
         # Collect training data
         X = []
         Y = []
@@ -238,8 +243,8 @@ def run_experiment(out_dir, num_samples=10):
             "phase": "correction"
         })
 
-    # For runs 2 to 10: hybrid correction
-    elif out_dir in [f"run_{i}" for i in range(2,11)]:
+    # For runs 0 to 10: hybrid correction
+    elif out_dir in [f"run_{i}" for i in range(0,11)]:
         # Load the pre-trained model
         model_file = "run_1/nn_model.joblib"
         if not os.path.exists(model_file):
@@ -248,7 +253,7 @@ def run_experiment(out_dir, num_samples=10):
         else:
             model = joblib.load(model_file)
 
-        for i in range(num_samples):
+        for i in tqdm.tqdm(range(num_samples)):
             smp.hidden_parameters = {
                 'sigma_x': np.random.uniform(1e-4, 1e-3),
                 'sigma_y': np.random.uniform(1e-4, 1e-3),
@@ -262,46 +267,11 @@ def run_experiment(out_dir, num_samples=10):
 
             initial_x, initial_y = smp.get_orbit()
             # Use hybrid correction
-            iterations = 1
-            if out_dir in [f"run_{i}" for i in range(4,11)]:
+            iterations = 0
+            if out_dir in [f"run_{i}" for i in range(0,11)]:
                 iterations = int(out_dir.split('_')[1])
             
-            corrected_x, corrected_y, corrected_elements, dI_nn = smp.hybrid_correct_orbit(model, iterations=iterations)
-
-            results_dict[f"experiment_{i + 1}"] = {
-                'hidden_parameters': smp.hidden_parameters,
-                'initial_orbit': {'x': initial_x.tolist(), 'y': initial_y.tolist()},
-                'corrected_orbit': {'x': corrected_x.tolist(), 'y': corrected_y.tolist()},
-                'corrected_elements': corrected_elements,
-            }
-
-            init_info.append({
-                "iter": i + 1,
-                "loss": np.sum(initial_x**2 + initial_y**2),
-                "phase": "init"
-            })
-            corr_info.append({
-                "iter": i + 1,
-                "loss": np.sum(corrected_x**2 + corrected_y**2),
-                "phase": "correction"
-            })
-
-    # For other runs (including run_0): baseline SVD
-    else:
-        for i in range(num_samples):
-            smp.hidden_parameters = {
-                'sigma_x': np.random.uniform(1e-4, 1e-3),
-                'sigma_y': np.random.uniform(1e-4, 1e-3),
-                'sigma_s': np.random.uniform(1e-4, 1e-3),
-                'sigma_psi': np.random.uniform(1e-4, 1e-3),
-                'seed': np.random.randint(1, 10)
-            }
-
-            for key in smp.current_elements:
-                smp.change_elements({key: 0.0})
-
-            initial_x, initial_y = smp.get_orbit()
-            corrected_x, corrected_y, corrected_elements = smp.correct_orbit()
+            corrected_x, corrected_y, corrected_elements = smp.hybrid_correct_orbit(model, iterations=iterations)
 
             results_dict[f"experiment_{i + 1}"] = {
                 'hidden_parameters': smp.hidden_parameters,

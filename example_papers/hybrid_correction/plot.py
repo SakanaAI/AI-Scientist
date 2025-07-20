@@ -11,18 +11,19 @@ def load_results(results_path):
 
 def plot_summary():
     # Define runs to include in the summary plot
-    run_dirs = [f"run_{i}" for i in range(0, 10)]
+    run_dirs = [f"run_{i}" for i in range(0, 11)]
     labels = {
-        "run_0": "Baseline",
-        "run_1": "Training",
-        "run_2": "Hybrid (1 iter)",
-        "run_3": "Hybrid (1 iter)",
-        "run_4": "Hybrid (4 iter)",
-        "run_5": "Hybrid (5 iter)",
-        "run_6": "Hybrid (6 iter)",
-        "run_7": "Hybrid (7 iter)",
-        "run_8": "Hybrid (8 iter)",
-        "run_9": "Hybrid (9 iter)",
+        "run_0": "SVD & NN (0 iter)",
+        "run_1": "SVD & NN (1 iter)",
+        "run_2": "SVD & NN (2 iter)",
+        "run_3": "SVD & NN (3 iter)",
+        "run_4": "SVD & NN (4 iter)",
+        "run_5": "SVD & NN (5 iter)",
+        "run_6": "SVD & NN (6 iter)",
+        "run_7": "SVD & NN (7 iter)",
+        "run_8": "SVD & NN (8 iter)",
+        "run_9": "SVD & NN (9 iter)",
+        "run_10": "SVD & NN (10 iter)",
     }
 
     init_means = []
@@ -32,23 +33,27 @@ def plot_summary():
     run_labels = []
 
     for run_dir in run_dirs:
+        run_label = labels.get(run_dir)
+        if not run_label:
+            continue
+
         results_path = os.path.join(run_dir, "final_info.json")
         if not os.path.exists(results_path):
             continue
-            
+
         results = load_results(results_path)
         if results is None:
             continue
-            
+
         orbit_corr = results.get("orbit_correction", {})
         means = orbit_corr.get("means", {})
         stderrs = orbit_corr.get("stderrs", {})
-        
+
         init_means.append(means.get("init_loss_mean", 0))
         init_stderrs.append(stderrs.get("init_loss_stderr", 0))
         corr_means.append(means.get("corr_loss_mean", 0))
         corr_stderrs.append(stderrs.get("corr_loss_stderr", 0))
-        run_labels.append(labels.get(run_dir, run_dir))
+        run_labels.append(run_label)
 
     if not run_labels:
         return
@@ -64,7 +69,7 @@ def plot_summary():
 
     # Formatting
     plt.yscale('log')
-    plt.ylabel('Loss (log scale)')
+    plt.ylabel('Loss $m^2$ (log scale)')
     plt.title('Orbit Correction Performance by Run')
     plt.xticks(x, run_labels, rotation=45, ha='right')
     plt.legend()
