@@ -52,6 +52,7 @@ def parse_arguments():
             "gpt-4o-2024-05-13",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
+            "DoD",
             # Anthropic Claude models via Amazon Bedrock
             "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
             "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -304,6 +305,15 @@ if __name__ == "__main__":
 
         print(f"Using OpenAI API with {args.model}.")
         client_model = "meta-llama/llama-3.1-405b-instruct"
+        client = openai.OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url="https://openrouter.ai/api/v1"
+        )
+    elif args.model == "DoD":
+        import openai
+
+        print(f"Using OpenRouter API with Groq Llama3.1.")
+        client_model = "groq/llama3.1-70b-groq"
         client = openai.OpenAI(
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1"
