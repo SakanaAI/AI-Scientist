@@ -60,7 +60,7 @@ def get_batch_responses_from_llm(
     elif model in ["llama-3-1-405b-instruct", "groq/llama3.1-70b-groq"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model,
+            model="meta-llama/llama-3.1-405b-instruct" if model == "llama-3-1-405b-instruct" else model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -187,7 +187,7 @@ def get_response_from_llm(
     elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct", "groq/llama3.1-70b-groq"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model,
+            model="meta-llama/llama-3.1-405b-instruct" if model == "llama-3-1-405b-instruct" else model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
