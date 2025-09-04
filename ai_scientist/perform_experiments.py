@@ -27,7 +27,7 @@ You can then implement the next thing on your list."""
 
 
 # RUN EXPERIMENT
-def run_experiment(folder_name, run_num, timeout=7200):
+def run_experiment(folder_name, run_num, timeout=10800):
     cwd = osp.abspath(folder_name)
     # COPY CODE SO WE CAN SEE IT.
     shutil.copy(
@@ -42,9 +42,7 @@ def run_experiment(folder_name, run_num, timeout=7200):
         f"--out_dir=run_{run_num}",
     ]
     try:
-        result = subprocess.run(
-            command, cwd=cwd, stderr=subprocess.PIPE, text=True, timeout=timeout
-        )
+        result = subprocess.run(command, cwd=cwd, stderr=subprocess.PIPE, text=True, timeout=timeout)
 
         if result.stderr:
             print(result.stderr, file=sys.stderr)
@@ -59,7 +57,7 @@ def run_experiment(folder_name, run_num, timeout=7200):
                 stderr_output = "..." + stderr_output[-MAX_STDERR_OUTPUT:]
             next_prompt = f"Run failed with the following error {stderr_output}"
         else:
-            with open(osp.join(cwd, f"run_{run_num}", "final_info.json"), "r") as f:
+            with open(osp.join(cwd, f"run_{run_num}", "final_info.json")) as f:
                 results = json.load(f)
             results = {k: v["means"] for k, v in results.items()}
 
@@ -93,9 +91,7 @@ def run_plotting(folder_name, timeout=600):
         "plot.py",
     ]
     try:
-        result = subprocess.run(
-            command, cwd=cwd, stderr=subprocess.PIPE, text=True, timeout=timeout
-        )
+        result = subprocess.run(command, cwd=cwd, stderr=subprocess.PIPE, text=True, timeout=timeout)
 
         if result.stderr:
             print(result.stderr, file=sys.stderr)
@@ -142,7 +138,7 @@ def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
 
     current_iter = 0
     next_prompt = """
-Great job! Please modify `plot.py` to generate the most relevant plots for the final writeup. 
+Great job! Please modify `plot.py` to generate the most relevant plots for the final writeup.
 
 In particular, be sure to fill in the "labels" dictionary with the correct names for each run that you want to plot.
 

@@ -1,23 +1,24 @@
 import argparse
 import json
 import multiprocessing
-import openai
 import os
 import os.path as osp
 import shutil
 import sys
 import time
+from datetime import datetime
+
+import openai
 import torch
 from aider.coders import Coder
 from aider.io import InputOutput
 from aider.models import Model
-from datetime import datetime
 
-from ai_scientist.generate_ideas import generate_ideas, check_idea_novelty
-from ai_scientist.llm import create_client, AVAILABLE_LLMS
+from ai_scientist.generate_ideas import check_idea_novelty, generate_ideas
+from ai_scientist.llm import AVAILABLE_LLMS, create_client
 from ai_scientist.perform_experiments import perform_experiments
-from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
-from ai_scientist.perform_writeup import perform_writeup, generate_latex
+from ai_scientist.perform_review import load_paper, perform_improvement, perform_review
+from ai_scientist.perform_writeup import generate_latex, perform_writeup
 
 NUM_REFLECTIONS = 3
 
@@ -106,29 +107,30 @@ def check_latex_dependencies():
     import shutil
     import sys
 
-    required_dependencies = ['pdflatex', 'chktex']
+    required_dependencies = ["pdflatex", "chktex"]
     missing_deps = []
 
     for dep in required_dependencies:
         if shutil.which(dep) is None:
             missing_deps.append(dep)
-    
+
     if missing_deps:
         print("Error: Required LaTeX dependencies not found:", file=sys.stderr)
         return False
-    
+
     return True
-    
+
+
 def worker(
-        queue,
-        base_dir,
-        results_dir,
-        model,
-        client,
-        client_model,
-        writeup,
-        improvement,
-        gpu_id,
+    queue,
+    base_dir,
+    results_dir,
+    model,
+    client,
+    client_model,
+    writeup,
+    improvement,
+    gpu_id,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     print(f"Worker {gpu_id} started.")
@@ -152,15 +154,15 @@ def worker(
 
 
 def do_idea(
-        base_dir,
-        results_dir,
-        idea,
-        model,
-        client,
-        client_model,
-        writeup,
-        improvement,
-        log_file=False,
+    base_dir,
+    results_dir,
+    idea,
+    model,
+    client,
+    client_model,
+    writeup,
+    improvement,
+    log_file=False,
 ):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -169,7 +171,7 @@ def do_idea(
     assert not osp.exists(folder_name), f"Folder {folder_name} already exists."
     destination_dir = folder_name
     shutil.copytree(base_dir, destination_dir, dirs_exist_ok=True)
-    with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
+    with open(osp.join(base_dir, "run_0", "final_info.json")) as f:
         baseline_results = json.load(f)
     # Check if baseline_results is a dictionary before extracting means
     if isinstance(baseline_results, dict):
@@ -180,9 +182,9 @@ def do_idea(
     with open(notes, "w") as f:
         f.write(f"# Title: {idea['Title']}\n")
         f.write(f"# Experiment description: {idea['Experiment']}\n")
-        f.write(f"## Run 0: Baseline\n")
+        f.write("## Run 0: Baseline\n")
         f.write(f"Results: {baseline_results}\n")
-        f.write(f"Description: Baseline results.\n")
+        f.write("Description: Baseline results.\n")
     if log_file:
         original_stdout = sys.stdout
         original_stderr = sys.stderr
@@ -195,9 +197,7 @@ def do_idea(
         print(f"*Starting idea: {idea_name}*")
         ## PERFORM EXPERIMENTS
         fnames = [exp_file, vis_file, notes]
-        io = InputOutput(
-            yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
-        )
+        io = InputOutput(yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
         if model == "deepseek-coder-v2-0724":
             main_model = Model("deepseek/deepseek-coder")
         elif model == "deepseek-reasoner":
@@ -216,7 +216,7 @@ def do_idea(
         )
 
         print_time()
-        print(f"*Starting Experiments*")
+        print("*Starting Experiments*")
         try:
             success = perform_experiments(idea, folder_name, coder, baseline_results)
         except Exception as e:
@@ -229,7 +229,7 @@ def do_idea(
             return False
 
         print_time()
-        print(f"*Starting Writeup*")
+        print("*Starting Writeup*")
         ## PERFORM WRITEUP
         if writeup == "latex":
             writeup_file = osp.join(folder_name, "latex", "template.tex")
@@ -260,7 +260,7 @@ def do_idea(
             raise ValueError(f"Writeup format {writeup} not supported.")
 
         print_time()
-        print(f"*Starting Review*")
+        print("*Starting Review*")
         ## REVIEW PAPER
         if writeup == "latex":
             try:
@@ -284,12 +284,10 @@ def do_idea(
         ## IMPROVE WRITEUP
         if writeup == "latex" and improvement:
             print_time()
-            print(f"*Starting Improvement*")
+            print("*Starting Improvement*")
             try:
                 perform_improvement(review, coder)
-                generate_latex(
-                    coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf"
-                )
+                generate_latex(coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf")
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
                 review = perform_review(
                     paper_text,
@@ -324,9 +322,7 @@ if __name__ == "__main__":
     # Check available GPUs and adjust parallel processes if necessary
     available_gpus = get_available_gpus(args.gpus)
     if args.parallel > len(available_gpus):
-        print(
-            f"Warning: Requested {args.parallel} parallel processes, but only {len(available_gpus)} GPUs available. Adjusting to {len(available_gpus)}."
-        )
+        print(f"Warning: Requested {args.parallel} parallel processes, but only {len(available_gpus)} GPUs available. Adjusting to {len(available_gpus)}.")
         args.parallel = len(available_gpus)
 
     print(f"Using GPUs: {available_gpus}")
@@ -416,5 +412,6 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Failed to evaluate idea {idea['Name']}: {str(e)}")
                 import traceback
+
                 print(traceback.format_exc())
     print("All ideas evaluated.")
