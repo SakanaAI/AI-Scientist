@@ -59,16 +59,16 @@ We provide all runs and data from our paper [here](https://drive.google.com/driv
 
 We provide three templates, which were used in our paper, covering the following domains: **NanoGPT**, **2D Diffusion**, and **Grokking**. These templates enable The AI Scientist to generate ideas and conduct experiments in these areas. We accept contributions of new templates from the community, but please note that they are not maintained by us. All other templates beyond the three provided are community contributions.
 
-## 🚀 Quick Start: Google Colab
+## Quick Start: Google Colab
 
 **New!** Try AI Scientist in your browser with zero local setup:
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SakanaAI/AI-Scientist/blob/main/notebooks/ai_scientist_2d_diffusion.ipynb)
 
-- ⏱️ **30-45 minutes** to your first AI-generated paper
-- 💰 **$3-10** total cost (with GPT-4o-mini or Claude)
-- 🎮 **Free GPU** included (Colab T4)
-- 📝 **2D Diffusion template** - beautiful visualizations
+- **30-45 minutes** to your first AI-generated paper
+- **$3-10** total cost (with GPT-4o-mini or Claude)
+- **Free GPU** included (Colab T4)
+- **2D Diffusion template** - beautiful visualizations
 
 Perfect for first-time users! See [notebooks/README.md](notebooks/README.md) for detailed instructions, cost breakdown, and troubleshooting.
 
