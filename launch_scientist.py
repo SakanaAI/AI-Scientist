@@ -204,6 +204,8 @@ def do_idea(
             main_model = Model("deepseek/deepseek-reasoner")
         elif model == "llama3.1-405b":
             main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        elif "gemini" in model:
+            main_model = Model(f"gemini/{model}")
         else:
             main_model = Model(model)
         coder = Coder.create(
@@ -240,6 +242,8 @@ def do_idea(
                 main_model = Model("deepseek/deepseek-reasoner")
             elif model == "llama3.1-405b":
                 main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+            elif "gemini" in model:
+                main_model = Model(f"gemini/{model}")
             else:
                 main_model = Model(model)
             coder = Coder.create(
@@ -360,7 +364,7 @@ if __name__ == "__main__":
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)
 
-    novel_ideas = [idea for idea in ideas if idea["novel"]]
+    novel_ideas = ideas if args.skip_novelty_check else [idea for idea in ideas if idea["novel"]]
     # novel_ideas = list(reversed(novel_ideas))
 
     if args.parallel > 0:
