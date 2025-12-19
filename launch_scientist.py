@@ -13,7 +13,7 @@ from aider.io import InputOutput
 from aider.models import Model
 from datetime import datetime
 
-from ai_scientist.generate_ideas import generate_ideas, check_idea_novelty
+from ai_scientist.generate_ideas import generate_overview_paragraph, generate_ideas, check_idea_novelty
 from ai_scientist.llm import create_client, AVAILABLE_LLMS
 from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
@@ -171,9 +171,11 @@ def do_idea(
     shutil.copytree(base_dir, destination_dir, dirs_exist_ok=True)
     with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
         baseline_results = json.load(f)
+
     # Check if baseline_results is a dictionary before extracting means
     if isinstance(baseline_results, dict):
         baseline_results = {k: v["means"] for k, v in baseline_results.items()}
+
     exp_file = osp.join(folder_name, "experiment.py")
     vis_file = osp.join(folder_name, "plot.py")
     notes = osp.join(folder_name, "notes.txt")
@@ -193,6 +195,7 @@ def do_idea(
     try:
         print_time()
         print(f"*Starting idea: {idea_name}*")
+        
         ## PERFORM EXPERIMENTS
         fnames = [exp_file, vis_file, notes]
         io = InputOutput(
@@ -340,6 +343,14 @@ if __name__ == "__main__":
 
     base_dir = osp.join("templates", args.experiment)
     results_dir = osp.join("results", args.experiment)
+
+    # Idea generation
+    print("====================== IDEA EXPLORATION START... ======================")
+    overview = generate_overview_paragraph(base_dir, client, client_model)
+
+    print("====================== IDEA EXPLORATION END!!! ======================")
+
+    print("====================== IDEA GENERATION START... ======================")
     ideas = generate_ideas(
         base_dir,
         client=client,
@@ -348,6 +359,10 @@ if __name__ == "__main__":
         max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
     )
+    print("====================== IDEA GENERATION END!!! ======================")
+    print(ideas)
+
+    print("====================== IDEA CHECKING START... ======================")
     if not args.skip_novelty_check:
         ideas = check_idea_novelty(
             ideas,
@@ -362,7 +377,11 @@ if __name__ == "__main__":
 
     novel_ideas = [idea for idea in ideas if idea["novel"]]
     # novel_ideas = list(reversed(novel_ideas))
+    print("====================== IDEA CHECKING END!!! ======================")
+    print(novel_ideas)
 
+    # Experiment
+    print("====================== EXPERIMENT START... ======================")
     if args.parallel > 0:
         print(f"Running {args.parallel} parallel processes")
         queue = multiprocessing.Queue()
@@ -418,3 +437,4 @@ if __name__ == "__main__":
                 import traceback
                 print(traceback.format_exc())
     print("All ideas evaluated.")
+    print("====================== EXPERIMENT END !!! ======================")

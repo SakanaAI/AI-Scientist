@@ -17,9 +17,49 @@ def generate_latex(coder, folder_name, pdf_file, timeout=30, num_error_correctio
     cwd = osp.join(folder, "latex")  # Fixed potential issue with path
     writeup_file = osp.join(cwd, "template.tex")
 
-    # Check all references are valid and in the references.bib file
     with open(writeup_file, "r") as f:
         tex_text = f.read()
+    
+    # re-format tex file
+    if "\\begin{abstract}" in tex_text and "\\begin{document}" not in tex_text:
+        preamble = (
+            "\\documentclass{article}\n"
+            "\\usepackage{graphicx}\n"
+            "\\usepackage{natbib}\n"
+            "\\usepackage{amsmath, amssymb}\n"
+            "\\usepackage{geometry}\n"
+        )
+
+        if "\\maketitle" not in tex_text:
+            tex_text = re.sub(
+                r"(\\title\{.*?\})",
+                r"\1\n\\date{}\n\\maketitle",
+                tex_text,
+                flags=re.DOTALL
+            ) 
+
+        tex_text = (
+            preamble
+            + "\n\\begin{document}\n"
+            + tex_text
+            + "\\bibliographystyle{plainnat}\n"
+            + "\\bibliography{references}\n"
+            + "\n\\end{document}\n"
+        )
+
+        with open(writeup_file, "w") as f:
+            f.write(tex_text)
+        
+    # copy plot image files
+    png_files = [f for f in os.listdir(folder) if f.endswith(".png")]
+    for file in png_files:
+        src = os.path.join(folder, file)
+        dst = os.path.join(cwd, file)
+        if not os.path.exists(dst): 
+            shutil.copy(src, dst)
+            print(f"Copied image: {file} latex/")
+
+    # Check all references are valid and in the references.bib file
     cites = re.findall(r"\\cite[a-z]*{([^}]*)}", tex_text)
     references_bib = re.search(
         r"\\begin{filecontents}{references.bib}(.*?)\\end{filecontents}",
@@ -419,6 +459,8 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
         .replace(r"{{", "{")
         .replace(r"}}", "}")
     )
+
+    # each section
     for section in [
         "Introduction",
         "Background",
@@ -462,23 +504,64 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
     coder_out = coder.run(section_prompt)
 
     # Fill paper with cites.
+    print("************ CITATION CHECKING START ... ************")
     for _ in range(num_cite_rounds):
-        with open(osp.join(folder_name, "latex", "template.tex"), "r") as f:
+        writeup_file = osp.join(folder_name, "latex", "template.tex")
+        with open(writeup_file, "r") as f:
             draft = f.read()
+
         prompt, done = get_citation_aider_prompt(
             cite_client, cite_model, draft, _, num_cite_rounds, engine=engine
         )
+
         if done:
             break
         if prompt is not None:
+            # # extract bibtex string
+            # bibtex_string = prompt.split('"""')[1]
+            # # insert this into draft before the "\end{filecontents}" line
+            # search_str = r"\end{filecontents}"
+            # draft = draft.replace(search_str, f"{bibtex_string}{search_str}")
+            # with open(osp.join(folder_name, "latex", "template.tex"), "w") as f:
+            #     f.write(draft)
+
             # extract bibtex string
-            bibtex_string = prompt.split('"""')[1]
+            try:
+                bibtex_string = prompt.split('"""')[1].strip()
+                print(f"******** bibtex_string:\n{bibtex_string}\n **********")
+            except IndexError:
+                print("Failed to extract bibtex string from prompt.")
+                continue
+            
             # insert this into draft before the "\end{filecontents}" line
-            search_str = r"\end{filecontents}"
-            draft = draft.replace(search_str, f"{bibtex_string}{search_str}")
-            with open(osp.join(folder_name, "latex", "template.tex"), "w") as f:
+            with open(writeup_file, "r") as f:
+                draft = f.read()
+
+            if r"\end{filecontents}" in draft:
+                draft = draft.replace(r"\end{filecontents}", f"{bibtex_string}\n\\end{{filecontents}}")
+                print("Inserted bibtex into existing references.bib block.")
+            else:
+                print("No \\end{filecontents} found. Creating new references.bib block.")
+
+                bib_block = f"""
+\\begin{{filecontents}}{{references.bib}}
+{bibtex_string}
+\\end{{filecontents}}
+""".lstrip()
+
+                if "\\documentclass" in draft:
+                    draft = draft.replace("\\documentclass", bib_block + "\n\\documentclass", 1)
+                else:
+                    draft = bib_block + draft  # fallback
+
+                print("Inserted new references.bib block.")
+
+            with open(writeup_file, "w") as f:
                 f.write(draft)
+
+            # apply citation edit to the document
             coder_out = coder.run(prompt)
+    print("************ CITATION CHECKING END !!! ************")
 
     coder_out = coder.run(
         refinement_prompt.format(section="Related Work")
