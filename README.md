@@ -67,7 +67,7 @@ This code is designed to run on Linux with NVIDIA GPUs using CUDA and PyTorch. S
 ```bash
 conda create -n ai_scientist python=3.11
 conda activate ai_scientist
-# Install pdflatex
+# Install pdflatex (note: consider `conda install conda-forge::texlive-core` or MacTex for Mac users)
 sudo apt-get install texlive-full
 
 # Install PyPI requirements
@@ -182,8 +182,13 @@ This section provides instructions for setting up each of the three templates us
    # NOTE: YOU MUST FIRST RUN THE PREPARE SCRIPTS ABOVE!
    cd templates/nanoGPT
    python experiment.py --out_dir run_0
+   # For Mac M1 Chips use:
+   # python experiment_macM1.py --out_dir run_1
+
    python plot.py
    ```
+
+   
 
 ### 2D Diffusion Template
 
