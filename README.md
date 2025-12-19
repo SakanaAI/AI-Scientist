@@ -38,25 +38,41 @@ We provide all runs and data from our paper [here](https://drive.google.com/driv
 ## Table of Contents
 
 1. [Introduction](#introduction)
-2. [Requirements](#requirements)
+2. [🚀 Quick Start: Google Colab](#-quick-start-google-colab)
+3. [Requirements](#requirements)
    - [Installation](#installation)
    - [Supported Models and API Keys](#supported-models-and-api-keys)
-3. [Setting Up the Templates](#setting-up-the-templates)
+4. [Setting Up the Templates](#setting-up-the-templates)
    - [NanoGPT Template](#nanogpt-template)
    - [2D Diffusion Template](#2d-diffusion-template)
    - [Grokking Template](#grokking-template)
-4. [Run AI Scientist Paper Generation Experiments](#run-ai-scientist-paper-generation-experiments)
-5. [Getting an LLM-Generated Paper Review](#getting-an-llm-generated-paper-review)
-6. [Making Your Own Template](#making-your-own-template)
+5. [Run AI Scientist Paper Generation Experiments](#run-ai-scientist-paper-generation-experiments)
+6. [Getting an LLM-Generated Paper Review](#getting-an-llm-generated-paper-review)
+7. [Making Your Own Template](#making-your-own-template)
    - [Community-Contributed Templates](#community-contributed-templates)
-7. [Template Resources](#template-resources)
-8. [Citing The AI Scientist](#citing-the-ai-scientist)
-9. [Frequently Asked Questions](#frequently-asked-questions)
-10. [Containerization](#containerization)
+8. [Template Resources](#template-resources)
+9. [Citing The AI Scientist](#citing-the-ai-scientist)
+10. [Frequently Asked Questions](#frequently-asked-questions)
+11. [Containerization](#containerization)
 
 ## Introduction
 
 We provide three templates, which were used in our paper, covering the following domains: **NanoGPT**, **2D Diffusion**, and **Grokking**. These templates enable The AI Scientist to generate ideas and conduct experiments in these areas. We accept contributions of new templates from the community, but please note that they are not maintained by us. All other templates beyond the three provided are community contributions.
+
+## Quick Start: Google Colab
+
+**New!** Try AI Scientist in your browser with zero local setup:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SakanaAI/AI-Scientist/blob/main/notebooks/ai_scientist_2d_diffusion.ipynb)
+
+- **30-45 minutes** to your first AI-generated paper
+- **$3-10** total cost (with GPT-4o-mini or Claude)
+- **Free GPU** included (Colab T4)
+- **2D Diffusion template** - beautiful visualizations
+
+Perfect for first-time users! See [notebooks/README.md](notebooks/README.md) for detailed instructions, cost breakdown, and troubleshooting.
+
+For full functionality (parallel experiments, all templates, custom datasets), follow the local installation guide below.
 
 ## Requirements
 
