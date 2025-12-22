@@ -7,7 +7,7 @@ from typing import List, Dict, Union
 import backoff
 import requests
 
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, validate_model_choice
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -507,10 +507,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model",
-        type=str,
+        type=validate_model_choice,
         default="gpt-4o-2024-05-13",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help="Model to use (AVAILABLE_LLMS or openrouter/<provider>/<model>).",
     )
     parser.add_argument(
         "--skip-idea-generation",
