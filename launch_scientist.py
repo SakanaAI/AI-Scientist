@@ -14,7 +14,7 @@ from aider.models import Model
 from datetime import datetime
 
 from ai_scientist.generate_ideas import generate_ideas, check_idea_novelty
-from ai_scientist.llm import create_client, AVAILABLE_LLMS
+from ai_scientist.llm import create_client, OPENROUTER_PREFIX, is_openrouter_model, normalize_openrouter_model, validate_model_choice
 from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
 from ai_scientist.perform_writeup import perform_writeup, generate_latex
@@ -47,10 +47,9 @@ def parse_arguments():
     )
     parser.add_argument(
         "--model",
-        type=str,
+        type=validate_model_choice,
         default="claude-3-5-sonnet-20240620",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help="Model to use (AVAILABLE_LLMS or openrouter/<provider>/<model>).",
     )
     parser.add_argument(
         "--writeup",
@@ -129,6 +128,7 @@ def worker(
         writeup,
         improvement,
         gpu_id,
+        engine,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     print(f"Worker {gpu_id} started.")
@@ -145,7 +145,8 @@ def worker(
             client_model,
             writeup,
             improvement,
-            log_file=True,
+            engine,
+            True,
         )
         print(f"Completed idea: {idea['Name']}, Success: {success}")
     print(f"Worker {gpu_id} finished.")
@@ -161,6 +162,7 @@ def do_idea(
         writeup,
         improvement,
         log_file=False,
+        engine,
 ):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -202,8 +204,9 @@ def do_idea(
             main_model = Model("deepseek/deepseek-coder")
         elif model == "deepseek-reasoner":
             main_model = Model("deepseek/deepseek-reasoner")
-        elif model == "llama3.1-405b":
-            main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        elif is_openrouter_model(model):
+            normalized_model = normalize_openrouter_model(model)
+            main_model = Model(f"{OPENROUTER_PREFIX}{normalized_model}")
         else:
             main_model = Model(model)
         coder = Coder.create(
@@ -238,8 +241,9 @@ def do_idea(
                 main_model = Model("deepseek/deepseek-coder")
             elif model == "deepseek-reasoner":
                 main_model = Model("deepseek/deepseek-reasoner")
-            elif model == "llama3.1-405b":
-                main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+            elif is_openrouter_model(model):
+                normalized_model = normalize_openrouter_model(model)
+                main_model = Model(f"{OPENROUTER_PREFIX}{normalized_model}")
             else:
                 main_model = Model(model)
             coder = Coder.create(
@@ -251,7 +255,7 @@ def do_idea(
                 edit_format="diff",
             )
             try:
-                perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
+                perform_writeup(idea, folder_name, coder, client, client_model, engine=engine)
             except Exception as e:
                 print(f"Failed to perform writeup: {e}")
                 return False
@@ -356,6 +360,9 @@ if __name__ == "__main__":
             model=client_model,
             engine=args.engine,
         )
+    else:
+        for idea in ideas:
+            idea["novel"] = True
 
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)
@@ -384,6 +391,7 @@ if __name__ == "__main__":
                     args.writeup,
                     args.improvement,
                     gpu_id,
+                    args.engine,
                 ),
             )
             p.start()
@@ -411,6 +419,7 @@ if __name__ == "__main__":
                     client_model,
                     args.writeup,
                     args.improvement,
+                    args.engine,
                 )
                 print(f"Completed idea: {idea['Name']}, Success: {success}")
             except Exception as e:

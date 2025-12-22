@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -9,6 +10,28 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 
 MAX_NUM_TOKENS = 4096
+OPENROUTER_PREFIX = "openrouter/"
+
+
+def is_openrouter_model(model_name: str) -> bool:
+    return model_name == "llama3.1-405b" or model_name.startswith(OPENROUTER_PREFIX)
+
+
+def normalize_openrouter_model(model_name: str) -> str:
+    if model_name.startswith(OPENROUTER_PREFIX):
+        return model_name[len(OPENROUTER_PREFIX) :]
+    if model_name == "llama3.1-405b":
+        return "meta-llama/llama-3.1-405b-instruct"
+    return model_name
+
+
+def validate_model_choice(model: str) -> str:
+    if model in AVAILABLE_LLMS or model.startswith(OPENROUTER_PREFIX):
+        return model
+    raise argparse.ArgumentTypeError(
+        "Model must be in AVAILABLE_LLMS or start with openrouter/<provider>/<model>."
+    )
+
 
 AVAILABLE_LLMS = [
     # Anthropic models
@@ -33,7 +56,7 @@ AVAILABLE_LLMS = [
     "o1-mini-2024-09-12",
     "o3-mini",
     "o3-mini-2025-01-31",
-    # OpenRouter models
+    # OpenRouter models (use openrouter/<provider>/<model> for others)
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
     "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
@@ -77,7 +100,25 @@ def get_batch_responses_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if 'gpt' in model:
+    if is_openrouter_model(model):
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        api_model = normalize_openrouter_model(model)
+        response = client.chat.completions.create(
+            model=api_model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=n_responses,
+            stop=None,
+        )
+        content = [r.message.content for r in response.choices]
+        new_msg_history = [
+            new_msg_history + [{"role": "assistant", "content": c}] for c in content
+        ]
+    elif "gpt" in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
             model=model,
@@ -90,23 +131,6 @@ def get_batch_responses_from_llm(
             n=n_responses,
             stop=None,
             seed=0,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
-    elif model == "llama-3-1-405b-instruct":
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
         )
         content = [r.message.content for r in response.choices]
         new_msg_history = [
@@ -152,7 +176,23 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if "claude" in model:
+    if is_openrouter_model(model):
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        api_model = normalize_openrouter_model(model)
+        response = client.chat.completions.create(
+            model=api_model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
+            stop=None,
+        )
+        content = response.choices[0].message.content
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif "claude" in model:
         new_msg_history = msg_history + [
             {
                 "role": "user",
@@ -211,21 +251,6 @@ def get_response_from_llm(
             max_completion_tokens=MAX_NUM_TOKENS,
             n=1,
             seed=0,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct"]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
@@ -326,6 +351,13 @@ def create_client(model):
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
+    elif is_openrouter_model(model):
+        normalized_model = normalize_openrouter_model(model)
+        print(f"Using OpenRouter API with {normalized_model}.")
+        return openai.OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url="https://openrouter.ai/api/v1",
+        ), f"{OPENROUTER_PREFIX}{normalized_model}"
     elif 'gpt' in model or "o1" in model or "o3" in model:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
@@ -335,12 +367,6 @@ def create_client(model):
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com"
         ), model
-    elif model == "llama3.1-405b":
-        print(f"Using OpenAI API with {model}.")
-        return openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1"
-        ), "meta-llama/llama-3.1-405b-instruct"
     elif "gemini" in model:
         print(f"Using OpenAI API with {model}.")
         return openai.OpenAI(

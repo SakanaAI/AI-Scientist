@@ -8,7 +8,7 @@ import subprocess
 from typing import Optional, Tuple
 
 from ai_scientist.generate_ideas import search_for_papers
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, OPENROUTER_PREFIX, is_openrouter_model, normalize_openrouter_model, validate_model_choice
 
 
 # GENERATE LATEX
@@ -523,10 +523,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-writing", action="store_true", help="Only generate")
     parser.add_argument(
         "--model",
-        type=str,
+        type=validate_model_choice,
         default="gpt-4o-2024-05-13",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help="Model to use (AVAILABLE_LLMS or openrouter/<provider>/<model>).",
     )
     parser.add_argument(
         "--engine",
@@ -558,8 +557,9 @@ if __name__ == "__main__":
     io = InputOutput(yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
     if args.model == "deepseek-coder-v2-0724":
         main_model = Model("deepseek/deepseek-coder")
-    elif args.model == "llama3.1-405b":
-        main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+    elif is_openrouter_model(args.model):
+        normalized_model = normalize_openrouter_model(args.model)
+        main_model = Model(f"{OPENROUTER_PREFIX}{normalized_model}")
     else:
         main_model = Model(model)
     coder = Coder.create(
