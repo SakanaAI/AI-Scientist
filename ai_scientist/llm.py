@@ -5,8 +5,8 @@ import re
 import anthropic
 import backoff
 import openai
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+import google.genai as genai
+from google.genai.types import GenerateContentConfig
 
 MAX_NUM_TOKENS = 4096
 
@@ -59,6 +59,8 @@ AVAILABLE_LLMS = [
     "gemini-2.0-flash-thinking-exp-01-21",
     "gemini-2.5-pro-preview-03-25",
     "gemini-2.5-pro-exp-03-25",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro"
 ]
 
 
@@ -148,6 +150,7 @@ def get_response_from_llm(
         print_debug=False,
         msg_history=None,
         temperature=0.75,
+        tools = [],
 ):
     if msg_history is None:
         msg_history = []
@@ -258,19 +261,17 @@ def get_response_from_llm(
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif "gemini" in model:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
+        chat = client.chats.create(model=model, history=msg_history)
+        response = chat.send_message(
+            msg,
+            config=GenerateContentConfig(
+                system_instruction=system_message,
+                max_output_tokens=MAX_NUM_TOKENS,
+                temperature=temperature
+            )
         )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+        content = response.text
+        new_msg_history = chat.get_history()
     else:
         raise ValueError(f"Model {model} not supported.")
 
@@ -342,10 +343,9 @@ def create_client(model):
             base_url="https://openrouter.ai/api/v1"
         ), "meta-llama/llama-3.1-405b-instruct"
     elif "gemini" in model:
-        print(f"Using OpenAI API with {model}.")
-        return openai.OpenAI(
-            api_key=os.environ["GEMINI_API_KEY"],
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        print(f"Using Google GenAI API with {model}.")
+        return genai.client.Client(
+            api_key=os.environ["GEMINI_API_KEY"]
         ), model
     else:
         raise ValueError(f"Model {model} not supported.")

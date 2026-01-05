@@ -26,6 +26,11 @@ def print_time():
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 
+def comma_separated_list(string):
+    if not string:
+        return []
+    return [item.strip() for item in string.split(',')]
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Run AI scientist experiments")
     parser.add_argument(
@@ -88,6 +93,12 @@ def parse_arguments():
         default="semanticscholar",
         choices=["semanticscholar", "openalex"],
         help="Scholar engine to use.",
+    )
+    parser.add_argument(
+        "--per-experiment-files",
+        type=comma_separated_list,
+        default=[],
+        help="A list of files to be inlucded in addition to experiment.py",
     )
     return parser.parse_args()
 
@@ -161,6 +172,7 @@ def do_idea(
         writeup,
         improvement,
         log_file=False,
+        per_experiment_files = [],
 ):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -172,11 +184,13 @@ def do_idea(
     with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
         baseline_results = json.load(f)
     # Check if baseline_results is a dictionary before extracting means
-    if isinstance(baseline_results, dict):
+    if isinstance(baseline_results, dict) and \
+        all([v.get("means") for v in baseline_results.values()]):
         baseline_results = {k: v["means"] for k, v in baseline_results.items()}
     exp_file = osp.join(folder_name, "experiment.py")
     vis_file = osp.join(folder_name, "plot.py")
     notes = osp.join(folder_name, "notes.txt")
+    per_experiment_files = [osp.join(folder_name, f) for f in per_experiment_files]
     with open(notes, "w") as f:
         f.write(f"# Title: {idea['Title']}\n")
         f.write(f"# Experiment description: {idea['Experiment']}\n")
@@ -194,7 +208,7 @@ def do_idea(
         print_time()
         print(f"*Starting idea: {idea_name}*")
         ## PERFORM EXPERIMENTS
-        fnames = [exp_file, vis_file, notes]
+        fnames = [exp_file, vis_file, notes] + per_experiment_files
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
@@ -258,6 +272,9 @@ def do_idea(
             print("Done writeup")
         else:
             raise ValueError(f"Writeup format {writeup} not supported.")
+
+        print("stop before reviewing")
+        sys.exit(1)
 
         print_time()
         print(f"*Starting Review*")
@@ -411,6 +428,7 @@ if __name__ == "__main__":
                     client_model,
                     args.writeup,
                     args.improvement,
+                    per_experiment_files=args.per_experiment_files
                 )
                 print(f"Completed idea: {idea['Name']}, Success: {success}")
             except Exception as e:
