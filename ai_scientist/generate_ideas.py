@@ -8,6 +8,7 @@ import backoff
 import requests
 
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from utils_tool import load_json_from_file, save_json_data_to_file
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -51,6 +52,55 @@ This JSON will be automatically parsed, so ensure the format is precise.
 You will have {num_reflections} rounds to iterate on the idea, but do not need to use them all.
 """
 
+idea_first_with_lit_review_and_convert_to_proposal_prompt = """{task_description}
+<experiment.py>
+{code}
+</experiment.py>
+
+Here are the ideas that you have already generated:
+
+'''
+{prev_ideas_string}
+'''
+
+Here are the lit review results(NOT TO COPY THE IDEA FROM LIT REVIEW):
+
+'''
+{lit_review_results}
+'''
+
+Come up with the next impactful and creative idea for research experiments and directions you can feasibly investigate with the code provided.
+Note that you will not have access to any additional resources or datasets.
+Make sure any idea is not overfit the specific training dataset or model, and has wider significance.
+
+Respond in the following format:
+
+THOUGHT:
+<THOUGHT>
+
+NEW IDEA JSON:
+```json
+<JSON>
+```
+
+In <THOUGHT>, first briefly discuss your intuitions and motivations for the idea. Detail your high-level plan, necessary design choices and ideal outcomes of the experiments. Justify how the idea is different from the existing ones.
+
+In <JSON>, provide the new idea in JSON format with the following fields:
+- "Name": A shortened descriptor of the idea. Lowercase, no spaces, underscores allowed.
+- "Title": A title for the idea, will be used for the report writing.
+- "Problem Statement": A clear and concise description of the problem you are trying to solve.
+- "Motivation": A clear and concise description of the motivation behind the problem.
+- "Proposed Method": A clear and concise description of the proposed method to solve the problem.
+- "Experiment": An outline of the implementation. E.g. which functions need to be added or modified, how results will be obtained, ...
+- "Interestingness": A rating from 1 to 10 (lowest to highest).
+- "Feasibility": A rating from 1 to 10 (lowest to highest).
+- "Novelty": A rating from 1 to 10 (lowest to highest).
+
+Be cautious and realistic on your ratings.
+This JSON will be automatically parsed, so ensure the format is precise.
+You will have {num_reflections} rounds to iterate on the idea, but do not need to use them all.
+"""
+
 idea_reflection_prompt = """Round {current_round}/{num_reflections}.
 In your thoughts, first carefully consider the quality, novelty, and feasibility of the idea you just created.
 Include any other factors that you think are important in evaluating the idea.
@@ -71,31 +121,41 @@ NEW IDEA JSON:
 If there is nothing to improve, simply repeat the previous JSON EXACTLY after the thought and include "I am done" at the end of the thoughts but before the JSON.
 ONLY INCLUDE "I am done" IF YOU ARE MAKING NO MORE CHANGES."""
 
-
 # GENERATE IDEAS
 def generate_ideas(
         base_dir,
         client,
         model,
         skip_generation=False,
+        exist_idea_file=None,
         max_num_generations=20,
         num_reflections=5,
+        use_literature=True,
+        lit_review_size=5,
+        use_semantic_index=False,
+        use_nova_index=True
 ):
+    print(f"skip_generation: {skip_generation}, exist_idea_file:{exist_idea_file}")
     if skip_generation:
         # Load existing ideas from file
-        try:
-            with open(osp.join(base_dir, "ideas.json"), "r") as f:
+        if 1:
+            if exist_idea_file:
+                ideas = load_json_from_file(exist_idea_file)
+                print(f"Loaded existing ideas from {exist_idea_file}")
+                return ideas
+            with open(osp.join(base_dir, "new_ideas.json"), "r") as f:
                 ideas = json.load(f)
-            print("Loaded existing ideas:")
-            for idea in ideas:
-                print(idea)
+            print("Loaded existing ideas from new_ideas.json")
             return ideas
-        except FileNotFoundError:
-            print("No existing ideas found. Generating new ideas.")
-        except json.JSONDecodeError:
-            print("Error decoding existing ideas. Generating new ideas.")
+        else:
+            print(1)
+        # except FileNotFoundError:
+            # print("No existing ideas found. Generating new ideas.")
+        # except json.JSONDecodeError:
+            # print("Error decoding existing ideas. Generating new ideas.")
 
     idea_str_archive = []
+    new_idea_str_archive = []
     with open(osp.join(base_dir, "seed_ideas.json"), "r") as f:
         seed_ideas = json.load(f)
     for seed_idea in seed_ideas:
@@ -117,18 +177,61 @@ def generate_ideas(
 
             msg_history = []
             print(f"Iteration 1/{num_reflections}")
-            text, msg_history = get_response_from_llm(
-                idea_first_prompt.format(
-                    task_description=prompt["task_description"],
-                    code=code,
-                    prev_ideas_string=prev_ideas_string,
-                    num_reflections=num_reflections,
-                ),
-                client=client,
-                model=model,
-                system_message=idea_system_prompt,
-                msg_history=msg_history,
-            )
+            lit_review_results = None
+            if not use_literature:
+                text, msg_history = get_response_from_llm(
+                    idea_first_prompt.format(
+                        task_description=prompt["task_description"],
+                        code=code,
+                        prev_ideas_string=prev_ideas_string,
+                        num_reflections=num_reflections,
+                    ),
+                    client=client,
+                    model=model,
+                    system_message=idea_system_prompt,
+                    msg_history=msg_history,
+                )
+            else:
+                if use_semantic_index:
+                    import sys
+                    sys.path.append("AI-Researcher/ai_researcher/src")
+                    from lit_review import collect_papers
+                    from lit_review_tools import format_papers_for_printing
+                    paper_bank, total_cost, all_queries = collect_papers(
+                        topic_description=prompt["task_description"],
+                        openai_client=client,
+                        model=model,
+                        seed=2025
+                    )
+                elif use_nova_index:
+                    import sys
+                    sys.path.append("AI-Researcher/ai_researcher/src")
+                    from lit_review_tools import format_papers_for_printing
+                    from search_paper_from_nova_index import search_papers
+                    paper_bank = search_papers(
+                        query=prompt["task_description"],
+                        topk=lit_review_size,
+                    )
+                    total_cost = 0.0
+                    all_queries = []
+                else:
+                    raise ValueError("use_literature must be True if use_semantic_paper_search or use_nova_index is True")
+                print(f"literature view done! paper_bank size:{len(paper_bank)}, total cost: {total_cost}, all queries: {all_queries}")
+                lit_review_results = format_papers_for_printing(paper_bank[:lit_review_size])
+                # print(f"===================\n\nlit_review_results:\n{lit_review_results}\n\n===================\n\n")
+                text, msg_history = get_response_from_llm(
+                    idea_first_with_lit_review_and_convert_to_proposal_prompt.format(
+                        task_description=prompt["task_description"],
+                        code=code,
+                        prev_ideas_string=prev_ideas_string,
+                        num_reflections=num_reflections,
+                        lit_review_results=lit_review_results,
+                    ),
+                    client=client,
+                    model=model,
+                    system_message=idea_system_prompt,
+                    msg_history=msg_history,
+                )
             ## PARSE OUTPUT
             json_output = extract_json_between_markers(text)
             assert json_output is not None, "Failed to extract JSON from LLM output"
@@ -158,7 +261,9 @@ def generate_ideas(
                         print(f"Idea generation converged after {j + 2} iterations.")
                         break
 
+            json_output['lit_review_results'] = lit_review_results
             idea_str_archive.append(json.dumps(json_output))
+            new_idea_str_archive.append(json.dumps(json_output))
         except Exception as e:
             print(f"Failed to generate idea: {e}")
             continue
@@ -168,10 +273,17 @@ def generate_ideas(
     for idea_str in idea_str_archive:
         ideas.append(json.loads(idea_str))
 
-    with open(osp.join(base_dir, "ideas.json"), "w") as f:
-        json.dump(ideas, f, indent=4)
+    # with open(osp.join(base_dir, "ideas.json"), "w") as f:
+        # json.dump(ideas, f, indent=4)
 
-    return ideas
+    new_ideas = []
+    for idea_str in new_idea_str_archive:
+        new_ideas.append(json.loads(idea_str))
+    with open(osp.join(base_dir, "new_ideas.json"), "w") as f:
+        json.dump(new_ideas, f, indent=4)
+
+    # return ideas
+    return new_ideas
 
 
 # GENERATE IDEAS OPEN-ENDED
@@ -285,6 +397,10 @@ def on_backoff(details):
 def search_for_papers(query, result_limit=10, engine="semanticscholar") -> Union[None, List[Dict]]:
     if not query:
         return None
+    if engine == 'nova':
+        from search_paper_from_nova_index import search_papers
+        papers = search_papers(query, topk=result_limit)
+        return papers
     if engine == "semanticscholar":
         rsp = requests.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
@@ -408,7 +524,7 @@ def check_idea_novelty(
         client,
         model,
         max_num_iterations=10,
-        engine="semanticscholar",
+        engine="nova", # nova, semanticscholar, openalex
 ):
     with open(osp.join(base_dir, "experiment.py"), "r") as f:
         code = f.read()
@@ -485,7 +601,7 @@ def check_idea_novelty(
         idea["novel"] = novel
 
     # Save results to JSON file
-    results_file = osp.join(base_dir, "ideas.json")
+    results_file = osp.join(base_dir, "new_ideas.json")
     with open(results_file, "w") as f:
         json.dump(ideas, f, indent=4)
 

@@ -131,7 +131,7 @@ per_section_tips = {
     "Abstract": """
 - TL;DR of the paper
 - What are we trying to do and why is it relevant?
-- Why is this hard? 
+- Why is this hard?
 - How do we solve it (i.e. our contribution!)
 - How do we verify that we solved it (e.g. Experiments and results)
 
@@ -140,20 +140,20 @@ Please make sure the abstract reads smoothly and is well-motivated. This should 
     "Introduction": """
 - Longer version of the Abstract, i.e. of the entire paper
 - What are we trying to do and why is it relevant?
-- Why is this hard? 
+- Why is this hard?
 - How do we solve it (i.e. our contribution!)
 - How do we verify that we solved it (e.g. Experiments and results)
 - New trend: specifically list your contributions as bullet points
 - Extra space? Future work!
 """,
     "Related Work": """
-- Academic siblings of our work, i.e. alternative attempts in literature at trying to solve the same problem. 
-- Goal is to “Compare and contrast” - how does their approach differ in either assumptions or method? If their method is applicable to our Problem Setting I expect a comparison in the experimental section. If not, there needs to be a clear statement why a given method is not applicable. 
+- Academic siblings of our work, i.e. alternative attempts in literature at trying to solve the same problem.
+- Goal is to “Compare and contrast” - how does their approach differ in either assumptions or method? If their method is applicable to our Problem Setting I expect a comparison in the experimental section. If not, there needs to be a clear statement why a given method is not applicable.
 - Note: Just describing what another paper is doing is not enough. We need to compare and contrast.
 """,
     "Background": """
-- Academic Ancestors of our work, i.e. all concepts and prior work that are required for understanding our method. 
-- Usually includes a subsection, Problem Setting, which formally introduces the problem setting and notation (Formalism) for our method. Highlights any specific assumptions that are made that are unusual. 
+- Academic Ancestors of our work, i.e. all concepts and prior work that are required for understanding our method.
+- Usually includes a subsection, Problem Setting, which formally introduces the problem setting and notation (Formalism) for our method. Highlights any specific assumptions that are made that are unusual.
 - Note: If our paper introduces a novel problem setting as part of its contributions, it's best to have a separate Section.
 """,
     "Method": """
@@ -168,7 +168,7 @@ Please make sure the abstract reads smoothly and is well-motivated. This should 
 - Shows the results of running Method on our problem described in Experimental Setup.
 - Includes statements on hyperparameters and other potential issues of fairness.
 - Only includes results that have actually been run and saved in the logs. Do not hallucinate results that don't exist.
-- If results exist: compares to baselines and includes statistics and confidence intervals. 
+- If results exist: compares to baselines and includes statistics and confidence intervals.
 - If results exist: includes ablation studies to show that specific parts of the method are relevant.
 - Discusses limitations of the method.
 - Make sure to include all the results from the experiments, and include all relevant figures.
@@ -298,6 +298,7 @@ def get_citation_aider_prompt(
 ) -> Tuple[Optional[str], bool]:
     msg_history = []
     try:
+        # 这里大概就是识别需要在哪里加引用，以及需要search什么样的paper过来
         text, msg_history = get_response_from_llm(
             citation_first_prompt.format(
                 draft=draft, current_round=current_round, total_rounds=total_rounds
@@ -307,6 +308,7 @@ def get_citation_aider_prompt(
             system_message=citation_system_msg.format(total_rounds=total_rounds),
             msg_history=msg_history,
         )
+        # 不需要加了，就直接True
         if "No more citations needed" in text:
             print("No more citations needed.")
             return None, True
@@ -324,6 +326,7 @@ def get_citation_aider_prompt(
         print("No papers found.")
         return None, False
 
+    # 将搜索过来的paper组成上下文，然后干啥?
     paper_strings = []
     for i, paper in enumerate(papers):
         paper_strings.append(
@@ -339,6 +342,8 @@ def get_citation_aider_prompt(
     papers_str = "\n\n".join(paper_strings)
 
     try:
+        # 这里就是分析检索过来的paper，哪些是可以加入到引用中的，如果可以加，就按照[0,1]等格式加过去
+        # 这里相当于对前一步做了一个审核和再过滤
         text, msg_history = get_response_from_llm(
             citation_second_prompt.format(
                 papers=papers_str,
@@ -354,6 +359,9 @@ def get_citation_aider_prompt(
             print("Do not add any.")
             return None, False
         ## PARSE OUTPUT
+        # 这个结果就包含Selected和Description
+        # Selected: example [0, 1]，相当于paper的index
+        # Description：是更新后的描述信息
         json_output = extract_json_between_markers(text)
         assert json_output is not None, "Failed to extract JSON from LLM output"
         desc = json_output["Description"]
@@ -366,6 +374,7 @@ def get_citation_aider_prompt(
             assert all(
                 [0 <= i < len(papers) for i in selected_papers]
             ), "Invalid paper index"
+            # 这里吧bib数据拿到
             bibtexs = [papers[i]["citationStyles"]["bibtex"] for i in selected_papers]
             bibtex_string = "\n".join(bibtexs)
         else:
@@ -375,6 +384,7 @@ def get_citation_aider_prompt(
         print(f"Error: {e}")
         return None, False
 
+    # TODO:检查这里啥时候加过去了啊，难道搜索完就加过去了?
     # Add citation to draft
     aider_format = '''The following citations have just been added to the end of the `references.bib` file definition at the top of the file:
 """
@@ -413,7 +423,9 @@ Before every paragraph, please include a brief description of what you plan to w
 
 Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
 """
+    # 先写一个title和abstract
     coder_out = coder.run(abstract_prompt)
+    # 先批判然后refine一下abstract
     coder_out = coder.run(
         refinement_prompt.format(section="Abstract")
         .replace(r"{{", "{")
@@ -440,7 +452,9 @@ Before every paragraph, please include a brief description of what you plan to w
 
 Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
 """
+        # 先写一下除了Related Work的部分
         coder_out = coder.run(section_prompt)
+        # 然后批判+refine
         coder_out = coder.run(
             refinement_prompt.format(section=section)
             .replace(r"{{", "{")
@@ -459,6 +473,9 @@ Do not modify `references.bib` to add any new citations, this will be filled in 
 
 Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
 """
+    # 先写related work的structure(要include什么样的paper,用%标记)
+    # 不要更新references.bib, 最后才更新
+    # TODO:检查这个是啥意思?*SEARCH/REPLACE* blocks to perform these edits.
     coder_out = coder.run(section_prompt)
 
     # Fill paper with cites.

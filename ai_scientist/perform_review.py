@@ -66,7 +66,7 @@ neurips_form = (
     """
 ## Review Form
 Below is a description of the questions you will be asked on the review form for each paper and some guidelines on what to consider when answering these questions.
-When writing your review, please keep in mind that after decisions have been made, reviews and meta-reviews of accepted papers and opted-in rejected papers will be made public. 
+When writing your review, please keep in mind that after decisions have been made, reviews and meta-reviews of accepted papers and opted-in rejected papers will be made public.
 
 1. Summary: Briefly summarize the paper and its contributions. This is not the place to critique the paper; the authors should generally agree with a well-written summary.
   - Strengths and Weaknesses: Please provide a thorough assessment of the strengths and weaknesses of the paper, touching on each of the following dimensions:
@@ -75,7 +75,7 @@ When writing your review, please keep in mind that after decisions have been mad
   - Clarity: Is the submission clearly written? Is it well organized? (If not, please make constructive suggestions for improving its clarity.) Does it adequately inform the reader? (Note that a superbly written paper provides enough information for an expert reader to reproduce its results.)
   - Significance: Are the results important? Are others (researchers or practitioners) likely to use the ideas or build on them? Does the submission address a difficult task in a better way than previous work? Does it advance the state of the art in a demonstrable way? Does it provide unique data, unique conclusions about existing data, or a unique theoretical or experimental approach?
 
-2. Questions: Please list up and carefully describe any questions and suggestions for the authors. Think of the things where a response from the author can change your opinion, clarify a confusion or address a limitation. This can be very important for a productive rebuttal and discussion phase with the authors.  
+2. Questions: Please list up and carefully describe any questions and suggestions for the authors. Think of the things where a response from the author can change your opinion, clarify a confusion or address a limitation. This can be very important for a productive rebuttal and discussion phase with the authors.
 
 3. Limitations: Have the authors adequately addressed the limitations and potential negative societal impact of their work? If not, please include constructive suggestions for improvement.
 In general, authors should be rewarded rather than punished for being up front about the limitations of their work and any potential negative societal impact. You are encouraged to think through whether any critical points are missing and provide these as feedback for the authors.
@@ -100,7 +100,7 @@ In general, authors should be rewarded rather than punished for being up front a
   2: fair
   1: poor
 
-8. Overall: Please provide an "overall score" for this submission. Choices: 
+8. Overall: Please provide an "overall score" for this submission. Choices:
   10: Award quality: Technically flawless paper with groundbreaking impact on one or more areas of AI, with exceptionally strong evaluation, reproducibility, and resources, and no unaddressed ethical considerations.
   9: Very Strong Accept: Technically flawless paper with groundbreaking impact on at least one area of AI and excellent impact on multiple areas of AI, with flawless evaluation, resources, and reproducibility, and no unaddressed ethical considerations.
   8: Strong Accept: Technically strong paper with, with novel ideas, excellent impact on at least one area of AI or high-to-excellent impact on multiple areas of AI, with excellent evaluation, resources, and reproducibility, and no unaddressed ethical considerations.
@@ -383,13 +383,20 @@ Review {i + 1}/{len(reviews)}:
     return meta_review
 
 
+# 2. Expand the Introduction, Related Work, Method, Experiment, and Conclusion sections according to the meta review results.
 def perform_improvement(review, coder):
-    improvement_prompt = '''The following review has been created for your research paper:
+    improvement_prompt = '''\n
+# Role
+You are an academic expert for top-tier AI/ML conferences. Given the original latex paper and its meta review results please:
+1. Update the latex paper based on the original paper and its meta review results.
+2. Add change to the response letter, which should respond point-by-point to the comments and suggestions in meta_review_results, explaining how the new paper addresses them, and reference the original paper if needed.
+
+The following meta review has been created for your research paper:
 """
 {review}
 """
 
-Improve the text using the review.'''.format(
+Please improve the text using the meta review.'''.format(
         review=json.dumps(review)
     )
     coder_out = coder.run(improvement_prompt)

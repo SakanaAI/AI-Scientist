@@ -18,6 +18,7 @@ from ai_scientist.llm import create_client, AVAILABLE_LLMS
 from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
 from ai_scientist.perform_writeup import perform_writeup, generate_latex
+from utils_tool import save_json_data_to_file, load_json_from_file
 
 NUM_REFLECTIONS = 3
 
@@ -29,14 +30,48 @@ def print_time():
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Run AI scientist experiments")
     parser.add_argument(
+        "--skip-run-experiment",
+        action="store_true",
+        help="Skip experiment",
+    )
+
+    parser.add_argument(
         "--skip-idea-generation",
         action="store_true",
         help="Skip idea generation and load existing ideas",
     )
     parser.add_argument(
+        "--exist-idea-file",
+        type=str,
+        help="Skip idea generation and use this exist ideas for experiment.",
+    )
+
+    parser.add_argument(
         "--skip-novelty-check",
         action="store_true",
         help="Skip novelty check and use existing ideas",
+    )
+    parser.add_argument(
+        "--skip-write-paper",
+        action="store_true",
+        help="Skip writeup generation",
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="debug only run 1 idea",
+    )
+    parser.add_argument(
+        "--topk_for_experiment",
+        type=int,
+        default=3,
+        help="Number of parallel processes to run. 0 for sequential execution.",
+    )
+    parser.add_argument(
+        "--target-exp-idea-file",
+        type=str,
+        help="target idea file for Experiment.",
     )
     # add type of experiment (nanoGPT, Boston, etc.)
     parser.add_argument(
@@ -89,6 +124,17 @@ def parse_arguments():
         choices=["semanticscholar", "openalex"],
         help="Scholar engine to use.",
     )
+    parser.add_argument(
+        "--use-literature",
+        action="store_true",
+        help="Use literature review.",
+    )
+    parser.add_argument(
+        "--lit-review-size",
+        type=int,
+        default=5,
+        help="Number of results to use for literature review.",
+    )
     return parser.parse_args()
 
 
@@ -112,13 +158,13 @@ def check_latex_dependencies():
     for dep in required_dependencies:
         if shutil.which(dep) is None:
             missing_deps.append(dep)
-    
+
     if missing_deps:
         print("Error: Required LaTeX dependencies not found:", file=sys.stderr)
         return False
-    
+
     return True
-    
+
 def worker(
         queue,
         base_dir,
@@ -145,6 +191,8 @@ def worker(
             client_model,
             writeup,
             improvement,
+            write_paper=True,  # Default to True for worker processes
+            engine="semanticscholar",
             log_file=True,
         )
         print(f"Completed idea: {idea['Name']}, Success: {success}")
@@ -160,8 +208,11 @@ def do_idea(
         client_model,
         writeup,
         improvement,
+        write_paper=True,  # Default to True
+        engine="semanticscholar",  # Add engine parameter with default
         log_file=False,
-):
+        ):
+    print("do_idea | idea info:", idea)
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     idea_name = f"{timestamp}_{idea['Name']}"
@@ -169,6 +220,11 @@ def do_idea(
     assert not osp.exists(folder_name), f"Folder {folder_name} already exists."
     destination_dir = folder_name
     shutil.copytree(base_dir, destination_dir, dirs_exist_ok=True)
+    # save current idea at destination_dir
+    save_json_data_to_file(
+        idea,
+        osp.join(destination_dir, "current_idea.json"),
+    )
     with open(osp.join(base_dir, "run_0", "final_info.json"), "r") as f:
         baseline_results = json.load(f)
     # Check if baseline_results is a dictionary before extracting means
@@ -198,14 +254,17 @@ def do_idea(
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
-        if model == "deepseek-coder-v2-0724":
-            main_model = Model("deepseek/deepseek-coder")
-        elif model == "deepseek-reasoner":
-            main_model = Model("deepseek/deepseek-reasoner")
-        elif model == "llama3.1-405b":
-            main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
-        else:
-            main_model = Model(model)
+        main_model = Model('deepseek/deepseek-chat')
+        # if model == 'deepseek-chat':
+            # main_model = Model('deepseek/deepseek-chat')
+        # if model == "deepseek-coder-v2-0724":
+        #     main_model = Model("deepseek/deepseek-coder")
+        # elif model == "deepseek-reasoner":
+        #     main_model = Model("deepseek/deepseek-reasoner")
+        # elif model == "llama3.1-405b":
+        #     main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        # else:
+        #     main_model = Model(model)
         coder = Coder.create(
             main_model=main_model,
             fnames=fnames,
@@ -229,84 +288,88 @@ def do_idea(
             return False
 
         print_time()
-        print(f"*Starting Writeup*")
-        ## PERFORM WRITEUP
-        if writeup == "latex":
-            writeup_file = osp.join(folder_name, "latex", "template.tex")
-            fnames = [exp_file, writeup_file, notes]
-            if model == "deepseek-coder-v2-0724":
-                main_model = Model("deepseek/deepseek-coder")
-            elif model == "deepseek-reasoner":
-                main_model = Model("deepseek/deepseek-reasoner")
-            elif model == "llama3.1-405b":
-                main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        if write_paper:
+            print(f"*Starting Writeup*")
+            ## PERFORM WRITEUP
+            if writeup == "latex":
+                writeup_file = osp.join(folder_name, "latex", "template.tex")
+                # exp_file: experiments.py
+                # notes:记录的实验结果，以及plot的结果
+                fnames = [exp_file, writeup_file, notes]
+                main_model = Model('deepseek/deepseek-chat')
+                # if model == "deepseek-coder-v2-0724":
+                #     main_model = Model("deepseek/deepseek-coder")
+                # elif model == "deepseek-reasoner":
+                #     main_model = Model("deepseek/deepseek-reasoner")
+                # elif model == "llama3.1-405b":
+                #     main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+                # else:
+                #     main_model = Model(model)
+                coder = Coder.create(
+                    main_model=main_model,
+                    fnames=fnames,
+                    io=io,
+                    stream=False,
+                    use_git=False,
+                    edit_format="diff",
+                )
+                try:
+                    perform_writeup(idea, folder_name, coder, client, client_model, engine=engine)
+                except Exception as e:
+                    print(f"Failed to perform writeup: {e}")
+                    return False
+                print("Done writeup")
             else:
-                main_model = Model(model)
-            coder = Coder.create(
-                main_model=main_model,
-                fnames=fnames,
-                io=io,
-                stream=False,
-                use_git=False,
-                edit_format="diff",
-            )
-            try:
-                perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
-            except Exception as e:
-                print(f"Failed to perform writeup: {e}")
-                return False
-            print("Done writeup")
-        else:
-            raise ValueError(f"Writeup format {writeup} not supported.")
+                raise ValueError(f"Writeup format {writeup} not supported.")
 
-        print_time()
-        print(f"*Starting Review*")
-        ## REVIEW PAPER
-        if writeup == "latex":
-            try:
-                paper_text = load_paper(f"{folder_name}/{idea['Name']}.pdf")
-                review = perform_review(
-                    paper_text,
-                    model="gpt-4o-2024-05-13",
-                    client=openai.OpenAI(),
-                    num_reflections=5,
-                    num_fs_examples=1,
-                    num_reviews_ensemble=5,
-                    temperature=0.1,
-                )
-                # Store the review in separate review.txt file
-                with open(osp.join(folder_name, "review.txt"), "w") as f:
-                    f.write(json.dumps(review, indent=4))
-            except Exception as e:
-                print(f"Failed to perform review: {e}")
-                return False
-
-        ## IMPROVE WRITEUP
-        if writeup == "latex" and improvement:
             print_time()
-            print(f"*Starting Improvement*")
-            try:
-                perform_improvement(review, coder)
-                generate_latex(
-                    coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf"
-                )
-                paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
-                review = perform_review(
-                    paper_text,
-                    model="gpt-4o-2024-05-13",
-                    client=openai.OpenAI(),
-                    num_reflections=5,
-                    num_fs_examples=1,
-                    num_reviews_ensemble=5,
-                    temperature=0.1,
-                )
-                # Store the review in separate review.txt file
-                with open(osp.join(folder_name, "review_improved.txt"), "w") as f:
-                    f.write(json.dumps(review))
-            except Exception as e:
-                print(f"Failed to perform improvement: {e}")
-                return False
-        return True
+            print(f"*Starting Review*")
+            ## REVIEW PAPER
+            if writeup == "latex":
+                try:
+                    paper_text = load_paper(f"{folder_name}/{idea['Name']}.pdf")
+                    review = perform_review(
+                        paper_text,
+                        model="gpt-4o-2024-05-13",
+                        client=openai.OpenAI(),
+                        num_reflections=5,
+                        num_fs_examples=1,
+                        num_reviews_ensemble=5,
+                        temperature=0.1,
+                    )
+                    # Store the review in separate review.txt file
+                    with open(osp.join(folder_name, "review.txt"), "w") as f:
+                        f.write(json.dumps(review, indent=4))
+                except Exception as e:
+                    print(f"Failed to perform review: {e}")
+                    return False
+
+            ## IMPROVE WRITEUP
+            if writeup == "latex" and improvement:
+                print_time()
+                print(f"*Starting Improvement*")
+                try:
+                    perform_improvement(review, coder)
+                    generate_latex(
+                        coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf"
+                    )
+                    paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
+                    review = perform_review(
+                        paper_text,
+                        model="gpt-4o-2024-05-13",
+                        client=openai.OpenAI(),
+                        num_reflections=5,
+                        num_fs_examples=1,
+                        num_reviews_ensemble=5,
+                        temperature=0.1,
+                    )
+                    # Store the review in separate review.txt file
+                    with open(osp.join(folder_name, "review_improved.txt"), "w") as f:
+                        f.write(json.dumps(review))
+                except Exception as e:
+                    print(f"Failed to perform improvement: {e}")
+                    return False
+            return True
     except Exception as e:
         print(f"Failed to evaluate idea {idea_name}: {str(e)}")
         return False
@@ -340,14 +403,24 @@ if __name__ == "__main__":
 
     base_dir = osp.join("templates", args.experiment)
     results_dir = osp.join("results", args.experiment)
-    ideas = generate_ideas(
-        base_dir,
-        client=client,
-        model=client_model,
-        skip_generation=args.skip_idea_generation,
-        max_num_generations=args.num_ideas,
-        num_reflections=NUM_REFLECTIONS,
-    )
+
+    print("args.use_literature:", args.use_literature)
+    print("args.lit_review_size:", args.lit_review_size)
+    if args.target_exp_idea_file:
+        ideas = load_json_from_file(args.target_exp_idea_file)
+        print(f"target_exp_idea_file load {len(ideas)} ideas")
+    else:
+        ideas = generate_ideas(
+            base_dir,
+            client=client,
+            model=client_model,
+            skip_generation=args.skip_idea_generation,
+            exist_idea_file=args.exist_idea_file,
+            max_num_generations=args.num_ideas,
+            num_reflections=NUM_REFLECTIONS,
+            use_literature=args.use_literature,
+            lit_review_size=args.lit_review_size,
+        )
     if not args.skip_novelty_check:
         ideas = check_idea_novelty(
             ideas,
@@ -357,64 +430,75 @@ if __name__ == "__main__":
             engine=args.engine,
         )
 
-    with open(osp.join(base_dir, "ideas.json"), "w") as f:
-        json.dump(ideas, f, indent=4)
-
     novel_ideas = [idea for idea in ideas if idea["novel"]]
     # novel_ideas = list(reversed(novel_ideas))
 
-    if args.parallel > 0:
-        print(f"Running {args.parallel} parallel processes")
-        queue = multiprocessing.Queue()
-        for idea in novel_ideas:
-            queue.put(idea)
+    if args.debug:
+        novel_ideas = novel_ideas[:1]
 
-        processes = []
-        for i in range(args.parallel):
-            gpu_id = available_gpus[i % len(available_gpus)]
-            p = multiprocessing.Process(
-                target=worker,
-                args=(
-                    queue,
-                    base_dir,
-                    results_dir,
-                    args.model,
-                    client,
-                    client_model,
-                    args.writeup,
-                    args.improvement,
-                    gpu_id,
-                ),
-            )
-            p.start()
-            time.sleep(150)
-            processes.append(p)
+    print(f"Running {len(novel_ideas)} novel ideas")
+    # rank and select topk idea according to Interestingness and Feasibility(th>=0.8) score
+    novel_ideas =[_ for _ in novel_ideas if _["Feasibility"] >= 0.8]
+    novel_ideas.sort(key=lambda x: x["Interestingness"] + x["Feasibility"], reverse=True)
+    novel_ideas = novel_ideas[:args.topk_for_experiment]
 
-        # Signal workers to exit
-        for _ in range(args.parallel):
-            queue.put(None)
+    print(f"Running {len(novel_ideas)} novel ideas")
 
-        for p in processes:
-            p.join()
+    if not args.skip_run_experiment:
+        if args.parallel > 0:
+            print(f"Running {args.parallel} parallel processes")
+            queue = multiprocessing.Queue()
+            for idea in novel_ideas:
+                queue.put(idea)
 
-        print("All parallel processes completed.")
-    else:
-        for idea in novel_ideas:
-            print(f"Processing idea: {idea['Name']}")
-            try:
-                success = do_idea(
-                    base_dir,
-                    results_dir,
-                    idea,
-                    args.model,
-                    client,
-                    client_model,
-                    args.writeup,
-                    args.improvement,
+            processes = []
+            for i in range(args.parallel):
+                gpu_id = available_gpus[i % len(available_gpus)]
+                p = multiprocessing.Process(
+                    target=worker,
+                    args=(
+                        queue,
+                        base_dir,
+                        results_dir,
+                        args.model,
+                        client,
+                        client_model,
+                        args.writeup,
+                        args.improvement,
+                        gpu_id,
+                    ),
                 )
-                print(f"Completed idea: {idea['Name']}, Success: {success}")
-            except Exception as e:
-                print(f"Failed to evaluate idea {idea['Name']}: {str(e)}")
-                import traceback
-                print(traceback.format_exc())
+                p.start()
+                time.sleep(150)
+                processes.append(p)
+
+            # Signal workers to exit
+            for _ in range(args.parallel):
+                queue.put(None)
+
+            for p in processes:
+                p.join()
+
+            print("All parallel processes completed.")
+        else:
+            for idea in novel_ideas:
+                print(f"Processing idea: {idea['Name']}")
+                try:
+                    success = do_idea(
+                        base_dir,
+                        results_dir,
+                        idea,
+                        args.model,
+                        client,
+                        client_model,
+                        args.writeup,
+                        args.improvement,
+                        not args.skip_write_paper,  # write_paper should be True when skip_write_paper is False
+                        engine=args.engine,
+                    )
+                    print(f"Completed idea: {idea['Name']}, Success: {success}")
+                except Exception as e:
+                    print(f"Failed to evaluate idea {idea['Name']}: {str(e)}")
+                    import traceback
+                    print(traceback.format_exc())
     print("All ideas evaluated.")

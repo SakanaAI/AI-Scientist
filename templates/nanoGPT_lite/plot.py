@@ -26,20 +26,23 @@ for folder in folders:
                     run_info[dataset]["iters"] = [info["iter"] for info in results_dict[k]]
                     val_losses.append([info["val/loss"] for info in results_dict[k]])
                     train_losses.append([info["train/loss"] for info in results_dict[k]])
-                mean_val_losses = np.mean(val_losses, axis=0)
-                mean_train_losses = np.mean(train_losses, axis=0)
+                
                 if len(val_losses) > 0:
+                    mean_val_losses = np.mean(val_losses, axis=0)
+                    mean_train_losses = np.mean(train_losses, axis=0)
                     sterr_val_losses = np.std(val_losses, axis=0) / np.sqrt(len(val_losses))
                     stderr_train_losses = np.std(train_losses, axis=0) / np.sqrt(len(train_losses))
                 else:
-                    sterr_val_losses = np.zeros_like(mean_val_losses)
-                    stderr_train_losses = np.zeros_like(mean_train_losses)
+                    # Handle empty arrays gracefully
+                    mean_val_losses = np.array([])
+                    mean_train_losses = np.array([])
+                    sterr_val_losses = np.array([])
+                    stderr_train_losses = np.array([])
                 run_info[dataset]["val_loss"] = mean_val_losses
                 run_info[dataset]["train_loss"] = mean_train_losses
                 run_info[dataset]["val_loss_sterr"] = sterr_val_losses
                 run_info[dataset]["train_loss_sterr"] = stderr_train_losses
         results_info[folder] = run_info
-
 # CREATE LEGEND -- ADD RUNS HERE THAT WILL BE PLOTTED
 labels = {
     "run_0": "Baselines",

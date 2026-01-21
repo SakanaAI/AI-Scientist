@@ -20,7 +20,7 @@ We provide all runs and data from our paper [here](https://drive.google.com/driv
 1. [DualScale Diffusion: Adaptive Feature Balancing for Low-Dimensional Generative Models](https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/adaptive_dual_scale_denoising.pdf)
 2. [Multi-scale Grid Noise Adaptation: Enhancing Diffusion Models For Low-dimensional Data](https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/grid_based_noise_adaptation.pdf)
 3. [GAN-Enhanced Diffusion: Boosting Sample Quality and Diversity](https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/gan_diffusion.pdf)
-4. [DualDiff: Enhancing Mode Capture in Low-dimensional Diffusion Models via Dual-expert Denoising](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/dual_expert_denoiser.pdf) 
+4. [DualDiff: Enhancing Mode Capture in Low-dimensional Diffusion Models via Dual-expert Denoising](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/dual_expert_denoiser.pdf)
 5. [StyleFusion: Adaptive Multi-style Generation in Character-Level Language Models](https://github.com/SakanaAI/AI-Scientist/blob/main/example_papers/multi_style_adapter.pdf)
 6. [Adaptive Learning Rates for Transformers via Q-Learning](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/rl_lr_adaptation.pdf)
 7. [Unlocking Grokking: A Comparative Study of Weight Initialization Strategies in Transformer Models](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/weight_initialization_grokking.pdf)
@@ -28,7 +28,7 @@ We provide all runs and data from our paper [here](https://drive.google.com/driv
 9. [Grokking Through Compression: Unveiling Sudden Generalization via Minimal Description Length](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/mdl_grokking_correlation.pdf)
 10. [Accelerating Mathematical Insight: Boosting Grokking Through Strategic Data Augmentation](https://github.com/SakanaAI/AI-Scientist/tree/main/example_papers/data_augmentation_grokking.pdf)
 
-> **Note:**  
+> **Note:**
 > **Caution!** This codebase will execute LLM-written code. There are various risks and challenges associated with this autonomy, including the use of potentially dangerous packages, web access, and potential spawning of processes. Use at your own discretion. Please make sure to [containerize](#containerization) and restrict web access appropriately.
 
 <p align="center">
@@ -232,6 +232,39 @@ This section provides instructions for setting up each of the three templates us
    python plot.py
    ```
 
+## Experiment1
+```
+python launch_scientist_exp1.py --model "deepseek/deepseek-chat" --experiment nanoGPT --use-literature --review-by pengsong
+python launch_scientist_exp1.py --model "deepseek/deepseek-chat" --experiment nanoGPT --use-literature --review-by guowei
+python launch_scientist_exp1.py --model "deepseek/deepseek-chat" --experiment grokking --use-literature --review-by pengsong
+python launch_scientist_exp1.py --model "deepseek/deepseek-chat" --experiment grokking --use-literature --review-by guowei
+python launch_scientist_exp1.py --model "deepseek/deepseek-chat" --experiment 2d_diffusion --use-literature --review-by pengsong
+python launch_scientist_exp1.py --model "deepseek/deepseek-chat" --experiment 2d_diffusion --use-literature --review-by guowei
+
+```
+## Experiment2_v2
+```
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title adaptive_dual_scale_denoising --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title data_augmentation_grokking --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title dual_expert_denoiser --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title gan_diffusion --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title grid_based_noise_adaptation --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title layerwise_lr_grokking --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title mdl_grokking_correlation --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title multi_style_adapter --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title rl_lr_adaptation --improvement --example-papers-dir example_papers_for_exp2
+python launch_scientist_exp2_v2.py --model "deepseek/deepseek-chat" --old-paper-title weight_initialization_grokking --improvement --example-papers-dir example_papers_for_exp2
+
+```
+
+## Experiment2
+```
+python launch_scientist_exp2.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 10 --use-literature --run-idea-dedup
+python launch_scientist_exp2.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 10 --use-literature --run-idea-dedup
+python launch_scientist_exp2.py --model "deepseek/deepseek-chat" --experiment 2d_diffusion --num-ideas 10 --use-literature --run-idea-dedup
+```
+
+
 ## Run AI Scientist Paper Generation Experiments
 
 **Note:** Please ensure the setup steps above are completed before running these experiments.
@@ -239,6 +272,24 @@ This section provides instructions for setting up each of the three templates us
 ```bash
 conda activate ai_scientist
 # Run the paper generation.
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 50 --use-literature --skip-idea-generation --exist-idea-file templates/nanoGPT/final_dedup_proposals.json --skip-novelty-check
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment grokking --num-ideas 50 --use-literature --skip-idea-generation --exist-idea-file templates/grokking/final_dedup_proposals.json --skip-novelty-check
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment 2d_diffusion --num-ideas 50 --use-literature --skip-idea-generation --exist-idea-file templates/2d_diffusion/final_dedup_proposals.json --skip-novelty-check
+
+
+
+
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 50 --use-literature --skip-run-experiment
+
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 50 --use-literature --skip-idea-generation --target-exp-idea-file templates/nanoGPT/exp_idea_0.json --skip-novelty-check
+
+
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 50 --use-literature --skip-idea-generation --exist-idea-file templates/nanoGPT/final_dedup_proposals.json --skip-novelty-check
+
+python launch_scientist.py --model "deepseek/deepseek-chat" --experiment nanoGPT --num-ideas 50 --use-literature --skip-idea-generation --skip-novelty-check --debug
+
+python launch_scientist.py --model "google/gemini-2.5-flash-preview-05-20" --experiment nanoGPT --num-ideas 2 --use-literature
+python launch_scientist.py --model "azure/gpt-4o" --experiment nanoGPT --num-ideas 2 --use-literature
 python launch_scientist.py --model "gpt-4o-2024-05-13" --experiment nanoGPT_lite --num-ideas 2
 python launch_scientist.py --model "claude-3-5-sonnet-20241022" --experiment nanoGPT_lite --num-ideas 2
 ```

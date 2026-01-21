@@ -48,7 +48,7 @@ def run_experiment(folder_name, run_num, timeout=7200):
 
         if result.stderr:
             print(result.stderr, file=sys.stderr)
-
+        # 如果运行失败，返回失败信息
         if result.returncode != 0:
             print(f"Run {run_num} failed with return code {result.returncode}")
             if osp.exists(osp.join(cwd, f"run_{run_num}")):
@@ -58,6 +58,7 @@ def run_experiment(folder_name, run_num, timeout=7200):
             if len(stderr_output) > MAX_STDERR_OUTPUT:
                 stderr_output = "..." + stderr_output[-MAX_STDERR_OUTPUT:]
             next_prompt = f"Run failed with the following error {stderr_output}"
+        # 如果运行成功，记录实验结果，决定要不要继续完成todo list上的事情，同时更新notes.txt
         else:
             with open(osp.join(cwd, f"run_{run_num}", "final_info.json"), "r") as f:
                 results = json.load(f)
@@ -123,16 +124,22 @@ def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
         max_runs=MAX_RUNS,
         baseline_results=baseline_results,
     )
+    # TODO：检查为什么这里需要跑多次结果呀？（同一个实验实现多次代码？？）
+    # 答案：最开始coder_prompt会又一个plan list of experiments to run
     while run < MAX_RUNS + 1:
         if current_iter >= MAX_ITERS:
             print("Max iterations reached")
             break
+        # aider通过next_prompt指令去修改代码
         coder_out = coder.run(next_prompt)
         print(coder_out)
+        # TODO：检查为啥ALL_COMPLETED会导致跳出循环，提示词没写这个
         if "ALL_COMPLETED" in coder_out:
             break
+        # 运行一下，看看会有什么结果，如果报错了会提供报错信息，如果成功了会做实验并跑出实验结果
         return_code, next_prompt = run_experiment(folder_name, run)
         if return_code == 0:
+            # 如果运行成功了，run才+1
             run += 1
             current_iter = 0
         current_iter += 1
@@ -141,8 +148,10 @@ def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
         return False
 
     current_iter = 0
+    # TODO：检查这里为什么没有给plot.py具体的context
+    # 答案：[exp_file, vis_file, notes]这些都在io中，可能这些信息在更新plot.py的时候会用到
     next_prompt = """
-Great job! Please modify `plot.py` to generate the most relevant plots for the final writeup. 
+Great job! Please modify `plot.py` to generate the most relevant plots for the final writeup.
 
 In particular, be sure to fill in the "labels" dictionary with the correct names for each run that you want to plot.
 
@@ -156,6 +165,7 @@ We will be running the command `python plot.py` to generate the plots.
         current_iter += 1
         if return_code == 0 or current_iter >= MAX_ITERS:
             break
+    # 记录画图的信息，用于后续pdf结果的生成
     next_prompt = """
 Please modify `notes.txt` with a description of what each plot shows along with the filename of the figure. Please do so in-depth.
 

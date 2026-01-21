@@ -1,7 +1,7 @@
 import json
 import os
 import re
-
+from openai import AzureOpenAI
 import anthropic
 import backoff
 import openai
@@ -14,6 +14,7 @@ AVAILABLE_LLMS = [
     # Anthropic models
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
+    "claude-sonnet-4-20250514",
     # OpenAI models
     "gpt-4o-mini",
     "gpt-4o-mini-2024-07-18",
@@ -48,6 +49,7 @@ AVAILABLE_LLMS = [
     "vertex_ai/claude-3-sonnet@20240229",
     "vertex_ai/claude-3-haiku@20240307",
     # DeepSeek models
+    "deepseek/deepseek-chat",
     "deepseek-chat",
     "deepseek-coder",
     "deepseek-reasoner",
@@ -59,6 +61,9 @@ AVAILABLE_LLMS = [
     "gemini-2.0-flash-thinking-exp-01-21",
     "gemini-2.5-pro-preview-03-25",
     "gemini-2.5-pro-exp-03-25",
+    "openrouter/google/gemini-2.5-flash-preview-05-20",
+    "azure/gpt-4o-mini",
+    "azure/gpt-4o"
 ]
 
 
@@ -317,7 +322,10 @@ def extract_json_between_markers(llm_output):
 def create_client(model):
     if model.startswith("claude-"):
         print(f"Using Anthropic API with model {model}.")
-        return anthropic.Anthropic(), model
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
+        return anthropic.Anthropic(api_key=api_key), model
     elif model.startswith("bedrock") and "claude" in model:
         client_model = model.split("/")[-1]
         print(f"Using Amazon Bedrock with model {client_model}.")
@@ -326,7 +334,7 @@ def create_client(model):
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
-    elif 'gpt' in model or "o1" in model or "o3" in model:
+    elif 'azure' not in model and ('gpt' in model or "o1" in model or "o3" in model or "o4" in model):
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
     elif model in ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]:
@@ -335,17 +343,40 @@ def create_client(model):
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com"
         ), model
+    elif model in ['deepseek/deepseek-chat', 'deepseek/deepseek-coder']:
+        return openai.OpenAI(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com"
+        ), model.replace('deepseek/', '')
     elif model == "llama3.1-405b":
         print(f"Using OpenAI API with {model}.")
         return openai.OpenAI(
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1"
         ), "meta-llama/llama-3.1-405b-instruct"
-    elif "gemini" in model:
+    elif "gemini" in model and 'openrouter' in model:
         print(f"Using OpenAI API with {model}.")
         return openai.OpenAI(
-            api_key=os.environ["GEMINI_API_KEY"],
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        ), model
+            # api_key=os.environ["GEMINI_API_KEY"],
+            # base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url="https://openrouter.ai/api/v1"
+        ), model.replace('openrouter/', '') # openrouter/google/palm-2-chat-bison
+    elif "azure" in model:
+        print(f"Using Azure GPT4O with {model}.")
+        if model == "azure/gpt-4o-mini":
+            return AzureOpenAI(
+                    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+                    api_key=os.environ["AZURE_OPENAI_KEY"],
+                    api_version=os.environ["AZURE_OPENAI_API_VERSION"]
+                ), "gpt-4o-mini"
+        elif model == 'azure/gpt-4o':
+            return AzureOpenAI(
+                    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+                    api_key=os.environ["AZURE_OPENAI_KEY"],
+                    api_version=os.environ["AZURE_OPENAI_API_VERSION"]
+                ), "gpt-4o"
+        else:
+            return ValueError(f"Model {model} not supported.")
     else:
         raise ValueError(f"Model {model} not supported.")
