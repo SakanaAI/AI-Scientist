@@ -21,6 +21,8 @@ For reference, the baseline results are as follows:
 
 {baseline_results}
 
+After coding each change, ensure your code writes final_info.json directly into the run_i subfolder.
+
 After you complete each change, we will run the command `python experiment.py --out_dir=run_i' where i is the run number and evaluate the results.
 YOUR PROPOSED CHANGE MUST USE THIS COMMAND FORMAT, DO NOT ADD ADDITIONAL COMMAND LINE ARGS.
 You can then implement the next thing on your list."""
@@ -59,7 +61,20 @@ def run_experiment(folder_name, run_num, timeout=7200):
                 stderr_output = "..." + stderr_output[-MAX_STDERR_OUTPUT:]
             next_prompt = f"Run failed with the following error {stderr_output}"
         else:
-            with open(osp.join(cwd, f"run_{run_num}", "final_info.json"), "r") as f:
+            final_info_path = osp.join(cwd, f"run_{run_num}", "final_info.json")
+            if not osp.exists(final_info_path):
+                err_msg = f"Run {run_num} succeeded but final_info.json is missing."
+                print(err_msg, file=sys.stderr)
+                shutil.rmtree(osp.join(cwd, f"run_{run_num}"))
+                next_prompt = f"""{err_msg}
+Your experiment script did not produce final_info.json in the run folder.
+
+Please update your experiment.py to always write final_info.json into the out_dir with the required structure.
+
+After fixing, we will rerun with: python experiment.py --out_dir=run_{run_num}
+"""
+                return 1, next_prompt
+            with open(final_info_path, "r") as f:
                 results = json.load(f)
             results = {k: v["means"] for k, v in results.items()}
 
@@ -70,6 +85,8 @@ Decide if you need to re-plan your experiments given the result (you often will 
 
 Someone else will be using `notes.txt` to perform a writeup on this in the future.
 Please include *all* relevant information for the writeup on Run {run_num}, including an experiment description and the run number. Be as verbose as necessary.
+
+After coding each change, ensure your code writes final_info.json directly into the run_i subfolder.
 
 Then, implement the next thing on your list.
 We will then run the command `python experiment.py --out_dir=run_{run_num + 1}'.
