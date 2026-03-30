@@ -14,25 +14,63 @@ AVAILABLE_LLMS = [
     # Anthropic models
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
-    # OpenAI models
-    "gpt-4o-mini",
-    "gpt-4o-mini-2024-07-18",
+    # OpenAI GPT-5.4 models
+    "gpt-5.4",
+    "gpt-5.4-2026-03-05",
+    "gpt-5.4-pro",
+    "gpt-5.4-mini",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano",
+    "gpt-5.4-nano-2026-03-17",
+    # OpenAI GPT-5.2 models
+    "gpt-5.2",
+    "gpt-5.2-2025-12-11",
+    "gpt-5.2-pro",
+    "gpt-5.2-chat-latest",
+    # OpenAI GPT-5.1 models
+    "gpt-5.1",
+    "gpt-5.1-chat-latest",
+    # OpenAI GPT-5 models
+    "gpt-5",
+    "gpt-5-2025-08-07",
+    "gpt-5-pro",
+    "gpt-5-mini",
+    "gpt-5-mini-2025-08-07",
+    "gpt-5-nano",
+    "gpt-5-chat-latest",
+    # OpenAI GPT-4 models
     "gpt-4o",
     "gpt-4o-2024-05-13",
     "gpt-4o-2024-08-06",
+    "gpt-4o-mini",
+    "gpt-4o-mini-2024-07-18",
+    "chatgpt-4o-latest",
+    "gpt-4.5-preview",
     "gpt-4.1",
     "gpt-4.1-2025-04-14",
     "gpt-4.1-mini",
     "gpt-4.1-mini-2025-04-14",
     "gpt-4.1-nano",
     "gpt-4.1-nano-2025-04-14",
+    "gpt-4-turbo",
+    "gpt-4-turbo-2024-04-09",
+    "gpt-4",
+    "gpt-4-0613",
+    "gpt-3.5-turbo",
+    # OpenAI o-series reasoning models
+    "o4-mini",
+    "o4-mini-2025-04-16",
+    "o3",
+    "o3-pro",
+    "o3-pro-2025-06-10",
+    "o3-mini",
+    "o3-mini-2025-01-31",
     "o1",
     "o1-2024-12-17",
+    "o1-pro",
     "o1-preview-2024-09-12",
     "o1-mini",
     "o1-mini-2024-09-12",
-    "o3-mini",
-    "o3-mini-2025-01-31",
     # OpenRouter models
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -79,18 +117,22 @@ def get_batch_responses_from_llm(
 
     if 'gpt' in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
+        kwargs = dict(
             model=model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
             n=n_responses,
             stop=None,
             seed=0,
         )
+        if "gpt-5" in model:
+            kwargs["max_completion_tokens"] = MAX_NUM_TOKENS
+        else:
+            kwargs["max_tokens"] = MAX_NUM_TOKENS
+        response = client.chat.completions.create(**kwargs)
         content = [r.message.content for r in response.choices]
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
@@ -185,21 +227,25 @@ def get_response_from_llm(
         ]
     elif 'gpt' in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
+        kwargs = dict(
             model=model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
             n=1,
             stop=None,
             seed=0,
         )
+        if "gpt-5" in model:
+            kwargs["max_completion_tokens"] = MAX_NUM_TOKENS
+        else:
+            kwargs["max_tokens"] = MAX_NUM_TOKENS
+        response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif "o1" in model or "o3" in model:
+    elif "o1" in model or "o3" in model or "o4" in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
             model=model,
@@ -326,7 +372,7 @@ def create_client(model):
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
-    elif 'gpt' in model or "o1" in model or "o3" in model:
+    elif 'gpt' in model or "o1" in model or "o3" in model or "o4" in model:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
     elif model in ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]:
