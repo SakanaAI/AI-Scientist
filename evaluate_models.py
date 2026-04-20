@@ -90,7 +90,10 @@ def make_recommendations(all_results):
     recommendations = {
         "idea": {"model": None, "score": -1},
         "experiment": {"model": None, "score": -1},
-        "writeup": {"model": None, "score": -1}
+        "writeup": {"model": None, "score": -1},
+        "fast": {"model": None, "score": 999}, # Best is lowest time
+        "fix": {"model": None, "score": -1},
+        "architect": {"model": None, "score": -1}
     }
 
     # Simple heuristic scoring:
@@ -105,16 +108,26 @@ def make_recommendations(all_results):
 
         # Experiment (Coding) Score
         if "coding" in results and not results["coding"].get("error"):
-            # Here we could use a judge to evaluate code quality, but for now we assume success
             score = 10
             if score > recommendations["experiment"]["score"]:
                 recommendations["experiment"] = {"model": model, "score": score}
+
+            # Fast model (lowest elapsed time)
+            elapsed = results["coding"]["elapsed"]
+            if elapsed < recommendations["fast"]["score"]:
+                recommendations["fast"] = {"model": model, "score": elapsed}
 
         # Writeup Score
         if "writeup" in results and not results["writeup"].get("error"):
             score = 10 if results["writeup"]["valid_json"] else 2
             if score > recommendations["writeup"]["score"]:
                 recommendations["writeup"] = {"model": model, "score": score}
+
+        # Architect (Heuristic: usually the same as experiment or writeup)
+        # In a real scenario, we'd have a specific foundation check task
+        score = recommendations["experiment"]["score"]
+        if score > recommendations["architect"]["score"]:
+            recommendations["architect"] = {"model": model, "score": score}
 
     for phase, rec in recommendations.items():
         print(f"Recommended for {phase}: {rec['model']} (Score: {rec['score']})")

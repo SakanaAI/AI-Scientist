@@ -67,6 +67,27 @@ def parse_arguments():
         help="Model to use for experiments.",
     )
     parser.add_argument(
+        "--fast-model",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LLMS,
+        help="Fast model for Level 1 implementation.",
+    )
+    parser.add_argument(
+        "--fix-model",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LLMS,
+        help="Model for Level 2 linear fixes.",
+    )
+    parser.add_argument(
+        "--architect-model",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LLMS,
+        help="Architect model for Level 4 foundation checks.",
+    )
+    parser.add_argument(
         "--writeup-model",
         type=str,
         default=None,
@@ -221,6 +242,9 @@ def do_idea(
         "experiment": create_client(models["experiment"]),
         "writeup": create_client(models["writeup"]),
         "review": create_client(models["review"]),
+        "fast": create_client(models["fast"]),
+        "fix": create_client(models["fix"]),
+        "architect": create_client(models["architect"]),
     }
     try:
         print_time()
@@ -230,28 +254,36 @@ def do_idea(
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
-        experiment_model = models["experiment"]
-        if experiment_model == "deepseek-coder-v2-0724":
-            main_model = Model("deepseek/deepseek-coder")
-        elif experiment_model == "deepseek-reasoner":
-            main_model = Model("deepseek/deepseek-reasoner")
-        elif experiment_model == "llama3.1-405b":
-            main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
-        else:
-            main_model = Model(experiment_model)
-        coder = Coder.create(
-            main_model=main_model,
-            fnames=fnames,
-            io=io,
-            stream=False,
-            use_git=False,
-            edit_format="diff",
-        )
+
+        def create_coder(model_name):
+            if model_name == "deepseek-coder-v2-0724":
+                m = Model("deepseek/deepseek-coder")
+            elif model_name == "deepseek-reasoner":
+                m = Model("deepseek/deepseek-reasoner")
+            elif model_name == "llama3.1-405b":
+                m = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+            else:
+                m = Model(model_name)
+            return Coder.create(
+                main_model=m,
+                fnames=fnames,
+                io=io,
+                stream=False,
+                use_git=False,
+                edit_format="diff",
+            )
+
+        coders = {
+            "experiment": create_coder(models["experiment"]),
+            "fast": create_coder(models["fast"]),
+            "fix": create_coder(models["fix"]),
+            "architect": create_coder(models["architect"]),
+        }
 
         print_time()
         print(f"*Starting Experiments*")
         try:
-            success = perform_experiments(idea, folder_name, coder, baseline_results)
+            success = perform_experiments(idea, folder_name, coders, baseline_results)
         except Exception as e:
             print(f"Error during experiments: {e}")
             print(f"Experiments failed for idea {idea_name}")
@@ -378,6 +410,9 @@ if __name__ == "__main__":
         "experiment": args.experiment_model or args.model,
         "writeup": args.writeup_model or args.model,
         "review": args.review_model,
+        "fast": args.fast_model or args.experiment_model or args.model,
+        "fix": args.fix_model or args.experiment_model or args.model,
+        "architect": args.architect_model or args.experiment_model or args.model,
     }
 
     # Create clients for each phase
@@ -386,6 +421,9 @@ if __name__ == "__main__":
         "experiment": create_client(models["experiment"]),
         "writeup": create_client(models["writeup"]),
         "review": create_client(models["review"]),
+        "fast": create_client(models["fast"]),
+        "fix": create_client(models["fix"]),
+        "architect": create_client(models["architect"]),
     }
 
     base_dir = osp.join("templates", args.experiment)

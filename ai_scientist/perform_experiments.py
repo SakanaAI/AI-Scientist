@@ -113,25 +113,84 @@ def run_plotting(folder_name, timeout=600):
 
 
 # PERFORM EXPERIMENTS
-def perform_experiments(idea, folder_name, coder, baseline_results) -> bool:
+def perform_experiments(idea, folder_name, coders, baseline_results) -> bool:
     ## RUN EXPERIMENT
     current_iter = 0
     run = 1
+
+    # If coders is a single coder (fallback), wrap it
+    if not isinstance(coders, dict):
+        coders = {
+            "experiment": coders,
+            "fast": coders,
+            "fix": coders,
+            "architect": coders
+        }
+
     next_prompt = coder_prompt.format(
         title=idea["Title"],
         idea=idea["Experiment"],
         max_runs=MAX_RUNS,
         baseline_results=baseline_results,
     )
+
     while run < MAX_RUNS + 1:
         if current_iter >= MAX_ITERS:
             print("Max iterations reached")
             break
-        coder_out = coder.run(next_prompt)
-        print(coder_out)
+
+        print(f"--- Level 1: Fast-Path Implementation (Run {run}) ---")
+        coder_out = coders["fast"].run(next_prompt)
         if "ALL_COMPLETED" in coder_out:
+            print("ALL_COMPLETED received.")
             break
+
         return_code, next_prompt = run_experiment(folder_name, run)
+
+        if return_code != 0:
+            print(f"--- Level 2: Linear Fix (Run {run}) ---")
+            # next_prompt contains the error log
+            fix_prompt = f"The previous implementation failed. Error log:\n{next_prompt}\n\nPlease provide a linear fix. Only provide the corrected lines or a minimal diff."
+            coder_out = coders["fix"].run(fix_prompt)
+            return_code, next_prompt = run_experiment(folder_name, run)
+
+            if return_code != 0:
+                print(f"--- Level 3: Targeted Branching (Run {run}) ---")
+                # Level 3: Try a few variations (MCTS-lite)
+                # We'll just try 2 branches for simplicity in this "small model" context
+                best_return_code = 1
+                best_prompt = next_prompt
+
+                original_script = osp.join(folder_name, "experiment.py")
+                with open(original_script, "r") as f:
+                    backup_script = f.read()
+
+                for branch in range(2):
+                    print(f"  Branch {branch + 1}...")
+                    with open(original_script, "w") as f:
+                        f.write(backup_script)
+
+                    branch_prompt = f"Attempt {branch + 1} to fix the following error:\n{next_prompt}\nTry a different approach than the last one."
+                    coders["fix"].run(branch_prompt)
+                    rc, np = run_experiment(folder_name, run)
+                    if rc == 0:
+                        best_return_code = 0
+                        best_prompt = np
+                        break
+
+                return_code = best_return_code
+                next_prompt = best_prompt
+
+                if return_code != 0:
+                    print(f"--- Level 4: Foundation Check (Run {run}) ---")
+                    architect_prompt = f"Original Goal: {idea['Experiment']}. Current Script is failing repeatedly. Error Log: {next_prompt}. Is the foundation fundamentally flawed? Respond 'RESTART' if we should start over, or 'CONTINUE' if we should keep trying to fix it."
+                    decision = coders["architect"].run(architect_prompt)
+                    if "RESTART" in decision:
+                        print("Architect decided to RESTART.")
+                        # Reset the script to baseline if possible or just retry Level 1
+                        # For now, we'll just let it loop back to Level 1 in the next iteration
+                        pass
+
         if return_code == 0:
             run += 1
             current_iter = 0
@@ -151,7 +210,8 @@ Only the runs in the `labels` dictionary will be plotted, so make sure to includ
 We will be running the command `python plot.py` to generate the plots.
 """
     while True:
-        _ = coder.run(next_prompt)
+        # Use main experiment coder for plotting/notes
+        _ = coders["experiment"].run(next_prompt)
         return_code, next_prompt = run_plotting(folder_name)
         current_iter += 1
         if return_code == 0 or current_iter >= MAX_ITERS:
@@ -161,6 +221,6 @@ Please modify `notes.txt` with a description of what each plot shows along with 
 
 Somebody else will be using `notes.txt` to write a report on this in the future.
 """
-    coder.run(next_prompt)
+    coders["experiment"].run(next_prompt)
 
     return True
