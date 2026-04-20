@@ -50,7 +50,35 @@ def parse_arguments():
         type=str,
         default="claude-3-5-sonnet-20240620",
         choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help="Model to use for AI Scientist (default for all phases).",
+    )
+    parser.add_argument(
+        "--idea-model",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LLMS,
+        help="Model to use for idea generation.",
+    )
+    parser.add_argument(
+        "--experiment-model",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LLMS,
+        help="Model to use for experiments.",
+    )
+    parser.add_argument(
+        "--writeup-model",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LLMS,
+        help="Model to use for writeup.",
+    )
+    parser.add_argument(
+        "--review-model",
+        type=str,
+        default="gpt-4o-2024-05-13",
+        choices=AVAILABLE_LLMS,
+        help="Model to use for review.",
     )
     parser.add_argument(
         "--writeup",
@@ -123,12 +151,11 @@ def worker(
         queue,
         base_dir,
         results_dir,
-        model,
-        client,
-        client_model,
+        models,
         writeup,
         improvement,
         gpu_id,
+        engine,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     print(f"Worker {gpu_id} started.")
@@ -140,12 +167,11 @@ def worker(
             base_dir,
             results_dir,
             idea,
-            model,
-            client,
-            client_model,
+            models,
             writeup,
             improvement,
             log_file=True,
+            engine=engine,
         )
         print(f"Completed idea: {idea['Name']}, Success: {success}")
     print(f"Worker {gpu_id} finished.")
@@ -155,12 +181,11 @@ def do_idea(
         base_dir,
         results_dir,
         idea,
-        model,
-        client,
-        client_model,
+        models,
         writeup,
         improvement,
         log_file=False,
+        engine="semanticscholar",
 ):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -190,6 +215,13 @@ def do_idea(
         log = open(log_path, "a")
         sys.stdout = log
         sys.stderr = log
+    # Create clients inside the process
+    clients = {
+        "idea": create_client(models["idea"]),
+        "experiment": create_client(models["experiment"]),
+        "writeup": create_client(models["writeup"]),
+        "review": create_client(models["review"]),
+    }
     try:
         print_time()
         print(f"*Starting idea: {idea_name}*")
@@ -198,14 +230,15 @@ def do_idea(
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
-        if model == "deepseek-coder-v2-0724":
+        experiment_model = models["experiment"]
+        if experiment_model == "deepseek-coder-v2-0724":
             main_model = Model("deepseek/deepseek-coder")
-        elif model == "deepseek-reasoner":
+        elif experiment_model == "deepseek-reasoner":
             main_model = Model("deepseek/deepseek-reasoner")
-        elif model == "llama3.1-405b":
+        elif experiment_model == "llama3.1-405b":
             main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
         else:
-            main_model = Model(model)
+            main_model = Model(experiment_model)
         coder = Coder.create(
             main_model=main_model,
             fnames=fnames,
@@ -234,14 +267,15 @@ def do_idea(
         if writeup == "latex":
             writeup_file = osp.join(folder_name, "latex", "template.tex")
             fnames = [exp_file, writeup_file, notes]
-            if model == "deepseek-coder-v2-0724":
+            writeup_model = models["writeup"]
+            if writeup_model == "deepseek-coder-v2-0724":
                 main_model = Model("deepseek/deepseek-coder")
-            elif model == "deepseek-reasoner":
+            elif writeup_model == "deepseek-reasoner":
                 main_model = Model("deepseek/deepseek-reasoner")
-            elif model == "llama3.1-405b":
+            elif writeup_model == "llama3.1-405b":
                 main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
             else:
-                main_model = Model(model)
+                main_model = Model(writeup_model)
             coder = Coder.create(
                 main_model=main_model,
                 fnames=fnames,
@@ -251,7 +285,8 @@ def do_idea(
                 edit_format="diff",
             )
             try:
-                perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
+                writeup_client, writeup_client_model = clients["writeup"]
+                perform_writeup(idea, folder_name, coder, writeup_client, writeup_client_model, engine=engine)
             except Exception as e:
                 print(f"Failed to perform writeup: {e}")
                 return False
@@ -265,10 +300,11 @@ def do_idea(
         if writeup == "latex":
             try:
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}.pdf")
+                review_client, review_client_model = clients["review"]
                 review = perform_review(
                     paper_text,
-                    model="gpt-4o-2024-05-13",
-                    client=openai.OpenAI(),
+                    model=review_client_model,
+                    client=review_client,
                     num_reflections=5,
                     num_fs_examples=1,
                     num_reviews_ensemble=5,
@@ -291,10 +327,11 @@ def do_idea(
                     coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf"
                 )
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
+                review_client, review_client_model = clients["review"]
                 review = perform_review(
                     paper_text,
-                    model="gpt-4o-2024-05-13",
-                    client=openai.OpenAI(),
+                    model=review_client_model,
+                    client=review_client,
                     num_reflections=5,
                     num_fs_examples=1,
                     num_reviews_ensemble=5,
@@ -335,15 +372,30 @@ if __name__ == "__main__":
     if args.writeup == "latex" and not check_latex_dependencies():
         sys.exit(1)
 
-    # Create client
-    client, client_model = create_client(args.model)
+    # Determine models to use for each phase
+    models = {
+        "idea": args.idea_model or args.model,
+        "experiment": args.experiment_model or args.model,
+        "writeup": args.writeup_model or args.model,
+        "review": args.review_model,
+    }
+
+    # Create clients for each phase
+    clients = {
+        "idea": create_client(models["idea"]),
+        "experiment": create_client(models["experiment"]),
+        "writeup": create_client(models["writeup"]),
+        "review": create_client(models["review"]),
+    }
 
     base_dir = osp.join("templates", args.experiment)
     results_dir = osp.join("results", args.experiment)
+
+    idea_client, idea_client_model = clients["idea"]
     ideas = generate_ideas(
         base_dir,
-        client=client,
-        model=client_model,
+        client=idea_client,
+        model=idea_client_model,
         skip_generation=args.skip_idea_generation,
         max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
@@ -352,8 +404,8 @@ if __name__ == "__main__":
         ideas = check_idea_novelty(
             ideas,
             base_dir=base_dir,
-            client=client,
-            model=client_model,
+            client=idea_client,
+            model=idea_client_model,
             engine=args.engine,
         )
 
@@ -378,12 +430,11 @@ if __name__ == "__main__":
                     queue,
                     base_dir,
                     results_dir,
-                    args.model,
-                    client,
-                    client_model,
+                    models,
                     args.writeup,
                     args.improvement,
                     gpu_id,
+                    args.engine,
                 ),
             )
             p.start()
@@ -406,11 +457,10 @@ if __name__ == "__main__":
                     base_dir,
                     results_dir,
                     idea,
-                    args.model,
-                    client,
-                    client_model,
+                    models,
                     args.writeup,
                     args.improvement,
+                    engine=args.engine,
                 )
                 print(f"Completed idea: {idea['Name']}, Success: {success}")
             except Exception as e:
