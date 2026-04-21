@@ -14,6 +14,10 @@ AVAILABLE_LLMS = [
     # Anthropic models
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
+    # Anthropic Claude 4.x family
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
     # OpenAI models
     "gpt-4o-mini",
     "gpt-4o-mini-2024-07-18",

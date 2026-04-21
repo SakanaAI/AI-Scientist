@@ -7,7 +7,14 @@ import os.path as osp
 import shutil
 import sys
 import time
-import torch
+try:
+    import torch
+except Exception as _torch_err:
+    # torch is only needed for GPU enumeration; non-torch templates (e.g. sklearn-based)
+    # should still run without it. Fall through with torch=None.
+    torch = None
+    print(f"[warn] torch import failed ({_torch_err.__class__.__name__}); "
+          f"GPU auto-detection disabled. Use --gpus to force-select if needed.")
 from aider.coders import Coder
 from aider.io import InputOutput
 from aider.models import Model
@@ -95,7 +102,12 @@ def parse_arguments():
 def get_available_gpus(gpu_ids=None):
     if gpu_ids is not None:
         return [int(gpu_id) for gpu_id in gpu_ids.split(",")]
-    return list(range(torch.cuda.device_count()))
+    if torch is None or not hasattr(torch, "cuda"):
+        return []
+    try:
+        return list(range(torch.cuda.device_count()))
+    except Exception:
+        return []
 
 
 def check_latex_dependencies():
@@ -204,6 +216,8 @@ def do_idea(
             main_model = Model("deepseek/deepseek-reasoner")
         elif model == "llama3.1-405b":
             main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+        elif model.startswith("claude-"):
+            main_model = Model("anthropic/" + model)
         else:
             main_model = Model(model)
         coder = Coder.create(
@@ -214,6 +228,12 @@ def do_idea(
             use_git=False,
             edit_format="diff",
         )
+        # Bump Aider's retry budget when SEARCH/REPLACE blocks fail to match
+        # (default is 3; increase so transient mismatches don't abort writeup)
+        try:
+            coder.max_reflections = 6
+        except Exception:
+            pass
 
         print_time()
         print(f"*Starting Experiments*")
@@ -240,6 +260,8 @@ def do_idea(
                 main_model = Model("deepseek/deepseek-reasoner")
             elif model == "llama3.1-405b":
                 main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
+            elif model.startswith("claude-"):
+                main_model = Model("anthropic/" + model)
             else:
                 main_model = Model(model)
             coder = Coder.create(
@@ -250,6 +272,10 @@ def do_idea(
                 use_git=False,
                 edit_format="diff",
             )
+            try:
+                coder.max_reflections = 6
+            except Exception:
+                pass
             try:
                 perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
             except Exception as e:
