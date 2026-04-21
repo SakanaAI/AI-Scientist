@@ -192,6 +192,14 @@ error_list = """- Unenclosed math symbols
 - Duplicate headers, e.g. duplicated \\section{{Introduction}} or \\end{{document}}
 - Unescaped symbols, e.g. shakespeare_char should be shakespeare\\_char in text
 - Incorrect closing of environments, e.g. </end{{figure}}> instead of \\end{{figure}}
+- Any non-English text (Korean, Chinese, Japanese, etc.) in the paper body or LaTeX comments
+"""
+
+LANGUAGE_RULE = """
+IMPORTANT — LANGUAGE RULE:
+Write 100% of the paper body AND all LaTeX comments in English only.
+Do NOT use Korean, Chinese, Japanese, or any other non-English language anywhere in `template.tex`.
+When producing *SEARCH/REPLACE* blocks, the SEARCH section MUST match the existing file byte-for-byte (including whitespace); do not invent lines that are not in the file.
 """
 
 refinement_prompt = (
@@ -403,13 +411,13 @@ def perform_writeup(
 ):
     # CURRENTLY ASSUMES LATEX
     abstract_prompt = f"""We've provided the `latex/template.tex` file to the project. We will be filling it in section by section.
-
+{LANGUAGE_RULE}
 First, please fill in the "Title" and "Abstract" sections of the writeup.
 
 Some tips are provided below:
 {per_section_tips["Abstract"]}
 
-Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment.
+Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment (in English).
 
 Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
 """
@@ -429,14 +437,14 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
     ]:
         section_prompt = f"""Please fill in the {section} of the writeup. Some tips are provided below:
 {per_section_tips[section]}
-
+{LANGUAGE_RULE}
 Be sure to use \cite or \citet where relevant, referring to the works provided in the file.
 Do not cite anything that is not already in `references.bib`. Do not add any new entries to this.
 
 Keep the experimental results (figures and tables) only in the Results section, and make sure that any captions are filled in.
 In this pass, do not reference anything in later sections of the paper.
 
-Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment.
+Before every paragraph, please include a brief description of what you plan to write in that paragraph in a comment (in English).
 
 Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these edits.
 """
@@ -451,9 +459,9 @@ Be sure to first name the file and use *SEARCH/REPLACE* blocks to perform these 
     section_prompt = f"""Please fill in the Related Work of the writeup. Some tips are provided below:
 
 {per_section_tips["Related Work"]}
-
+{LANGUAGE_RULE}
 For this section, very briefly sketch out the structure of the section, and clearly indicate what papers you intend to include.
-Do this all in LaTeX comments using %.
+Do this all in LaTeX comments using % (comments MUST be in English).
 The related work should be concise, only plan to discuss the most relevant work.
 Do not modify `references.bib` to add any new citations, this will be filled in at a later stage.
 
