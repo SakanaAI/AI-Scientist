@@ -39,7 +39,9 @@ class ModelManager:
                         discovered.append(config)
                         with open(filepath, 'w') as f:
                             json.dump(config, f, indent=4)
+                        print(f"✅ Verified: {config['name']}")
                     else:
+                        print(f"❌ Unsuitable: {filename}")
                         shutil.move(filepath, os.path.join(self.unsuitable_dir, filename))
                 except Exception:
                     shutil.move(filepath, os.path.join(self.unsuitable_dir, filename))
@@ -54,7 +56,7 @@ class ModelManager:
                 "max_tokens": 50,
                 "temperature": 0.0
             }
-            r = requests.post(url, json=payload, timeout=10)
+            r = requests.post(url, json=payload, timeout=5)
             if r.status_code == 200:
                 content = r.json()["choices"][0]["message"]["content"].strip()
                 if "name" not in config or config["name"] == "unknown":
@@ -62,16 +64,16 @@ class ModelManager:
                 return True
             return False
         except Exception:
-            # Fallback to filename if unreachable but has URL
-            if "name" not in config:
-                config["name"] = filename.split(".")[0]
-            return True
+            # If we explicitly have a name and want to skip health check, we could,
+            # but for a benchmark, being unreachable is a failure.
+            return False
 
 class SwarmEngine:
     def __init__(self, models):
         self.models = models
 
-    def call_model(self, model_config, prompt, system_message="You are a helpful assistant.", max_tokens=256, temperature=0.3):
+    def call_model(self, model_config, prompt, system_message="You are a helpful assistant.", max_tokens=400, temperature=0.3):
+        url = model_config["url"]
         try:
             start = time.time()
             payload = {
@@ -82,7 +84,7 @@ class SwarmEngine:
                 "max_tokens": max_tokens,
                 "temperature": temperature
             }
-            r = requests.post(model_config["url"], json=payload, timeout=120)
+            r = requests.post(url, json=payload, timeout=120)
             r.raise_for_status()
             data = r.json()
             content = data["choices"][0]["message"]["content"]
@@ -97,103 +99,134 @@ class SwarmEngine:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def strategy_chain(self, model_a, model_b, task):
+        res_a = self.call_model(model_a, task["prompt"])
+        if not res_a["success"]: return res_a
+        res_b = self.call_model(model_b, f"Refine and improve this scientific work: {res_a['text']}")
+        if res_b["success"]:
+            res_b["total_latency"] = res_a["latency"] + res_b["latency"]
+            res_b["role_results"] = {"architect": res_a, "engineer": res_b}
+        return res_b
+
+    def strategy_router(self, director, models, task):
+        names = [m["name"] for m in models]
+        route_p = f"Pick best model for: {task['prompt']}. Options: {names}. Return ONLY name."
+        route_res = self.call_model(director, route_p, max_tokens=20)
+        if not route_res["success"]: return route_res
+        chosen = next((m for m in models if m["name"] in route_res["text"]), models[0])
+        final = self.call_model(chosen, task["prompt"])
+        if final["success"]:
+            final["total_latency"] = route_res["latency"] + final["latency"]
+            final["role_results"] = {"director": route_res, "worker": final}
+        return final
+
 class Evaluator:
-    @staticmethod
-    def score_response(response, task):
-        if not response["success"]:
-            return 0
+    def __init__(self, judge_config=None):
+        self.judge_model = judge_config
 
-        score = 0.5
+    def score_architect(self, metrics):
+        return metrics.get("creativity", 0.5) * 0.6 + metrics.get("syntax", 0.5) * 0.4
 
-        if task.get("requires_json", False):
-            try:
-                json.loads(response["text"])
-                score += 0.4
-            except:
-                if "```json" in response["text"]:
-                    score += 0.2
-                else:
-                    score -= 0.3
+    def score_engineer(self, metrics, structural):
+        return metrics.get("accuracy", 0.5) * 0.6 + structural * 0.4
 
-        if len(response["text"].split()) > 20:
-            score += 0.1
+    def score_response(self, task, response_text, engine=None, role=None):
+        score_structural = 1.0
+        if task.get("expected_format") == "json":
+            try: json.loads(response_text)
+            except: score_structural = 0.5
 
-        return max(0, min(1.0, score))
+        safety_score = 1.0
+        for p in ["sudo", "rm -rf", "eval("]:
+            if p in response_text.lower(): safety_score = 0.0
+
+        llm_scores = {"creativity": 0.5, "accuracy": 0.5, "syntax": 0.5, "safety": 1.0}
+
+        if self.judge_model and engine:
+            judge_p = f"Rate this AI response (0-1) for Accuracy, Creativity, Syntax, Safety. Task: {task['prompt']}. Response: {response_text}. Return ONLY JSON."
+            res = engine.call_model(self.judge_model, judge_p)
+            if res["success"]:
+                try:
+                    clean_text = res["text"].strip().replace("```json", "").replace("```", "")
+                    llm_scores = json.loads(clean_text)
+                except: pass
+
+        llm_scores["safety"] = min(llm_scores.get("safety", 1.0), safety_score)
+
+        if role == "architect":
+            base = self.score_architect(llm_scores)
+        elif role == "engineer":
+            base = self.score_engineer(llm_scores, score_structural)
+        else:
+            base = (llm_scores.get("accuracy", 0.4) + llm_scores.get("creativity", 0.2) +
+                    llm_scores.get("syntax", 0.2) + score_structural * 0.2)
+
+        return {"final_score": base * llm_scores["safety"], "role_score": base, "metrics": llm_scores}
 
 class BenchmarkRunner:
     def __init__(self, base_dir="TheChooser"):
         self.base_dir = base_dir
-        # Ensure recipes is accessible
-        import sys
-        sys.path.append(base_dir)
-        import recipes as rcp
-        self.recipes = rcp
-
         self.mm = ModelManager(base_dir)
         self.models = self.mm.discover_models()
         self.engine = SwarmEngine(self.models)
-        self.evaluator = Evaluator()
+        self.evaluator = Evaluator(self.models[0] if self.models else None)
         with open(os.path.join(base_dir, "tasks", "tasks.json"), "r") as f:
             self.tasks = json.load(f)
 
     def run_all(self):
-        results = {"solo": [], "duo": [], "leaderboard": {}, "void_analysis": {}}
+        if not self.models:
+            print("No verified models available. Check connections.")
+            return
 
+        results = {"solo": [], "duo": [], "leaderboard": {}, "void_analysis": {}}
         print(f"🚀 TheChooser starting benchmark with {len(self.models)} models and {len(self.tasks)} tasks.")
 
         cat_scores = {}
 
+        # 1. Solo Runs
         for model in self.models:
             print(f"  Testing Solo: {model['name']}...")
             model_scores = []
             for task in self.tasks:
-                res = self.engine.call_model(model, task["prompt"])
-                score = self.evaluator.score_response(res, task)
-                model_scores.append(score)
+                prompt = task["prompt"]
+                if task["id"] == "scientific_idea_gen": prompt = recipes.IDEA_GEN_PROMPT
+                elif task["id"] == "peer_review": prompt = recipes.REVIEW_PROMPT
+
+                res = self.engine.call_model(model, prompt)
+                e = self.evaluator.score_response(task, res["text"], self.engine)
+                model_scores.append(e["final_score"])
 
                 results["solo"].append({
                     "model": model["name"],
                     "task": task["name"],
                     "category": task["category"],
-                    "score": score,
-                    "latency": res.get("latency"),
-                    "tps": res.get("tokens", 0) / res.get("latency", 1) if res.get("latency") else 0
+                    "score": e["final_score"],
+                    "metrics": e["metrics"]
                 })
-
                 cat = task["category"]
                 if cat not in cat_scores: cat_scores[cat] = []
-                cat_scores[cat].append(score)
+                cat_scores[cat].append(e["final_score"])
+            results["leaderboard"][model["name"]] = mean(model_scores)
 
-            results["leaderboard"][model["name"]] = mean(model_scores) if model_scores else 0
-
-        for pair in itertools.permutations(self.models, 2):
-            model_a, model_b = pair
-            pair_name = f"{model_a['name']} + {model_b['name']}"
+        # 2. Duo Runs (Chains)
+        for m_a, m_b in itertools.permutations(self.models, 2):
+            pair_name = f"{m_a['name']} + {m_b['name']}"
             print(f"  Testing Duo: {pair_name}...")
             pair_scores = []
             for task in self.tasks:
-                # Use recipes based on task
-                if task["id"] == "scientific_idea_gen":
-                    prompt = self.recipes.IDEA_GEN_PROMPT
-                elif task["id"] == "peer_review":
-                    prompt = self.recipes.REVIEW_PROMPT
-                else:
-                    prompt = task["prompt"]
-
-                res_a = self.engine.call_model(model_a, prompt)
-                refine_prompt = f"Refine this scientific draft: {res_a['text']}\n\nTask: {task['prompt']}"
-                res_b = self.engine.call_model(model_b, refine_prompt)
-
-                score = self.evaluator.score_response(res_b, task)
-                pair_scores.append(score)
-                results["duo"].append({
-                    "pair": pair_name,
-                    "task": task["name"],
-                    "score": score,
-                    "total_latency": res_a.get("latency", 0) + res_b.get("latency", 0)
-                })
+                res = self.engine.strategy_chain(m_a, m_b, task)
+                if res["success"]:
+                    e = self.evaluator.score_response(task, res["text"], self.engine)
+                    pair_scores.append(e["final_score"])
+                    results["duo"].append({
+                        "pair": pair_name,
+                        "task": task["name"],
+                        "score": e["final_score"],
+                        "total_latency": res.get("total_latency")
+                    })
             results["leaderboard"][pair_name] = mean(pair_scores) if pair_scores else 0
 
+        # Void Analysis
         for cat, scores in cat_scores.items():
             avg_cat = mean(scores) if scores else 0
             results["void_analysis"][cat] = {
@@ -208,14 +241,12 @@ class BenchmarkRunner:
     def save_results(self, results):
         timestamp = int(time.time())
         path = os.path.join(self.base_dir, "results", f"benchmark_{timestamp}.json")
-        if not os.path.exists(os.path.dirname(path)):
-            os.makedirs(os.path.dirname(path))
         with open(path, "w") as f:
             json.dump(results, f, indent=4)
         print(f"✅ Results saved to {path}")
 
     def print_summary(self, results):
-        print("\n=== THE CHOOSER LEADERBOARD ===")
+        print("\n" + "="*50 + "\n   THE CHOOSER LEADERBOARD\n" + "="*50)
         sorted_board = sorted(results["leaderboard"].items(), key=lambda x: x[1], reverse=True)
         for name, score in sorted_board:
             vram = 0
@@ -227,12 +258,6 @@ class BenchmarkRunner:
 
             val_score = score / vram if vram > 0 else 0
             print(f"{name:30} | Score: {score:.2f} | VRAM: {vram:4.1f}GB | Intel/GB: {val_score:.3f}")
-
-        print("\n=== VOID ANALYSIS (HF CATEGORIES) ===")
-        for cat, info in results["void_analysis"].items():
-            print(f"{cat:25} | {info['status']:10} | Avg Score: {info['avg_score']:.2f}")
-
-        print("\n💡 Recommendation: Look for models on Hugging Face tagged with categories marked as VOID or WEAK.")
 
 if __name__ == "__main__":
     runner = BenchmarkRunner()
