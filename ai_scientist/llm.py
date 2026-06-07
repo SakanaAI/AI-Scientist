@@ -62,6 +62,16 @@ AVAILABLE_LLMS = [
 ]
 
 
+def _required_env(name, provider, model):
+    value = os.environ.get(name)
+    if value:
+        return value
+    raise EnvironmentError(
+        f"{provider} model '{model}' requires the {name} environment variable. "
+        f"Set {name} or choose a model backed by a configured provider."
+    )
+
+
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
 def get_batch_responses_from_llm(
@@ -330,21 +340,21 @@ def create_client(model):
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
     elif model in ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]:
-        print(f"Using OpenAI API with {model}.")
+        print(f"Using DeepSeek API with {model}.")
         return openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"],
+            api_key=_required_env("DEEPSEEK_API_KEY", "DeepSeek", model),
             base_url="https://api.deepseek.com"
         ), model
     elif model == "llama3.1-405b":
-        print(f"Using OpenAI API with {model}.")
+        print(f"Using OpenRouter API with {model}.")
         return openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
+            api_key=_required_env("OPENROUTER_API_KEY", "OpenRouter", model),
             base_url="https://openrouter.ai/api/v1"
         ), "meta-llama/llama-3.1-405b-instruct"
     elif "gemini" in model:
-        print(f"Using OpenAI API with {model}.")
+        print(f"Using Google Gemini API with {model}.")
         return openai.OpenAI(
-            api_key=os.environ["GEMINI_API_KEY"],
+            api_key=_required_env("GEMINI_API_KEY", "Google Gemini", model),
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         ), model
     else:

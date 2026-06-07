@@ -125,6 +125,12 @@ By default, this uses the `DEEPSEEK_API_KEY` environment variable.
 
 By default, this uses the `OPENROUTER_API_KEY` environment variable.
 
+API keys are only required for the provider selected by `--model`. For example,
+OpenRouter credentials are not needed when running an OpenAI, Anthropic,
+DeepSeek, Gemini, Bedrock, or Vertex AI model. This keeps unattended agent
+environments such as Codex or Claude Code from requiring unrelated provider
+secrets; configure only the key for the model you intend to run.
+
 #### Google Gemini
 We support Google Gemini models (e.g., "gemini-1.5-flash", "gemini-1.5-pro") via the [google-generativeai](https://pypi.org/project/google-generativeai) Python library. By default, it uses the environment variable:
 
