@@ -93,7 +93,7 @@ By default, this uses the `ANTHROPIC_API_KEY` environment variable.
 For Claude models provided by [Amazon Bedrock](https://aws.amazon.com/bedrock/), please install these additional packages:
 
 ```bash
-pip install anthropic[bedrock]
+pip install 'anthropic[bedrock]'
 ```
 
 Next, specify a set of valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html):
@@ -106,7 +106,7 @@ For Claude models provided by [Vertex AI Model Garden](https://cloud.google.com/
 
 ```bash
 pip install google-cloud-aiplatform
-pip install anthropic[vertex]
+pip install 'anthropic[vertex]'
 ```
 
 Next, set up valid authentication for a [Google Cloud project](https://cloud.google.com/vertex-ai/docs/authentication), for example by providing the region and project ID:
