@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 from ai_scientist.generate_ideas import search_for_papers
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.utils import run_chktex
 
 
 # GENERATE LATEX
@@ -77,7 +78,7 @@ If duplicated, identify the best location for the section header and remove any 
     # Iteratively fix any LaTeX bugs
     for i in range(num_error_corrections):
         # Filter trivial bugs in chktex
-        check_output = os.popen(f"chktex {writeup_file} -q -n2 -n24 -n13 -n1").read()
+        check_output = run_chktex(writeup_file)
         if check_output:
             prompt = f"""Please fix the following LaTeX errors in `template.tex` guided by the output of `chktek`:
 {check_output}.

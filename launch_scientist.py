@@ -18,6 +18,7 @@ from ai_scientist.llm import create_client, AVAILABLE_LLMS
 from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
 from ai_scientist.perform_writeup import perform_writeup, generate_latex
+from ai_scientist.utils import validate_idea_name
 
 NUM_REFLECTIONS = 3
 
@@ -164,7 +165,7 @@ def do_idea(
 ):
     ## CREATE PROJECT FOLDER
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    idea_name = f"{timestamp}_{idea['Name']}"
+    idea_name = f"{timestamp}_{validate_idea_name(idea['Name'])}"
     folder_name = osp.join(results_dir, idea_name)
     assert not osp.exists(folder_name), f"Folder {folder_name} already exists."
     destination_dir = folder_name
